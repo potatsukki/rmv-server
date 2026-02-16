@@ -29,6 +29,7 @@ import configRoutes from './modules/config/config.routes.js';
 import visitReportRoutes from './modules/visit-reports/visit-reports.routes.js';
 
 const app = express();
+app.set('trust proxy', 1);
 
 // ── Security Headers ──
 app.use(
