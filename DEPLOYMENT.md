@@ -39,6 +39,19 @@ cp /opt/rmv/rmv-server/.env.production.example /opt/rmv/rmv-server/.env
 # edit /opt/rmv/rmv-server/.env and fill required values
 ```
 
+Required production values:
+
+- `MONGODB_URI` must point to your Atlas cluster.
+- `SUPER_ADMIN_PASSWORD` must not be `Admin@12345`.
+- `CSRF_SECRET` must be a strong value (16+ chars).
+- `COOKIE_DOMAIN=rmvfabrication.app`
+- `COOKIE_SECURE=true`
+
+MongoDB Atlas network access:
+
+- Add VPS IP `188.166.177.69` in Atlas `Network Access`, or use `0.0.0.0/0` for thesis/demo use.
+- If this is missing, backend startup fails and `/api/*` returns `502` via nginx.
+
 ## Start stack
 
 ```bash
@@ -55,6 +68,15 @@ cd /opt/rmv/rmv-server/deploy
 chmod +x scripts/init-letsencrypt.sh
 ./scripts/init-letsencrypt.sh rmvfabrication.app you@example.com
 ```
+
+Verification:
+
+```bash
+curl -I https://rmvfabrication.app
+curl -i https://rmvfabrication.app/api/v1/health
+```
+
+If HTTPS shows certificate warnings, rerun the script after DNS propagation is complete.
 
 ## GitHub Actions secrets
 
