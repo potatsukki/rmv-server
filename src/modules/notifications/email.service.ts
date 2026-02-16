@@ -1,22 +1,33 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
+import sgMail from '@sendgrid/mail';
 import Handlebars from 'handlebars';
 import { env } from '../../config/env.js';
 import { EmailLog } from '../../models/index.js';
 import { EmailLogStatus } from '../../utils/constants.js';
 import { logger } from '../../utils/logger.js';
 
-const transporter: Transporter = nodemailer.createTransport({
-  host: env.SMTP_HOST,
-  port: env.SMTP_PORT,
-  secure: env.SMTP_PORT === 465,
-  auth: {
-    user: env.SMTP_USER,
-    pass: env.SMTP_PASS,
-  },
-});
+type EmailAttachment = { content: string; filename: string; type: string };
 
-// ── Template definitions ──
+const useSendGridApi = env.EMAIL_PROVIDER === 'sendgrid_api';
+
+if (useSendGridApi) {
+  sgMail.setApiKey(env.SENDGRID_API_KEY);
+}
+
+const transporter: Transporter | null = useSendGridApi
+  ? null
+  : nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_PORT === 465,
+      auth: {
+        user: env.SMTP_USER,
+        pass: env.SMTP_PASS,
+      },
+    });
+
+// Template definitions
 const templates: Record<string, string> = {
   otp: `
     <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -123,16 +134,58 @@ for (const [key, html] of Object.entries(templates)) {
   compiledTemplates[key] = Handlebars.compile(html);
 }
 
-// ── Retry config ──
+// Retry config
 const RETRY_DELAYS = [60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000]; // 1min, 5min, 15min
 
-// ── Core send function ──
+async function sendWithProvider(
+  to: string,
+  subject: string,
+  html: string,
+  attachments?: EmailAttachment[],
+): Promise<void> {
+  if (useSendGridApi) {
+    await sgMail.send({
+      to,
+      from: {
+        email: env.SMTP_FROM_EMAIL,
+        name: env.SMTP_FROM_NAME,
+      },
+      subject,
+      html,
+      attachments: attachments?.map(a => ({
+        content: a.content,
+        filename: a.filename,
+        type: a.type,
+        disposition: 'attachment',
+      })),
+    });
+    return;
+  }
+
+  if (!transporter) {
+    throw new Error('SMTP transporter is not configured');
+  }
+
+  await transporter.sendMail({
+    to,
+    from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+    subject,
+    html,
+    attachments: attachments?.map(a => ({
+      content: Buffer.from(a.content, 'base64'),
+      filename: a.filename,
+      contentType: a.type,
+    })),
+  });
+}
+
+// Core send function
 async function sendEmail(
   to: string,
   subject: string,
   templateKey: string,
   data: Record<string, unknown>,
-  attachments?: Array<{ content: string; filename: string; type: string }>,
+  attachments?: EmailAttachment[],
 ): Promise<void> {
   const htmlContent = compiledTemplates[templateKey]
     ? compiledTemplates[templateKey](data)
@@ -148,17 +201,7 @@ async function sendEmail(
   });
 
   try {
-    await transporter.sendMail({
-      to,
-      from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
-      subject,
-      html: htmlContent,
-      attachments: attachments?.map(a => ({
-        content: Buffer.from(a.content, 'base64'),
-        filename: a.filename,
-        contentType: a.type,
-      })),
-    });
+    await sendWithProvider(to, subject, htmlContent, attachments);
 
     emailLog.status = EmailLogStatus.SENT;
     emailLog.attempts = 1;
@@ -179,7 +222,7 @@ async function sendEmail(
   }
 }
 
-// ── Public email functions ──
+// Public email functions
 
 export async function sendOtpEmail(to: string, otp: string): Promise<void> {
   await sendEmail(to, 'Email Verification - RMV Stainless Steel', 'otp', { otp });
@@ -229,7 +272,7 @@ export async function sendFabricationUpdateEmail(
   await sendEmail(to, 'Fabrication Update - RMV Stainless Steel', 'fabrication_update', data);
 }
 
-// ── Retry processor (called by cron or startup) ──
+// Retry processor (called by cron or startup)
 export async function processEmailRetries(): Promise<void> {
   const failedEmails = await EmailLog.find({
     status: EmailLogStatus.FAILED,
@@ -243,12 +286,7 @@ export async function processEmailRetries(): Promise<void> {
         ? compiledTemplates[emailLog.template]({})
         : '';
 
-      await transporter.sendMail({
-        to: emailLog.to,
-        from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
-        subject: emailLog.subject,
-        html: htmlContent,
-      });
+      await sendWithProvider(emailLog.to, emailLog.subject, htmlContent);
 
       emailLog.status = EmailLogStatus.SENT;
       emailLog.lastAttemptAt = new Date();

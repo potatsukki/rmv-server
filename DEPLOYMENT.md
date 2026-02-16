@@ -46,6 +46,9 @@ Required production values:
 - `CSRF_SECRET` must be a strong value (16+ chars).
 - `COOKIE_DOMAIN=rmvfabrication.app`
 - `COOKIE_SECURE=true`
+- `EMAIL_PROVIDER=smtp` or `EMAIL_PROVIDER=sendgrid_api`
+- If `EMAIL_PROVIDER=sendgrid_api`, set `SENDGRID_API_KEY`.
+- If `EMAIL_PROVIDER=smtp`, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`.
 
 MongoDB Atlas network access:
 

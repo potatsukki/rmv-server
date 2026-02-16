@@ -25,13 +25,17 @@ const envSchema = z.object({
   // CORS
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
-  // SMTP (Google)
+  // Mail provider
+  EMAIL_PROVIDER: z.enum(['smtp', 'sendgrid_api']).default('smtp'),
+
+  // SMTP
   SMTP_HOST: z.string().default('smtp.gmail.com'),
   SMTP_PORT: z.coerce.number().default(587),
-  SMTP_USER: z.string().min(1),
-  SMTP_PASS: z.string().min(1),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
   SMTP_FROM_EMAIL: z.string().email(),
   SMTP_FROM_NAME: z.string().default('RMV Stainless Steel'),
+  SENDGRID_API_KEY: z.string().default(''),
 
   // R2 (optional in dev)
   R2_ACCOUNT_ID: z.string().default('placeholder'),
@@ -80,6 +84,20 @@ if (envData.NODE_ENV === 'production') {
 
   if (envData.COOKIE_DOMAIN === 'localhost') {
     prodConfigErrors.push('COOKIE_DOMAIN cannot be localhost in production');
+  }
+
+  if (envData.EMAIL_PROVIDER === 'smtp') {
+    if (!envData.SMTP_USER) {
+      prodConfigErrors.push('SMTP_USER is required when EMAIL_PROVIDER=smtp');
+    }
+
+    if (!envData.SMTP_PASS) {
+      prodConfigErrors.push('SMTP_PASS is required when EMAIL_PROVIDER=smtp');
+    }
+  }
+
+  if (envData.EMAIL_PROVIDER === 'sendgrid_api' && !envData.SENDGRID_API_KEY) {
+    prodConfigErrors.push('SENDGRID_API_KEY is required when EMAIL_PROVIDER=sendgrid_api');
   }
 
   if (prodConfigErrors.length > 0) {
