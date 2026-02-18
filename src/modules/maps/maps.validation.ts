@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const computeFeeSchema = z.object({
+export const coordinateSchema = z.object({
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
 });

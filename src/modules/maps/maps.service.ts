@@ -1,43 +1,39 @@
 import crypto from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
 import axios from 'axios';
+import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
+import { point } from '@turf/helpers';
+import type { Feature, MultiPolygon, Polygon } from 'geojson';
+import defaultNcrBoundary from './data/ncr-boundary.json';
 import { env } from '../../config/env.js';
-import { RouteCache, Config } from '../../models/index.js';
+import { Config, RouteCache } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import { logger } from '../../utils/logger.js';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// ── Default fee config (overridable via Config model) ──
-interface OcularFeeConfig {
+interface OcularSettings {
+  shopLatitude: number;
+  shopLongitude: number;
+  baseCoveredKm: number;
   baseFee: number;
-  baseKm: number;
-  extraRatePerKm: number;
+  perKmRate: number;
   maxDistanceKm: number;
+  ncrPolygonFile: string;
 }
 
-const DEFAULT_FEE_CONFIG: OcularFeeConfig = {
-  baseFee: 500,
-  baseKm: 10,
-  extraRatePerKm: 30,
-  maxDistanceKm: 100,
-};
-
-async function getFeeConfig(): Promise<OcularFeeConfig> {
-  const config = await Config.findOne({ key: 'ocular_fee_config' });
-  if (config) return config.value as OcularFeeConfig;
-  return DEFAULT_FEE_CONFIG;
+interface LegacyOcularFeeConfig {
+  baseFee?: number;
+  baseKm?: number;
+  extraRatePerKm?: number;
+  maxDistanceKm?: number;
 }
 
-// ── RMV Shop Location (Malabon, Philippines) ──
-const SHOP_LOCATION = { lat: 14.6617, lng: 120.9567 };
-
-function hashCoords(lat: number, lng: number): string {
-  // Round to 4 decimal places for cache key stability (~11m precision)
-  const rounded = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-  return crypto.createHash('md5').update(rounded).digest('hex');
+interface LatLng {
+  lat: number;
+  lng: number;
 }
-
-// ── OpenRouteService Directions API ──
 
 interface DirectionsResult {
   distanceKm: number;
@@ -46,12 +42,144 @@ interface DirectionsResult {
   polyline?: string;
 }
 
-async function fetchDirections(
-  origin: { lat: number; lng: number },
-  destination: { lat: number; lng: number },
-): Promise<DirectionsResult> {
+const DEFAULT_SETTINGS: OcularSettings = {
+  shopLatitude: 14.6617,
+  shopLongitude: 120.9567,
+  baseCoveredKm: 10,
+  baseFee: 350,
+  perKmRate: 60,
+  maxDistanceKm: 100,
+  ncrPolygonFile: 'src/modules/maps/data/ncr-boundary.json',
+};
+
+let cachedBoundaryPath: string | null = null;
+let cachedBoundaryFeatures: Array<Feature<Polygon | MultiPolygon>> | null = null;
+
+function toNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function toString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function hashCoords(lat: number, lng: number): string {
+  const rounded = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  return crypto.createHash('md5').update(rounded).digest('hex');
+}
+
+async function getOcularSettings(): Promise<OcularSettings> {
+  const keys = [
+    'shopLatitude',
+    'shopLongitude',
+    'baseCoveredKm',
+    'baseFee',
+    'perKmRate',
+    'maxDistanceKm',
+    'ncrPolygonFile',
+    'ocular_fee_config', // legacy fallback
+  ];
+
+  const configs = await Config.find({ key: { $in: keys } }).lean();
+  const byKey = new Map(configs.map((cfg) => [cfg.key, cfg.value]));
+
+  const legacy = byKey.get('ocular_fee_config') as LegacyOcularFeeConfig | undefined;
+
+  return {
+    shopLatitude: toNumber(byKey.get('shopLatitude'), DEFAULT_SETTINGS.shopLatitude),
+    shopLongitude: toNumber(byKey.get('shopLongitude'), DEFAULT_SETTINGS.shopLongitude),
+    baseCoveredKm: toNumber(
+      byKey.get('baseCoveredKm'),
+      toNumber(legacy?.baseKm, DEFAULT_SETTINGS.baseCoveredKm),
+    ),
+    baseFee: toNumber(byKey.get('baseFee'), toNumber(legacy?.baseFee, DEFAULT_SETTINGS.baseFee)),
+    perKmRate: toNumber(
+      byKey.get('perKmRate'),
+      toNumber(legacy?.extraRatePerKm, DEFAULT_SETTINGS.perKmRate),
+    ),
+    maxDistanceKm: toNumber(
+      byKey.get('maxDistanceKm'),
+      toNumber(legacy?.maxDistanceKm, DEFAULT_SETTINGS.maxDistanceKm),
+    ),
+    ncrPolygonFile: toString(byKey.get('ncrPolygonFile'), DEFAULT_SETTINGS.ncrPolygonFile),
+  };
+}
+
+function extractPolygonFeatures(
+  boundaryData: unknown,
+): Array<Feature<Polygon | MultiPolygon>> {
+  const parsed = boundaryData as {
+    type?: string;
+    features?: Array<Feature<Polygon | MultiPolygon>>;
+    geometry?: { type?: string };
+  };
+
+  let features: Array<Feature<Polygon | MultiPolygon>> = [];
+  if (parsed.type === 'FeatureCollection' && Array.isArray(parsed.features)) {
+    features = parsed.features.filter((feature) =>
+      ['Polygon', 'MultiPolygon'].includes(feature?.geometry?.type ?? ''),
+    );
+  } else if (parsed.type === 'Feature' && ['Polygon', 'MultiPolygon'].includes(parsed.geometry?.type ?? '')) {
+    features = [parsed as Feature<Polygon | MultiPolygon>];
+  }
+
+  return features;
+}
+
+async function getNcrBoundaryFeatures(
+  polygonFilePath: string,
+): Promise<Array<Feature<Polygon | MultiPolygon>>> {
+  const resolvedPath = path.isAbsolute(polygonFilePath)
+    ? polygonFilePath
+    : path.resolve(process.cwd(), polygonFilePath);
+
+  if (cachedBoundaryPath === resolvedPath && cachedBoundaryFeatures) {
+    return cachedBoundaryFeatures;
+  }
+
   try {
-    // ORS expects [lng, lat] order
+    const raw = await fs.readFile(resolvedPath, 'utf8');
+    const features = extractPolygonFeatures(JSON.parse(raw) as unknown);
+
+    if (!features.length) {
+      throw new Error('No polygon features found in boundary file');
+    }
+
+    cachedBoundaryPath = resolvedPath;
+    cachedBoundaryFeatures = features;
+    return features;
+  } catch (error) {
+    logger.warn('Failed to load configured NCR boundary polygon, using bundled default.', {
+      polygonFilePath,
+      error,
+    });
+
+    const fallbackFeatures = extractPolygonFeatures(defaultNcrBoundary as unknown);
+    if (!fallbackFeatures.length) {
+      throw AppError.internal('Failed to load NCR boundary data');
+    }
+
+    cachedBoundaryPath = '__bundled_default__';
+    cachedBoundaryFeatures = fallbackFeatures;
+    return fallbackFeatures;
+  }
+}
+
+async function isWithinNcr(customerLocation: LatLng, polygonFilePath: string): Promise<boolean> {
+  const boundaryFeatures = await getNcrBoundaryFeatures(polygonFilePath);
+  const customerPoint = point([customerLocation.lng, customerLocation.lat]);
+  return boundaryFeatures.some((feature) =>
+    booleanPointInPolygon(customerPoint, feature as Feature<Polygon | MultiPolygon>),
+  );
+}
+
+async function fetchDirections(origin: LatLng, destination: LatLng): Promise<DirectionsResult> {
+  try {
     const response = await axios.post(
       'https://api.openrouteservice.org/v2/directions/driving-car',
       {
@@ -69,46 +197,53 @@ async function fetchDirections(
       },
     );
 
-    const data = response.data;
+    const data = response.data as {
+      routes?: Array<{
+        summary?: { distance: number; duration: number };
+        geometry?: string;
+        segments?: Array<{ steps?: Array<{ type?: number }> }>;
+      }>;
+    };
 
-    if (!data.routes?.length) {
+    if (!data.routes?.length || !data.routes[0].summary) {
       throw AppError.badRequest(
-        'Unable to calculate route. Please verify the address.',
+        'Unable to calculate route. Please select a different location.',
         ErrorCode.NO_ROUTE_FOUND,
       );
     }
 
     const route = data.routes[0];
     const summary = route.summary;
-
-    // ORS flags ferry segments via way_types or step types
-    const hasFerry = route.segments?.some((seg: any) =>
-      seg.steps?.some((step: any) => step.type === 6 /* ferry */),
+    if (!summary) {
+      throw AppError.badRequest(
+        'Unable to calculate route. Please select a different location.',
+        ErrorCode.NO_ROUTE_FOUND,
+      );
+    }
+    const hasFerry = route.segments?.some((segment) =>
+      segment.steps?.some((step) => step.type === 6),
     ) ?? false;
 
     return {
       distanceKm: summary.distance / 1000,
       durationMinutes: Math.ceil(summary.duration / 60),
       hasFerry,
-      polyline: route.geometry, // encoded polyline
+      polyline: route.geometry,
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
-    logger.error('OpenRouteService API error:', error);
+    logger.error('OpenRouteService API error', { error });
     throw AppError.internal('Failed to compute route. Please try again later.');
   }
 }
 
-// ── Cached Route Computation ──
+async function computeRouteWithOrigin(origin: LatLng, customerLocation: LatLng) {
+  const originHash = hashCoords(origin.lat, origin.lng);
+  const destinationHash = hashCoords(customerLocation.lat, customerLocation.lng);
 
-export async function computeRoute(customerLocation: { lat: number; lng: number }) {
-  const originHash = hashCoords(SHOP_LOCATION.lat, SHOP_LOCATION.lng);
-  const destHash = hashCoords(customerLocation.lat, customerLocation.lng);
-
-  // Check cache
   const cached = await RouteCache.findOne({
     originHash,
-    destinationHash: destHash,
+    destinationHash,
     expiresAt: { $gt: new Date() },
   });
 
@@ -121,21 +256,18 @@ export async function computeRoute(customerLocation: { lat: number; lng: number 
     };
   }
 
-  // Fetch from OpenRouteService
-  const result = await fetchDirections(SHOP_LOCATION, customerLocation);
+  const result = await fetchDirections(origin, customerLocation);
 
-  // Reject if ferry is required (sea crossing)
   if (result.hasFerry) {
     throw AppError.badRequest(
-      'Unfortunately, we cannot service locations that require a sea/ferry crossing.',
+      'Locations requiring ferry travel are not serviceable.',
       ErrorCode.FERRY_ROUTE_REJECTED,
     );
   }
 
-  // Cache the result
   await RouteCache.create({
     originHash,
-    destinationHash: destHash,
+    destinationHash,
     distanceKm: result.distanceKm,
     durationMinutes: result.durationMinutes,
     hasFerry: result.hasFerry,
@@ -151,52 +283,125 @@ export async function computeRoute(customerLocation: { lat: number; lng: number 
   };
 }
 
-// ── Compute Ocular Fee ──
+export async function computeRoute(customerLocation: LatLng) {
+  const settings = await getOcularSettings();
+  const origin = { lat: settings.shopLatitude, lng: settings.shopLongitude };
+  const route = await computeRouteWithOrigin(origin, customerLocation);
 
-export async function computeOcularFee(customerLocation: { lat: number; lng: number }) {
-  const route = await computeRoute(customerLocation);
-  const feeConfig = await getFeeConfig();
+  return {
+    ...route,
+    distanceKm: Number(route.distanceKm.toFixed(2)),
+    shopLocation: origin,
+  };
+}
 
-  if (route.distanceKm > feeConfig.maxDistanceKm) {
+export async function computeOcularFee(customerLocation: LatLng) {
+  const settings = await getOcularSettings();
+  const origin = { lat: settings.shopLatitude, lng: settings.shopLongitude };
+
+  const [route, withinNcr] = await Promise.all([
+    computeRouteWithOrigin(origin, customerLocation),
+    isWithinNcr(customerLocation, settings.ncrPolygonFile),
+  ]);
+
+  if (route.distanceKm > settings.maxDistanceKm) {
     throw AppError.badRequest(
-      `Location is too far (${route.distanceKm.toFixed(1)} km). Maximum service distance is ${feeConfig.maxDistanceKm} km.`,
+      `Location is too far (${route.distanceKm.toFixed(1)} km). Maximum service distance is ${settings.maxDistanceKm} km.`,
     );
   }
 
-  const extraKm = Math.max(0, route.distanceKm - feeConfig.baseKm);
-  const extraFee = Math.ceil(extraKm) * feeConfig.extraRatePerKm;
-  const totalFee = feeConfig.baseFee + extraFee;
+  const distanceKm = Number(route.distanceKm.toFixed(2));
 
-  // NCR = roughly within 30km of Metro Manila
-  const isWithinNCR = route.distanceKm <= 30;
+  if (withinNcr) {
+    return {
+      route: {
+        distanceKm,
+        durationMinutes: route.durationMinutes,
+      },
+      fee: {
+        label: 'FREE (within Metro Manila)',
+        isWithinNCR: true,
+        baseFee: 0,
+        baseCoveredKm: settings.baseCoveredKm,
+        perKmRate: settings.perKmRate,
+        additionalDistanceKm: 0,
+        additionalFee: 0,
+        total: 0,
+      },
+      config: {
+        shopLatitude: settings.shopLatitude,
+        shopLongitude: settings.shopLongitude,
+      },
+    };
+  }
+
+  const additionalDistanceKmRaw = Math.max(0, distanceKm - settings.baseCoveredKm);
+  const additionalDistanceKm = Number(additionalDistanceKmRaw.toFixed(2));
+  const additionalFee = Math.round(additionalDistanceKmRaw * settings.perKmRate);
+  const total = settings.baseFee + additionalFee;
 
   return {
     route: {
-      distanceKm: route.distanceKm,
+      distanceKm,
       durationMinutes: route.durationMinutes,
     },
     fee: {
-      base: feeConfig.baseFee,
-      baseKm: feeConfig.baseKm,
-      extraKm: Math.ceil(extraKm),
-      extraRate: feeConfig.extraRatePerKm,
-      extraFee,
-      total: totalFee,
-      isWithinNCR,
+      label: 'PAID (outside Metro Manila)',
+      isWithinNCR: false,
+      baseFee: settings.baseFee,
+      baseCoveredKm: settings.baseCoveredKm,
+      perKmRate: settings.perKmRate,
+      additionalDistanceKm,
+      additionalFee,
+      total,
+    },
+    config: {
+      shopLatitude: settings.shopLatitude,
+      shopLongitude: settings.shopLongitude,
     },
   };
 }
 
-// ── Nominatim Address Search (OSM – free, no API key) ──
+export async function reverseGeocode(location: LatLng) {
+  try {
+    const response = await axios.get('https://nominatim.openstreetmap.org/reverse', {
+      params: {
+        lat: location.lat,
+        lon: location.lng,
+        format: 'jsonv2',
+      },
+      headers: {
+        'User-Agent': 'RMV-Stainless-Steel-Fabrication/1.0',
+      },
+      timeout: 10000,
+    });
+
+    const data = response.data as { display_name?: string };
+    if (!data.display_name) {
+      throw AppError.badRequest('Unable to resolve address for this location');
+    }
+
+    return {
+      formattedAddress: data.display_name,
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    logger.error('Nominatim reverse geocode error', { error });
+    throw AppError.internal('Failed to resolve address for location');
+  }
+}
 
 export async function placesAutocomplete(input: string, _sessionToken?: string) {
   try {
+    const query = input.trim();
+    if (!query) return [];
+
     const response = await axios.get('https://nominatim.openstreetmap.org/search', {
       params: {
-        q: input,
-        format: 'json',
+        q: query,
+        format: 'jsonv2',
         addressdetails: 1,
-        limit: 5,
+        limit: 8,
         countrycodes: 'ph',
       },
       headers: {
@@ -205,25 +410,42 @@ export async function placesAutocomplete(input: string, _sessionToken?: string) 
       timeout: 10000,
     });
 
-    return (response.data as any[]).map((p: any) => ({
-      placeId: p.place_id?.toString() ?? p.osm_id?.toString() ?? '',
-      description: p.display_name,
-    }));
+    const places = response.data as Array<{
+      place_id?: number;
+      display_name?: string;
+      lat?: string;
+      lon?: string;
+    }>;
+
+    return places
+      .map((place) => ({
+        placeId: place.place_id?.toString() ?? '',
+        description: place.display_name ?? '',
+        formattedAddress: place.display_name ?? '',
+        location: {
+          lat: Number(place.lat),
+          lng: Number(place.lon),
+        },
+      }))
+      .filter(
+        (place) =>
+          place.placeId &&
+          place.description &&
+          Number.isFinite(place.location.lat) &&
+          Number.isFinite(place.location.lng),
+      );
   } catch (error) {
-    logger.error('Nominatim search error:', error);
+    logger.error('Nominatim search error', { error });
     throw AppError.internal('Failed to fetch address suggestions');
   }
 }
 
-// ── Nominatim Place Details (get coordinates from Nominatim place ID) ──
-
 export async function placeDetails(placeId: string, _sessionToken?: string) {
   try {
-    // Nominatim lookup by place_id or OSM id
-    const response = await axios.get('https://nominatim.openstreetmap.org/details', {
+    const response = await axios.get('https://nominatim.openstreetmap.org/lookup', {
       params: {
-        place_id: placeId,
-        format: 'json',
+        format: 'jsonv2',
+        place_ids: placeId,
       },
       headers: {
         'User-Agent': 'RMV-Stainless-Steel-Fabrication/1.0',
@@ -231,22 +453,27 @@ export async function placeDetails(placeId: string, _sessionToken?: string) {
       timeout: 10000,
     });
 
-    const data = response.data as any;
+    const places = response.data as Array<{
+      display_name?: string;
+      lat?: string;
+      lon?: string;
+    }>;
 
-    if (!data || !data.centroid) {
+    const place = places[0];
+    if (!place?.display_name || !place.lat || !place.lon) {
       throw AppError.badRequest('Place not found');
     }
 
     return {
-      formattedAddress: data.localname || data.names?.name || 'Unknown address',
+      formattedAddress: place.display_name,
       location: {
-        lat: data.centroid.coordinates[1],
-        lng: data.centroid.coordinates[0],
+        lat: Number(place.lat),
+        lng: Number(place.lon),
       },
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
-    logger.error('Nominatim details error:', error);
+    logger.error('Nominatim place details error', { error });
     throw AppError.internal('Failed to fetch place details');
   }
 }

@@ -12,6 +12,7 @@ import { appointmentStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
 import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
+import { computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -78,6 +79,56 @@ async function assertSalesAvailable(salesId: string, dateStr: string): Promise<v
   if (availability?.unavailableDates.includes(dateStr)) {
     throw AppError.badRequest('Selected sales staff is unavailable on this date');
   }
+}
+
+interface OcularVisitComputation {
+  latitude: number;
+  longitude: number;
+  formattedAddress: string;
+  customerLocation: { lat: number; lng: number };
+  distanceKm: number;
+  ocularFee: number;
+  ocularFeeBreakdown: {
+    label: string;
+    baseFee: number;
+    baseCoveredKm: number;
+    perKmRate: number;
+    additionalDistanceKm: number;
+    additionalFee: number;
+    total: number;
+    isWithinNCR: boolean;
+  };
+}
+
+async function resolveOcularVisitData(
+  type: AppointmentType,
+  formattedAddress: string | undefined,
+  location: { lat: number; lng: number } | undefined,
+): Promise<OcularVisitComputation | null> {
+  if (type !== AppointmentType.OCULAR) return null;
+  if (!location) {
+    throw AppError.badRequest('Pinned map coordinates are required for ocular visits');
+  }
+
+  const feeResult = await computeOcularFee(location);
+  let resolvedAddress = formattedAddress?.trim() ?? '';
+  if (!resolvedAddress) {
+    try {
+      resolvedAddress = (await reverseGeocode(location)).formattedAddress;
+    } catch {
+      resolvedAddress = `${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}`;
+    }
+  }
+
+  return {
+    latitude: location.lat,
+    longitude: location.lng,
+    formattedAddress: resolvedAddress,
+    customerLocation: location,
+    distanceKm: feeResult.route.distanceKm,
+    ocularFee: feeResult.fee.total,
+    ocularFeeBreakdown: feeResult.fee,
+  };
 }
 
 // ── Slot Lock with anti-race ──
@@ -167,16 +218,26 @@ export async function requestAppointment(
   await assertNoActiveAppointment(customerId);
   await assertDateAvailable(input.date);
 
-  // Customer just requests — no sales staff assignment yet.
-  // The Appointment Agent will assign sales staff when confirming.
+  const ocularVisitData = await resolveOcularVisitData(
+    input.type,
+    input.formattedAddress,
+    input.customerLocation,
+  );
+
   const appointment = await Appointment.create({
     customerId,
     type: input.type,
     date: input.date,
     slotCode: input.slotCode,
     status: AppointmentStatus.REQUESTED,
-    customerAddress: input.address,
-    customerLocation: input.customerLocation,
+    latitude: ocularVisitData?.latitude,
+    longitude: ocularVisitData?.longitude,
+    formattedAddress: ocularVisitData?.formattedAddress,
+    customerAddress: ocularVisitData?.formattedAddress,
+    customerLocation: ocularVisitData?.customerLocation,
+    distanceKm: ocularVisitData?.distanceKm,
+    ocularFee: ocularVisitData?.ocularFee,
+    ocularFeeBreakdown: ocularVisitData?.ocularFeeBreakdown,
     customerNotes: input.purpose,
     bookedBy: customerId,
   });
@@ -191,7 +252,6 @@ export async function requestAppointment(
     userAgent: ua,
   });
 
-  // Notify appointment agents about the new request
   await notifyRole(
     Role.APPOINTMENT_AGENT,
     NotificationCategory.APPOINTMENT,
@@ -211,7 +271,6 @@ export async function agentCreateAppointment(
   ip?: string,
   ua?: string,
 ) {
-  // Verify customer exists
   const customer = await User.findById(input.customerId);
   if (!customer || !customer.roles.includes(Role.CUSTOMER)) {
     throw AppError.notFound('Customer not found');
@@ -220,16 +279,26 @@ export async function agentCreateAppointment(
   await assertNoActiveAppointment(input.customerId);
   await assertDateAvailable(input.date);
 
-  // Agent creates on behalf of customer — no sales staff assignment yet.
-  // Sales staff will be assigned when the agent confirms the appointment.
+  const ocularVisitData = await resolveOcularVisitData(
+    input.type,
+    input.formattedAddress,
+    input.customerLocation,
+  );
+
   const appointment = await Appointment.create({
     customerId: input.customerId,
     type: input.type,
     date: input.date,
     slotCode: input.slotCode,
     status: AppointmentStatus.REQUESTED,
-    customerAddress: input.address,
-    customerLocation: input.customerLocation,
+    latitude: ocularVisitData?.latitude,
+    longitude: ocularVisitData?.longitude,
+    formattedAddress: ocularVisitData?.formattedAddress,
+    customerAddress: ocularVisitData?.formattedAddress,
+    customerLocation: ocularVisitData?.customerLocation,
+    distanceKm: ocularVisitData?.distanceKm,
+    ocularFee: ocularVisitData?.ocularFee,
+    ocularFeeBreakdown: ocularVisitData?.ocularFeeBreakdown,
     customerNotes: input.purpose,
     bookedBy: agentId,
   });
@@ -239,12 +308,17 @@ export async function agentCreateAppointment(
     actorId: agentId,
     targetType: 'appointment',
     targetId: appointment._id,
-    details: { type: input.type, date: input.date, slotCode: input.slotCode, customerId: input.customerId, createdByAgent: true },
+    details: {
+      type: input.type,
+      date: input.date,
+      slotCode: input.slotCode,
+      customerId: input.customerId,
+      createdByAgent: true,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
 
-  // Notify the customer
   await createAndSendNotification(
     input.customerId,
     NotificationCategory.APPOINTMENT,
@@ -646,11 +720,12 @@ export async function setOcularFee(
   appointmentId: string,
   fee: number,
   breakdown: {
-    base: number;
-    baseKm: number;
-    extraKm: number;
-    extraRate: number;
-    extraFee: number;
+    label: string;
+    baseFee: number;
+    baseCoveredKm: number;
+    perKmRate: number;
+    additionalDistanceKm: number;
+    additionalFee: number;
     total: number;
     isWithinNCR: boolean;
   },
@@ -803,3 +878,4 @@ async function autoAssignSalesStaff(dateStr: string, slotCode: SlotCode): Promis
   counts.sort((a, b) => a.count - b.count);
   return counts[0].staffId;
 }
+

@@ -11,6 +11,9 @@ export interface IAppointment extends Document {
 
   // Ocular-specific
   salesStaffId?: Types.ObjectId;
+  latitude?: number;
+  longitude?: number;
+  formattedAddress?: string;
   customerAddress?: string;
   customerLocation?: {
     lat: number;
@@ -19,11 +22,12 @@ export interface IAppointment extends Document {
   distanceKm?: number;
   ocularFee?: number;
   ocularFeeBreakdown?: {
-    base: number;
-    baseKm: number;
-    extraKm: number;
-    extraRate: number;
-    extraFee: number;
+    label: string;
+    baseFee: number;
+    baseCoveredKm: number;
+    perKmRate: number;
+    additionalDistanceKm: number;
+    additionalFee: number;
     total: number;
     isWithinNCR: boolean;
   };
@@ -60,6 +64,9 @@ const appointmentSchema = new Schema<IAppointment>(
     },
 
     salesStaffId: { type: Schema.Types.ObjectId, ref: 'User' },
+    latitude: { type: Number },
+    longitude: { type: Number },
+    formattedAddress: { type: String },
     customerAddress: { type: String },
     customerLocation: {
       lat: { type: Number },
@@ -68,11 +75,12 @@ const appointmentSchema = new Schema<IAppointment>(
     distanceKm: { type: Number },
     ocularFee: { type: Number },
     ocularFeeBreakdown: {
-      base: Number,
-      baseKm: Number,
-      extraKm: Number,
-      extraRate: Number,
-      extraFee: Number,
+      label: String,
+      baseFee: Number,
+      baseCoveredKm: Number,
+      perKmRate: Number,
+      additionalDistanceKm: Number,
+      additionalFee: Number,
       total: Number,
       isWithinNCR: Boolean,
     },

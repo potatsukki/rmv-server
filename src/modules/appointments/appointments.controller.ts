@@ -8,13 +8,22 @@ function formatAppointment(appt: any) {
   const obj = appt.toObject ? appt.toObject() : { ...appt };
   const cust = obj.customerId && typeof obj.customerId === 'object' ? obj.customerId : null;
   const sales = obj.salesStaffId && typeof obj.salesStaffId === 'object' ? obj.salesStaffId : null;
+  const location = obj.customerLocation || (
+    typeof obj.latitude === 'number' && typeof obj.longitude === 'number'
+      ? { lat: obj.latitude, lng: obj.longitude }
+      : undefined
+  );
   return {
     ...obj,
     customerId: cust?._id?.toString() || obj.customerId,
     customerName: cust ? `${cust.firstName} ${cust.lastName}` : undefined,
     salesStaffId: sales?._id?.toString() || obj.salesStaffId || undefined,
     salesStaffName: sales ? `${sales.firstName} ${sales.lastName}` : undefined,
-    address: obj.customerAddress,
+    address: obj.formattedAddress || obj.customerAddress,
+    formattedAddress: obj.formattedAddress || obj.customerAddress,
+    latitude: location?.lat,
+    longitude: location?.lng,
+    location,
     purpose: obj.customerNotes,
   };
 }

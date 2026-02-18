@@ -152,12 +152,40 @@ export async function seedDefaultConfigs(): Promise<void> {
     },
     ocular_fee_config: {
       value: {
-        baseFee: 500,
+        baseFee: 350,
         baseKm: 10,
-        extraRatePerKm: 30,
+        extraRatePerKm: 60,
         maxDistanceKm: 100,
       },
-      description: 'Ocular visit fee configuration',
+      description: 'Legacy ocular visit fee configuration (backward compatibility)',
+    },
+    shopLatitude: {
+      value: 14.6617,
+      description: 'Shop latitude used as routing origin for ocular visits',
+    },
+    shopLongitude: {
+      value: 120.9567,
+      description: 'Shop longitude used as routing origin for ocular visits',
+    },
+    baseCoveredKm: {
+      value: 10,
+      description: 'Distance covered by the base ocular fee for outside-NCR visits',
+    },
+    baseFee: {
+      value: 350,
+      description: 'Minimum ocular transportation fee (outside NCR)',
+    },
+    perKmRate: {
+      value: 60,
+      description: 'Additional ocular transportation fee per kilometer outside base coverage',
+    },
+    maxDistanceKm: {
+      value: 100,
+      description: 'Maximum serviceable distance for ocular visits',
+    },
+    ncrPolygonFile: {
+      value: 'src/modules/maps/data/ncr-boundary.json',
+      description: 'GeoJSON file path used for NCR point-in-polygon validation',
     },
   };
 
