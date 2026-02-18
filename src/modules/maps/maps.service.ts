@@ -37,7 +37,6 @@ interface LatLng {
 interface DirectionsResult {
   distanceKm: number;
   durationMinutes: number;
-  hasFerry: boolean;
   polyline?: string;
 }
 
@@ -195,6 +194,11 @@ async function fetchDirections(origin: LatLng, destination: LatLng): Promise<Dir
           [origin.lng, origin.lat],
           [destination.lng, destination.lat],
         ],
+        // Avoid ferry routes instead of trying to infer them from step "type" values,
+        // which are turn/roundabout codes (not ferry indicators).
+        options: {
+          avoid_features: ['ferries'],
+        },
       },
       {
         headers: {
@@ -209,7 +213,6 @@ async function fetchDirections(origin: LatLng, destination: LatLng): Promise<Dir
       routes?: Array<{
         summary?: { distance: number; duration: number };
         geometry?: string;
-        segments?: Array<{ steps?: Array<{ type?: number }> }>;
       }>;
     };
 
@@ -228,14 +231,9 @@ async function fetchDirections(origin: LatLng, destination: LatLng): Promise<Dir
         ErrorCode.NO_ROUTE_FOUND,
       );
     }
-    const hasFerry = route.segments?.some((segment) =>
-      segment.steps?.some((step) => step.type === 6),
-    ) ?? false;
-
     return {
       distanceKm: summary.distance / 1000,
       durationMinutes: Math.ceil(summary.duration / 60),
-      hasFerry,
       polyline: route.geometry,
     };
   } catch (error) {
@@ -266,19 +264,12 @@ async function computeRouteWithOrigin(origin: LatLng, customerLocation: LatLng) 
 
   const result = await fetchDirections(origin, customerLocation);
 
-  if (result.hasFerry) {
-    throw AppError.badRequest(
-      'Locations requiring ferry travel are not serviceable.',
-      ErrorCode.FERRY_ROUTE_REJECTED,
-    );
-  }
-
   await RouteCache.create({
     originHash,
     destinationHash,
     distanceKm: result.distanceKm,
     durationMinutes: result.durationMinutes,
-    hasFerry: result.hasFerry,
+    hasFerry: false,
     polyline: result.polyline,
     expiresAt: new Date(Date.now() + CACHE_TTL_MS),
   });
@@ -286,7 +277,7 @@ async function computeRouteWithOrigin(origin: LatLng, customerLocation: LatLng) 
   return {
     distanceKm: result.distanceKm,
     durationMinutes: result.durationMinutes,
-    hasFerry: result.hasFerry,
+    hasFerry: false,
     cached: false,
   };
 }
@@ -311,12 +302,6 @@ export async function computeOcularFee(customerLocation: LatLng) {
     computeRouteWithOrigin(origin, customerLocation),
     isWithinNcr(customerLocation, settings.ncrPolygonFile),
   ]);
-
-  if (route.distanceKm > settings.maxDistanceKm) {
-    throw AppError.badRequest(
-      `Location is too far (${route.distanceKm.toFixed(1)} km). Maximum service distance is ${settings.maxDistanceKm} km.`,
-    );
-  }
 
   const distanceKm = Number(route.distanceKm.toFixed(2));
 
