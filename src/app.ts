@@ -84,6 +84,9 @@ app.use(apiLimiter);
 // ── CSRF Token Endpoint (before csrf protection) ──
 app.get(`${env.API_PREFIX}/csrf-token`, (req, res) => {
   const token = generateCsrfToken();
+  // Clear legacy host-only/domain variants first to avoid duplicate csrfToken cookies.
+  res.clearCookie('csrfToken', { path: '/' });
+  res.clearCookie('csrfToken', { domain: env.COOKIE_DOMAIN, path: '/' });
   res.cookie('csrfToken', token, {
     httpOnly: false,
     secure: env.COOKIE_SECURE,

@@ -11,6 +11,14 @@ const COOKIE_OPTIONS = {
   domain: env.COOKIE_DOMAIN,
 };
 
+const CSRF_COOKIE_OPTIONS = {
+  httpOnly: false,
+  secure: env.COOKIE_SECURE,
+  sameSite: env.COOKIE_SAMESITE as 'lax' | 'strict' | 'none',
+  domain: env.COOKIE_DOMAIN,
+  path: '/',
+};
+
 export const register = asyncHandler(async (req: Request, res: Response) => {
   const result = await authService.register(
     req.body,
@@ -50,10 +58,10 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
 
   // Set CSRF token
   const csrfToken = generateCsrfToken();
+  res.clearCookie('csrfToken', { path: '/' });
+  res.clearCookie('csrfToken', { domain: env.COOKIE_DOMAIN, path: '/' });
   res.cookie('csrfToken', csrfToken, {
-    httpOnly: false, // Must be readable by JS
-    secure: env.COOKIE_SECURE,
-    sameSite: env.COOKIE_SAMESITE as 'lax' | 'strict' | 'none',
+    ...CSRF_COOKIE_OPTIONS,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
@@ -94,7 +102,8 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
 
   res.clearCookie('accessToken', COOKIE_OPTIONS);
   res.clearCookie('refreshToken', { ...COOKIE_OPTIONS, path: '/api/v1/auth' });
-  res.clearCookie('csrfToken');
+  res.clearCookie('csrfToken', { path: '/' });
+  res.clearCookie('csrfToken', { ...CSRF_COOKIE_OPTIONS });
 
   res.json({ success: true, data: { message: 'Logged out successfully' } });
 });
