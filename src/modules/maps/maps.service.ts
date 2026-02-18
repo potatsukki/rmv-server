@@ -5,7 +5,6 @@ import axios from 'axios';
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
 import { point } from '@turf/helpers';
 import type { Feature, MultiPolygon, Polygon } from 'geojson';
-import defaultNcrBoundary from './data/ncr-boundary.json';
 import { env } from '../../config/env.js';
 import { Config, RouteCache } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
@@ -131,6 +130,18 @@ function extractPolygonFeatures(
   return features;
 }
 
+async function loadBundledDefaultBoundaryFeatures(): Promise<
+  Array<Feature<Polygon | MultiPolygon>>
+> {
+  const bundledBoundaryUrl = new URL('./data/ncr-boundary.json', import.meta.url);
+  const bundledRaw = await fs.readFile(bundledBoundaryUrl, 'utf8');
+  const bundledFeatures = extractPolygonFeatures(JSON.parse(bundledRaw) as unknown);
+  if (!bundledFeatures.length) {
+    throw AppError.internal('Failed to load NCR boundary data');
+  }
+  return bundledFeatures;
+}
+
 async function getNcrBoundaryFeatures(
   polygonFilePath: string,
 ): Promise<Array<Feature<Polygon | MultiPolygon>>> {
@@ -159,10 +170,7 @@ async function getNcrBoundaryFeatures(
       error,
     });
 
-    const fallbackFeatures = extractPolygonFeatures(defaultNcrBoundary as unknown);
-    if (!fallbackFeatures.length) {
-      throw AppError.internal('Failed to load NCR boundary data');
-    }
+    const fallbackFeatures = await loadBundledDefaultBoundaryFeatures();
 
     cachedBoundaryPath = '__bundled_default__';
     cachedBoundaryFeatures = fallbackFeatures;
