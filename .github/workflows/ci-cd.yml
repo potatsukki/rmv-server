@@ -1,4 +1,4 @@
-﻿name: Backend CI/CD
+name: Backend CI/CD
 
 on:
   push:
@@ -39,6 +39,26 @@ jobs:
           script_stop: true
           script: |
             set -e
+
+            wait_for_health() {
+              container="$1"
+              expected="${2:-healthy}"
+              retries="${3:-60}"
+              sleep_seconds="${4:-3}"
+
+              for i in $(seq 1 "$retries"); do
+                status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+                echo "[$i/$retries] $container status: $status"
+                if [ "$status" = "$expected" ]; then
+                  return 0
+                fi
+                sleep "$sleep_seconds"
+              done
+
+              echo "Timed out waiting for $container to become $expected"
+              return 1
+            }
+
             mkdir -p /opt/rmv
 
             if [ ! -d /opt/rmv/rmv-server/.git ]; then
@@ -55,5 +75,13 @@ jobs:
             git -C /opt/rmv/rmv-web reset --hard origin/main
 
             cd /opt/rmv/rmv-server/deploy
-            docker compose -f docker-compose.prod.yml up -d --build api
+            docker compose -f docker-compose.prod.yml up -d --build api web nginx
+
+            wait_for_health rmv-api healthy
+            wait_for_health rmv-web healthy
+
+            docker exec rmv-nginx wget --no-verbose --tries=1 --spider http://api:5000/api/v1/health
+            docker exec rmv-nginx wget --no-verbose --tries=1 --spider http://web/
+
+            docker compose -f docker-compose.prod.yml ps
             docker image prune -f
