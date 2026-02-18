@@ -80,6 +80,8 @@ jobs:
             wait_for_health rmv-api healthy
             wait_for_health rmv-web healthy
 
+            docker compose -f docker-compose.prod.yml restart nginx
+
             docker exec rmv-nginx wget --no-verbose --tries=1 --spider http://api:5000/api/v1/health
             docker exec rmv-nginx wget --no-verbose --tries=1 --spider http://web/
 
