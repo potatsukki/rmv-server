@@ -774,6 +774,7 @@ export async function listAppointments(query: {
   dateTo?: string;
   customerId?: string;
   salesStaffId?: string;
+  search?: string;
   page?: string;
   limit?: string;
   sortBy?: string;
@@ -806,6 +807,19 @@ export async function listAppointments(query: {
     filter.date = {};
     if (query.dateFrom) (filter.date as Record<string, string>).$gte = query.dateFrom;
     if (query.dateTo) (filter.date as Record<string, string>).$lte = query.dateTo;
+  }
+
+  if (query.search) {
+    const searchRegex = { $regex: query.search, $options: 'i' };
+    const searchConditions = [
+      { customerName: searchRegex },
+      { purpose: searchRegex },
+    ];
+    if (Object.keys(filter).length > 0) {
+      filter.$and = [{ $or: searchConditions }];
+    } else {
+      filter.$or = searchConditions;
+    }
   }
 
   const sortField = query.sortBy || 'date';
