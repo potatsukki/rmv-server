@@ -41,8 +41,9 @@ interface DirectionsResult {
 }
 
 const DEFAULT_SETTINGS: OcularSettings = {
-  shopLatitude: 14.6617,
-  shopLongitude: 120.9567,
+  // Exact Plus Code: M3X3+RF4, Dahlia Ext, Quezon City, Metro Manila
+  shopLatitude: 14.6995125,
+  shopLongitude: 121.053703125,
   baseCoveredKm: 10,
   baseFee: 350,
   perKmRate: 60,

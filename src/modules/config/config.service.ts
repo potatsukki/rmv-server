@@ -2,9 +2,21 @@ import { Config, Holiday, AuditLog } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import { AuditAction } from '../../utils/constants.js';
 import type { UpdateConfigInput, CreateHolidayInput } from './config.validation.js';
-import type { Types } from 'mongoose';
 
-// ── Config CRUD ──
+const LEGACY_SHOP_COORDS = {
+  lat: 14.6617,
+  lng: 120.9567,
+};
+
+const MAPULANG_LUPA_SHOP_COORDS = {
+  lat: 14.7020893,
+  lng: 121.0000338,
+};
+
+const DAHLIA_EXT_PLUS_CODE_COORDS = {
+  lat: 14.6995125,
+  lng: 121.053703125,
+};
 
 export async function getConfig(key: string) {
   const config = await Config.findOne({ key });
@@ -46,8 +58,6 @@ export async function upsertConfig(
   return config;
 }
 
-// ── Holidays ──
-
 export async function listHolidays(year?: string) {
   const filter: Record<string, unknown> = {};
   if (year) filter.date = { $regex: `^${year}` };
@@ -61,7 +71,6 @@ export async function createHoliday(
   ip?: string,
   ua?: string,
 ) {
-  // Check duplicate
   const existing = await Holiday.findOne({ date: input.date });
   if (existing) throw AppError.conflict('Holiday already exists on this date', ErrorCode.DUPLICATE_ENTRY);
 
@@ -106,8 +115,6 @@ export async function deleteHoliday(
   return { deleted: true };
 }
 
-// ── Maintenance Mode ──
-
 export async function toggleMaintenance(
   enabled: boolean,
   adminId: string,
@@ -138,8 +145,6 @@ export async function isMaintenanceMode(): Promise<boolean> {
   return config?.value === true;
 }
 
-// ── Default configs seeder ──
-
 export async function seedDefaultConfigs(): Promise<void> {
   const defaults: Record<string, { value: unknown; description: string }> = {
     office_slot_capacity: {
@@ -160,11 +165,11 @@ export async function seedDefaultConfigs(): Promise<void> {
       description: 'Legacy ocular visit fee configuration (backward compatibility)',
     },
     shopLatitude: {
-      value: 14.6617,
+      value: DAHLIA_EXT_PLUS_CODE_COORDS.lat,
       description: 'Shop latitude used as routing origin for ocular visits',
     },
     shopLongitude: {
-      value: 120.9567,
+      value: DAHLIA_EXT_PLUS_CODE_COORDS.lng,
       description: 'Shop longitude used as routing origin for ocular visits',
     },
     baseCoveredKm: {
@@ -196,4 +201,39 @@ export async function seedDefaultConfigs(): Promise<void> {
       { upsert: true },
     );
   }
+
+  // One-time migration from known previous seeded coordinates to
+  // exact Plus Code location: M3X3+RF4, Dahlia Ext, Quezon City.
+  await Config.updateOne(
+    {
+      key: 'shopLatitude',
+      value: {
+        $in: [
+          LEGACY_SHOP_COORDS.lat,
+          String(LEGACY_SHOP_COORDS.lat),
+          MAPULANG_LUPA_SHOP_COORDS.lat,
+          String(MAPULANG_LUPA_SHOP_COORDS.lat),
+          14.7004606,
+          '14.7004606',
+        ],
+      },
+    },
+    { $set: { value: DAHLIA_EXT_PLUS_CODE_COORDS.lat } },
+  );
+  await Config.updateOne(
+    {
+      key: 'shopLongitude',
+      value: {
+        $in: [
+          LEGACY_SHOP_COORDS.lng,
+          String(LEGACY_SHOP_COORDS.lng),
+          MAPULANG_LUPA_SHOP_COORDS.lng,
+          String(MAPULANG_LUPA_SHOP_COORDS.lng),
+          121.0553413,
+          '121.0553413',
+        ],
+      },
+    },
+    { $set: { value: DAHLIA_EXT_PLUS_CODE_COORDS.lng } },
+  );
 }
