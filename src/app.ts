@@ -28,6 +28,7 @@ import uploadRoutes from './modules/uploads/upload.routes.js';
 import configRoutes from './modules/config/config.routes.js';
 import visitReportRoutes from './modules/visit-reports/visit-reports.routes.js';
 import webhookRoutes from './modules/webhooks/webhook.routes.js';
+import landingRoutes from './modules/landing/landing.routes.js';
 
 
 const app = express();
@@ -150,6 +151,7 @@ app.use(`${prefix}/cash`, cashRoutes);
 app.use(`${prefix}/reports`, reportRoutes);
 app.use(`${prefix}/uploads`, uploadRoutes);
 app.use(`${prefix}/config`, configRoutes);
+app.use(`${prefix}/landing`, landingRoutes);
 app.use(`${prefix}/visit-reports`, visitReportRoutes);
 
 
