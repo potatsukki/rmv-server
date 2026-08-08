@@ -452,3 +452,35 @@ For a new groupmate, read in this order:
 - R2 upload credentials work if testing photos, contracts, receipts, or blueprints.
 - PayMongo sandbox keys work if testing online payments.
 - `SYSTEM_SPEC.md` still matches any workflow changes.
+
+## Project Screenshot
+
+![RMV role-based dashboard](https://raw.githubusercontent.com/sean-camara/sean-camara-portfolio/main/public/assets/rmv-screenshot.png)
+
+## Project Context
+
+RMV is an academic capstone modeled on the workflow of a local stainless-steel fabrication business. It is not presented as paid client employment or as a system confirmed to be in daily business use.
+
+## Architecture Summary
+
+The Express and TypeScript API separates controllers, application services, persistence, middleware, jobs, and external integrations. MongoDB stores accounts and workflow records; Firebase, Cloudflare R2, email, PayMongo, and Socket.IO support identity-related services, files, notifications, payments, and real-time updates. Docker, Nginx, health checks, and blue-green scripts support production-style deployment and rollback.
+
+## Testing Strategy
+
+Vitest suites cover authentication policy and tokens, validation, state machines, appointments, projects, reports, fabrication, payments, refunds, reminders, and error handling. API and pipeline smoke scripts cover broader configured flows. Run `npm run typecheck`, `npm run test`, `npm run build`, and the documented smoke commands with isolated test data. No coverage percentage is published; browser-to-provider sandbox testing and failure/recovery exercises remain incomplete.
+
+## Known Limitations
+
+- Live email, storage, payment, and notification verification requires separately configured sandbox services.
+- Operational scripts assume the documented VPS/Docker topology.
+- The capstone is still being refined and is not claimed to be in daily business use.
+
+## Future Improvements
+
+- Expand integration tests around external-provider failures and retries.
+- Add repeatable disaster-recovery exercises and recorded restore evidence.
+- Keep API and workflow documentation synchronized with state-machine changes.
+
+## License
+
+No license file is currently included. All rights are reserved unless a license is added later.

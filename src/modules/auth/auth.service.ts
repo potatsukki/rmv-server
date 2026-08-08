@@ -27,7 +27,7 @@ import type {
 import type { Types } from 'mongoose';
 import { verifyFirebaseIdToken } from '../../config/firebase.js';
 import { hasLocalPassword, isGoogleOnlyAccount, isInternalManagedAccount } from './auth.account-policy.js';
-import { normalizeSavedAddresses, normalizeUserAddress, requirePinnedAddress } from '../../utils/userAddresses.js';
+import { normalizeSavedAddresses, normalizeUserAddress } from '../../utils/userAddresses.js';
 
 // ── Token Generation ──
 function generateAccessToken(userId: string, roles: Role[]): string {
@@ -772,13 +772,57 @@ export async function getLoginHistory(userId: string) {
 
 // ── Google Auth ──
 
+function getFirebaseTokenMetadata(idToken: string) {
+  try {
+    const [, encodedPayload] = idToken.split('.');
+    if (!encodedPayload) return undefined;
+    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as {
+      aud?: string;
+      iss?: string;
+      iat?: number;
+      exp?: number;
+    };
+    return {
+      audience: payload.aud,
+      issuer: payload.iss,
+      issuedAt: payload.iat,
+      expiresAt: payload.exp,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function verifyGoogleIdToken(idToken: string) {
+  try {
+    return await verifyFirebaseIdToken(idToken);
+  } catch (error: unknown) {
+    const firebaseError = error as { code?: string; message?: string };
+    logger.warn('Google ID token verification failed', {
+      code: firebaseError.code ?? 'unknown',
+      message: firebaseError.message ?? 'Unknown Firebase verification error',
+      token: getFirebaseTokenMetadata(idToken),
+    });
+
+    if (firebaseError.code === 'auth/id-token-expired') {
+      throw AppError.unauthorized(
+        'Your Google sign-in session expired. Please try again.',
+        ErrorCode.TOKEN_EXPIRED,
+      );
+    }
+
+    throw AppError.unauthorized(
+      'We could not verify your Google sign-in. Please try again.',
+      ErrorCode.TOKEN_INVALID,
+    );
+  }
+}
+
 export async function googleAuth(input: GoogleAuthInput, ip?: string, ua?: string, hints?: ClientHints) {
   const { idToken } = input;
 
   // Verify Firebase ID token
-  const decoded = await verifyFirebaseIdToken(idToken).catch(() => {
-    throw AppError.unauthorized('Invalid Google token');
-  });
+  const decoded = await verifyGoogleIdToken(idToken);
 
   const email = decoded.email?.toLowerCase();
   if (!email) throw AppError.badRequest('Google account has no email');
@@ -835,14 +879,13 @@ export async function googleAuth(input: GoogleAuthInput, ip?: string, ua?: strin
 
 export async function googleComplete(input: GoogleCompleteInput, ip?: string, ua?: string, hints?: ClientHints) {
   const { idToken, firstName, lastName, phone, addressData } = input;
-  requirePinnedAddress(addressData);
-  const defaultAddress = normalizeUserAddress({ ...addressData, isDefault: true }, 'Primary address');
-  const savedAddresses = normalizeSavedAddresses([defaultAddress], defaultAddress);
+  const defaultAddress = addressData
+    ? normalizeUserAddress({ ...addressData, isDefault: true }, 'Primary address')
+    : null;
+  const savedAddresses = defaultAddress ? normalizeSavedAddresses([defaultAddress], defaultAddress) : [];
 
   // Re-verify Firebase ID token
-  const decoded = await verifyFirebaseIdToken(idToken).catch(() => {
-    throw AppError.unauthorized('Invalid Google token');
-  });
+  const decoded = await verifyGoogleIdToken(idToken);
 
   const email = decoded.email?.toLowerCase();
   if (!email) throw AppError.badRequest('Google account has no email');
@@ -870,8 +913,8 @@ export async function googleComplete(input: GoogleCompleteInput, ip?: string, ua
     firstName,
     lastName,
     phone,
-    address: defaultAddress.formattedAddress,
-    addressData: defaultAddress,
+    address: defaultAddress?.formattedAddress,
+    addressData: defaultAddress || undefined,
     savedAddresses,
     provider: 'google',
     firebaseUid,
