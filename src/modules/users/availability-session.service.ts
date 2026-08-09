@@ -277,10 +277,6 @@ export async function evaluateSalesAssignmentEligibility(input: {
       return { assignmentEligible: false, assignmentBlockedReason: 'Setup required' };
     }
 
-    if (isAvailabilityShiftExpired(session)) {
-      return { assignmentEligible: false, assignmentBlockedReason: 'Shift ended' };
-    }
-
     const targetDateTime = getSlotDateTime(dateStr, slotCode);
     if (!doesShiftCoverDateTime(session, targetDateTime)) {
       return { assignmentEligible: false, assignmentBlockedReason: 'Off shift' };

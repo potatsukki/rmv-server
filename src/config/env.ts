@@ -103,14 +103,30 @@ const envSchema = z.object({
 });
 
 const parsed = envSchema.safeParse(process.env);
+let envData: z.infer<typeof envSchema>;
 
 if (!parsed.success) {
-  console.error('Invalid environment variables:');
-  console.error(parsed.error.flatten().fieldErrors);
-  process.exit(1);
+  if (process.env.NODE_ENV === 'test') {
+    const fallback = {
+      NODE_ENV: 'test',
+      PORT: 5000,
+      API_PREFIX: '/api/v1',
+      MONGODB_URI: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rmv-test',
+      JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'test-access-secret-123456',
+      JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'test-refresh-secret-123456',
+      SMTP_FROM_EMAIL: process.env.SMTP_FROM_EMAIL || 'test@example.com',
+    } as const;
+
+    envData = envSchema.parse(fallback);
+  } else {
+    console.error('Invalid environment variables:');
+    console.error(parsed.error.flatten().fieldErrors);
+    process.exit(1);
+  }
+} else {
+  envData = parsed.data;
 }
 
-const envData = parsed.data;
 const resolvedCookieDomain = normalizeCookieDomain(envData.COOKIE_DOMAIN);
 
 if (envData.NODE_ENV === 'production') {

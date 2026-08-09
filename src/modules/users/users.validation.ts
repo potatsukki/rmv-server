@@ -53,22 +53,35 @@ export const updateUserSchema = z.object({
   shiftEndAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
     .transform((value) => value === '' || value === null ? null : value),
 }).superRefine((value, ctx) => {
-  const needsShift = value.availabilityStatus === StaffAvailabilityStatus.AVAILABLE;
-  if (needsShift && !value.shiftStartAt) {
+  const isAvailable = value.availabilityStatus === StaffAvailabilityStatus.AVAILABLE;
+  const hasShiftTimes = Boolean(value.shiftStartAt) || Boolean(value.shiftEndAt);
+
+  if (isAvailable) {
+    if (!value.shiftStartAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shiftStartAt'],
+        message: 'Shift start time is required when setting staff available',
+      });
+    }
+    if (!value.shiftEndAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shiftEndAt'],
+        message: 'Shift end time is required when setting staff available',
+      });
+    }
+  }
+
+  if (hasShiftTimes && !isAvailable) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['shiftStartAt'],
-      message: 'Shift start time is required when setting staff available',
+      path: ['availabilityStatus'],
+      message: 'Shift times can only be provided when staff is available',
     });
   }
-  if (needsShift && !value.shiftEndAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['shiftEndAt'],
-      message: 'Shift end time is required when setting staff available',
-    });
-  }
-  if (needsShift && value.shiftStartAt && value.shiftEndAt) {
+
+  if (value.shiftStartAt && value.shiftEndAt) {
     const start = new Date(value.shiftStartAt);
     const end = new Date(value.shiftEndAt);
     if (Number.isNaN(start.getTime())) {
@@ -105,7 +118,10 @@ export const updateProfileSchema = z.object({
 });
 
 export const updateOwnAvailabilitySchema = z.object({
-  availabilityStatus: z.literal(StaffAvailabilityStatus.AVAILABLE).optional(),
+  availabilityStatus: z.union([
+    z.literal(StaffAvailabilityStatus.AVAILABLE),
+    z.literal(StaffAvailabilityStatus.UNAVAILABLE),
+  ]).optional(),
   availabilityNote: z.union([z.string().max(240).trim(), z.literal(''), z.null()]).optional()
     .transform((value) => {
       if (value === undefined) return undefined;
@@ -116,6 +132,48 @@ export const updateOwnAvailabilitySchema = z.object({
     .transform((value) => value === '' || value === null ? null : value),
   shiftEndAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
     .transform((value) => value === '' || value === null ? null : value),
+}).superRefine((value, ctx) => {
+  const isAvailable = value.availabilityStatus === StaffAvailabilityStatus.AVAILABLE;
+  const hasShiftTimes = Boolean(value.shiftStartAt) || Boolean(value.shiftEndAt);
+
+  if (isAvailable) {
+    if (!value.shiftStartAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shiftStartAt'],
+        message: 'Shift start time is required when setting staff available',
+      });
+    }
+    if (!value.shiftEndAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shiftEndAt'],
+        message: 'Shift end time is required when setting staff available',
+      });
+    }
+  }
+
+  if (hasShiftTimes && !isAvailable) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['availabilityStatus'],
+      message: 'Shift times can only be provided when staff is available',
+    });
+  }
+
+  if (value.shiftStartAt && value.shiftEndAt) {
+    const start = new Date(value.shiftStartAt);
+    const end = new Date(value.shiftEndAt);
+    if (Number.isNaN(start.getTime())) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftStartAt'], message: 'Shift start time is invalid' });
+    }
+    if (Number.isNaN(end.getTime())) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftEndAt'], message: 'Shift end time is invalid' });
+    }
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime()) && start.getTime() >= end.getTime()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftEndAt'], message: 'Shift end time must be after the shift start time' });
+    }
+  }
 });
 
 export const salesStaffLookupQuerySchema = z.object({

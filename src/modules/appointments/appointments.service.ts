@@ -1843,6 +1843,8 @@ export async function requestReschedule(
 
   appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
   appointment.rescheduleReason = input.reason;
+  appointment.requestedRescheduleDate = input.newDate;
+  appointment.requestedRescheduleSlot = input.newSlotCode;
   await appointment.save();
 
   await AuditLog.create({
@@ -1850,7 +1852,12 @@ export async function requestReschedule(
     actorId: customerId,
     targetType: 'appointment',
     targetId: appointment._id,
-    details: { reason: input.reason, count: appointment.rescheduleCount },
+    details: {
+      reason: input.reason,
+      requestedDate: input.newDate,
+      requestedSlot: input.newSlotCode,
+      count: appointment.rescheduleCount,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1860,7 +1867,7 @@ export async function requestReschedule(
     Role.APPOINTMENT_AGENT,
     NotificationCategory.APPOINTMENT,
     'Reschedule Requested',
-    `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
+    `Reschedule requested for ${input.newDate || appointment.date}${input.newSlotCode ? ` at ${formatSlotTime(input.newSlotCode)}` : ''}. Reason: ${input.reason}`,
     `/appointments/${appointment._id}`,
   );
 
@@ -1916,6 +1923,8 @@ export async function completeReschedule(
   appointment.consultationCompletedAt = undefined;
   appointment.attendanceNotes = undefined;
   appointment.attendanceOverrideReason = undefined;
+  appointment.requestedRescheduleDate = undefined;
+  appointment.requestedRescheduleSlot = undefined;
   appointment.rescheduleCount += 1;
   if (salesId) appointment.salesStaffId = salesId as unknown as Types.ObjectId;
   await appointment.save();
@@ -3334,4 +3343,3 @@ async function autoAssignSalesStaff(dateStr: string, slotCode: SlotCode): Promis
   counts.sort((a, b) => a.count - b.count);
   return counts[0].staffId;
 }
-

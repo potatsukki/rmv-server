@@ -98,6 +98,8 @@ export interface IAppointment extends Document {
   rescheduleCount: number;
   maxReschedules: number;
   rescheduleReason?: string;
+  requestedRescheduleDate?: string;
+  requestedRescheduleSlot?: string;
 
   // Set to true when the consultation visit report has been submitted
   consultationReportSubmitted?: boolean;
@@ -198,6 +200,8 @@ const appointmentSchema = new Schema<IAppointment>(
     rescheduleCount: { type: Number, default: 0 },
     maxReschedules: { type: Number, default: 3 },
     rescheduleReason: { type: String },
+    requestedRescheduleDate: { type: String },
+    requestedRescheduleSlot: { type: String },
 
     // Customer-provided site details
     customerSiteDetails: {

@@ -44,7 +44,12 @@ function createStateMachine<T extends string>(transitions: TransitionMap<T>) {
 
 // ── Appointment State Machine ──
 export const appointmentStateMachine = createStateMachine<AppointmentStatus>({
-  [AppointmentStatus.REQUESTED]: [AppointmentStatus.CONFIRMED, AppointmentStatus.CANCELLED],
+  [AppointmentStatus.REQUESTED]: [
+    AppointmentStatus.CONFIRMED,
+    AppointmentStatus.CANCELLED,
+    AppointmentStatus.NO_SHOW,
+    AppointmentStatus.RESCHEDULE_REQUESTED,
+  ],
   [AppointmentStatus.CONFIRMED]: [
     AppointmentStatus.ON_THE_WAY,
     AppointmentStatus.COMPLETED,
@@ -57,6 +62,7 @@ export const appointmentStateMachine = createStateMachine<AppointmentStatus>({
     AppointmentStatus.COMPLETED,
     AppointmentStatus.CANCELLED,
     AppointmentStatus.NO_SHOW,
+    AppointmentStatus.RESCHEDULE_REQUESTED,
   ],
   [AppointmentStatus.ON_THE_WAY]: [
     AppointmentStatus.ARRIVED_AT_SITE,
