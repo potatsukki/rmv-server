@@ -1946,22 +1946,14 @@ export async function completeReschedule(
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, appointment.type);
 
-  const salesId = input.salesStaffId || appointment.salesStaffId?.toString();
-
-  if (salesId) {
-    await assertSalesAvailable(salesId, input.date, input.slotCode as SlotCode, appointment._id.toString());
-  }
-
+  // Reschedule acceptance only confirms the requested schedule. The appointment
+  // agent assigns an available sales staff member afterward via reassign-sales.
   if (appointment.type === AppointmentType.OCULAR) {
-    if (!salesId) throw AppError.badRequest('Sales staff required for ocular appointments');
-    // Release old slot
+    // Release the previous staff member's old slot. The newly selected staff
+    // member will receive a lock when the agent assigns them after acceptance.
     if (appointment.salesStaffId) {
       await releaseSlotLock(appointment.date, appointment.slotCode as SlotCode, appointment.salesStaffId.toString());
     }
-
-    // Lock new slot
-    await lockSlot(input.date, input.slotCode as SlotCode, salesId, agentId);
-    await confirmSlotLock(input.date, input.slotCode as SlotCode, salesId, appointment._id);
   }
 
   const oldDate = appointment.date;
@@ -1981,7 +1973,7 @@ export async function completeReschedule(
   appointment.requestedRescheduleDate = undefined;
   appointment.requestedRescheduleSlotCode = undefined;
   appointment.rescheduleCount += 1;
-  if (salesId) appointment.salesStaffId = salesId as unknown as Types.ObjectId;
+  appointment.salesStaffId = undefined;
   await appointment.save();
 
   await AuditLog.create({
@@ -1993,6 +1985,7 @@ export async function completeReschedule(
       oldDate, oldSlot: oldSlot,
       newDate: input.date, newSlot: input.slotCode,
       rescheduleCount: appointment.rescheduleCount,
+      salesAssignmentPending: true,
     },
     ipAddress: ip,
     userAgent: ua,
