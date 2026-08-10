@@ -1846,6 +1846,8 @@ export async function requestReschedule(
 
   appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
   appointment.rescheduleReason = input.reason;
+  if (input.newDate) appointment.requestedRescheduleDate = input.newDate;
+  if (input.newSlotCode) appointment.requestedRescheduleSlotCode = input.newSlotCode as SlotCode;
   await appointment.save();
 
   await AuditLog.create({
@@ -1866,6 +1868,56 @@ export async function requestReschedule(
     alreadyRequested
       ? `Customer updated the reschedule request for appointment on ${appointment.date}. New reason: ${input.reason}`
       : `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
+    `/appointments/${appointment._id}`,
+  );
+
+  return appointment;
+}
+
+export async function rejectReschedule(
+  appointmentId: string,
+  agentId: string,
+  ip?: string,
+  ua?: string,
+  reason?: string,
+) {
+  const appointment = await Appointment.findById(appointmentId);
+  if (!appointment) throw AppError.notFound('Appointment not found');
+
+  if (appointment.status !== AppointmentStatus.RESCHEDULE_REQUESTED) {
+    throw AppError.badRequest('Appointment is not pending reschedule');
+  }
+
+  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+  const requestedDate = appointment.requestedRescheduleDate || appointment.date;
+  const requestedSlotCode = appointment.requestedRescheduleSlotCode || appointment.slotCode;
+
+  appointment.status = AppointmentStatus.CONFIRMED;
+  appointment.rescheduleReason = undefined;
+  appointment.requestedRescheduleDate = undefined;
+  appointment.requestedRescheduleSlotCode = undefined;
+  await appointment.save();
+
+  await AuditLog.create({
+    action: AuditAction.APPOINTMENT_UPDATED,
+    actorId: agentId,
+    targetType: 'appointment',
+    targetId: appointment._id,
+    details: {
+      action: 'reschedule_rejected',
+      requestedDate,
+      requestedSlotCode,
+      reason: reason || null,
+    },
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
+  await createAndSendNotification(
+    appointment.customerId,
+    NotificationCategory.APPOINTMENT,
+    'Reschedule Request Declined',
+    `Your reschedule request for ${requestedDate} at ${formatSlotTime(requestedSlotCode)} was declined. Your appointment remains on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.${reason ? ` Reason: ${reason}` : ''}`,
     `/appointments/${appointment._id}`,
   );
 
@@ -1921,6 +1973,9 @@ export async function completeReschedule(
   appointment.consultationCompletedAt = undefined;
   appointment.attendanceNotes = undefined;
   appointment.attendanceOverrideReason = undefined;
+  appointment.rescheduleReason = undefined;
+  appointment.requestedRescheduleDate = undefined;
+  appointment.requestedRescheduleSlotCode = undefined;
   appointment.rescheduleCount += 1;
   if (salesId) appointment.salesStaffId = salesId as unknown as Types.ObjectId;
   await appointment.save();
