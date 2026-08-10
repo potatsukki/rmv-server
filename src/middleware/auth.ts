@@ -23,6 +23,15 @@ interface JwtPayload {
   exp: number;
 }
 
+function normalizeRoles(roles: unknown): Role[] {
+  if (!Array.isArray(roles)) return [];
+
+  return roles.flatMap((role) => {
+    const normalized = String(role).trim().toLowerCase().replace(/[\s-]+/g, '_') as Role;
+    return Object.values(Role).includes(normalized) ? [normalized] : [];
+  });
+}
+
 /**
  * Authenticate user via access token (Authorization header preferred, cookie fallback).
  */
@@ -76,7 +85,7 @@ export const authenticate = async (req: Request, _res: Response, next: NextFunct
 
     req.user = user;
     req.userId = user._id.toString();
-    req.userRoles = user.roles as Role[];
+    req.userRoles = normalizeRoles(user.roles);
     next();
   } catch (error) {
     if (error instanceof AppError) {
@@ -115,7 +124,7 @@ export const optionalAuth = async (req: Request, _res: Response, next: NextFunct
       if (user && user.isActive && !user.deletedAt) {
         req.user = user;
         req.userId = user._id.toString();
-        req.userRoles = user.roles as Role[];
+        req.userRoles = normalizeRoles(user.roles);
       }
     }
     next();
