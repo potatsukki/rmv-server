@@ -46,6 +46,11 @@ export const reassignAppointmentSalesSchema = z.object({
   reason: z.string().max(500).trim().optional(),
 });
 
+export const salesAppointmentDecisionSchema = z.object({
+  decision: z.enum(['accept', 'decline']),
+  reason: z.string().max(500).trim().optional(),
+});
+
 export const rescheduleRequestSchema = z.object({
   reason: z.string().min(1).max(500).trim(),
   newDate: z.string().regex(dateRegex, 'Date must be YYYY-MM-DD').optional(),
@@ -101,6 +106,7 @@ export type RequestAppointmentInput = z.infer<typeof requestAppointmentSchema>;
 export type AgentCreateAppointmentInput = z.infer<typeof agentCreateAppointmentSchema>;
 export type ConfirmAppointmentInput = z.infer<typeof confirmAppointmentSchema>;
 export type ReassignAppointmentSalesInput = z.infer<typeof reassignAppointmentSalesSchema>;
+export type SalesAppointmentDecisionInput = z.infer<typeof salesAppointmentDecisionSchema>;
 export type RescheduleRequestInput = z.infer<typeof rescheduleRequestSchema>;
 export type RescheduleCompleteInput = z.infer<typeof rescheduleCompleteSchema>;
 export type CancelAppointmentInput = z.infer<typeof cancelAppointmentSchema>;

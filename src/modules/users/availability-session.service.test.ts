@@ -141,7 +141,9 @@ describe('availability-session.service sales assignment eligibility', () => {
 
   it('blocks sales staff who already have another non-final appointment in the same slot', async () => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce({ _id: 'appt-conflict' });
+    mockAppointmentExists
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ _id: 'appt-conflict' });
 
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1',
@@ -156,7 +158,7 @@ describe('availability-session.service sales assignment eligibility', () => {
       assignmentEligible: false,
       assignmentBlockedReason: 'Booked in another appointment',
     });
-    expect(mockAppointmentExists).toHaveBeenCalledWith({
+    expect(mockAppointmentExists).toHaveBeenNthCalledWith(2, {
       salesStaffId: 'sales-1',
       date: '2026-04-23',
       slotCode: '09:00',
@@ -165,9 +167,29 @@ describe('availability-session.service sales assignment eligibility', () => {
     });
   });
 
+  it('blocks sales staff for the whole date when they have an active ocular visit', async () => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockAppointmentExists.mockResolvedValueOnce({ _id: 'ocular-conflict' });
+
+    const result = await evaluateSalesAssignmentEligibility({
+      salesStaffId: 'sales-1',
+      userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      session: buildSession() as never,
+      dateStr: '2026-04-23',
+      slotCode: '13:00',
+    });
+
+    expect(result).toEqual({
+      assignmentEligible: false,
+      assignmentBlockedReason: 'In ocular visit for this date',
+    });
+  });
+
   it('returns eligible when status, shift, date blocks, and conflicts all pass', async () => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce(null);
+    mockAppointmentExists
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
 
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1',

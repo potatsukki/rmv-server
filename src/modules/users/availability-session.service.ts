@@ -7,6 +7,7 @@ import {
 } from '../../models/index.js';
 import {
   AppointmentStatus,
+  AppointmentType,
   Role,
   type SlotCode,
   StaffAvailabilityStatus,
@@ -300,6 +301,19 @@ export async function evaluateSalesAssignmentEligibility(input: {
   };
   if (appointmentId) {
     conflictFilter._id = { $ne: appointmentId };
+  }
+
+  const ocularConflictFilter: Record<string, unknown> = {
+    salesStaffId,
+    date: dateStr,
+    type: AppointmentType.OCULAR,
+    status: { $nin: FINAL_APPOINTMENT_STATUSES },
+  };
+  if (appointmentId) ocularConflictFilter._id = { $ne: appointmentId };
+
+  const activeOcularAppointment = await Appointment.exists(ocularConflictFilter);
+  if (activeOcularAppointment) {
+    return { assignmentEligible: false, assignmentBlockedReason: 'In ocular visit for this date' };
   }
 
   const conflictingAppointment = await Appointment.exists(conflictFilter);
