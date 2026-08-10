@@ -130,6 +130,13 @@ router.post(
 );
 
 router.post(
+  '/:id/reschedule-reject',
+  authenticate,
+  authorize(Role.APPOINTMENT_AGENT, Role.ADMIN),
+  ctrl.rejectReschedule,
+);
+
+router.post(
   '/:id/complete',
   authenticate,
   authorize(Role.SALES_STAFF),

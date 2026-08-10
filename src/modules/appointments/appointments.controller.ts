@@ -180,6 +180,17 @@ export const completeReschedule = asyncHandler(async (req: Request, res: Respons
   res.json({ success: true, data: appointment });
 });
 
+export const rejectReschedule = asyncHandler(async (req: Request, res: Response) => {
+  const appointment = await appointmentsService.rejectReschedule(
+    req.params.id as string,
+    req.userId!,
+    req.ip,
+    req.get('user-agent'),
+    req.body.reason,
+  );
+  res.json({ success: true, data: appointment });
+});
+
 // ── Cancel ──
 export const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
   const primaryRole = req.userRoles!.includes(Role.CUSTOMER) ? Role.CUSTOMER : req.userRoles![0];
