@@ -1953,9 +1953,9 @@ export async function submitReport(
       if (!hasRecommendedOcularAddress) {
         await createAndSendNotification(
           report.customerId,
-          NotificationCategory.APPOINTMENT,
-          'Ocular Visit Scheduled — Address Needed',
-          `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot}. Please add and pin your site address before the visit can be finalized.`,
+          NotificationCategory.SYSTEM,
+          'Action Required — Submit Ocular Site Pin & Address',
+          `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot}. Open this appointment to submit your exact map pin and complete site address. We will then confirm whether the visit is free within Metro Manila or requires an ocular fee.`,
           `/appointments/${ocularAppointment._id}`,
         );
         if (ocularAppointment.salesStaffId) {
