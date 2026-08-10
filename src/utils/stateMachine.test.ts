@@ -14,6 +14,20 @@ describe('appointmentStateMachine', () => {
 
     expect(
       appointmentStateMachine.canTransition(
+        AppointmentStatus.REQUESTED,
+        AppointmentStatus.RESCHEDULE_REQUESTED,
+      ),
+    ).toBe(true);
+
+    expect(
+      appointmentStateMachine.canTransition(
+        AppointmentStatus.PREPARING,
+        AppointmentStatus.RESCHEDULE_REQUESTED,
+      ),
+    ).toBe(true);
+
+    expect(
+      appointmentStateMachine.canTransition(
         AppointmentStatus.COMPLETED,
         AppointmentStatus.READY_FOR_OCULAR,
       ),

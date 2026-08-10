@@ -1842,6 +1842,7 @@ export async function requestReschedule(
   const alreadyRequested = appointment.status === AppointmentStatus.RESCHEDULE_REQUESTED;
   if (!alreadyRequested) {
     appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.RESCHEDULE_REQUESTED);
+    appointment.previousStatusBeforeReschedule = appointment.status;
   }
 
   appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
@@ -1866,8 +1867,8 @@ export async function requestReschedule(
     NotificationCategory.APPOINTMENT,
     alreadyRequested ? 'Reschedule Request Updated' : 'Reschedule Requested',
     alreadyRequested
-      ? `Customer updated the reschedule request for appointment on ${appointment.date}. New reason: ${input.reason}`
-      : `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
+      ? `Customer requested ${input.newDate || appointment.requestedRescheduleDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode)}. Updated reason: ${input.reason}`
+      : `Customer requested ${input.newDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.slotCode)}. Reason: ${input.reason}`,
     `/appointments/${appointment._id}`,
   );
 
@@ -1888,12 +1889,14 @@ export async function rejectReschedule(
     throw AppError.badRequest('Appointment is not pending reschedule');
   }
 
-  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+  const previousStatus = appointment.previousStatusBeforeReschedule || AppointmentStatus.CONFIRMED;
+  appointmentStateMachine.assertTransition(appointment.status, previousStatus);
   const requestedDate = appointment.requestedRescheduleDate || appointment.date;
   const requestedSlotCode = appointment.requestedRescheduleSlotCode || appointment.slotCode;
 
-  appointment.status = AppointmentStatus.CONFIRMED;
+  appointment.status = previousStatus;
   appointment.rescheduleReason = undefined;
+  appointment.previousStatusBeforeReschedule = undefined;
   appointment.requestedRescheduleDate = undefined;
   appointment.requestedRescheduleSlotCode = undefined;
   await appointment.save();
@@ -1974,6 +1977,7 @@ export async function completeReschedule(
   appointment.attendanceNotes = undefined;
   appointment.attendanceOverrideReason = undefined;
   appointment.rescheduleReason = undefined;
+  appointment.previousStatusBeforeReschedule = undefined;
   appointment.requestedRescheduleDate = undefined;
   appointment.requestedRescheduleSlotCode = undefined;
   appointment.rescheduleCount += 1;
@@ -3394,4 +3398,3 @@ async function autoAssignSalesStaff(dateStr: string, slotCode: SlotCode): Promis
   counts.sort((a, b) => a.count - b.count);
   return counts[0].staffId;
 }
-
