@@ -1632,12 +1632,6 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (consultationOutcome === 'schedule_ocular' && !hasRecommendedOcularAddress) {
-      throw AppError.badRequest(
-        'Select a saved customer address before scheduling the ocular visit.',
-        ErrorCode.VALIDATION_ERROR,
-      );
-    }
     if (consultationOutcome === 'no_ocular' && !report.noOcularReason?.trim()) {
       throw AppError.badRequest(
         'Explain why ocular is not needed before proceeding without ocular.',
@@ -1929,11 +1923,13 @@ export async function submitReport(
         }
       }
 
-      const { address: selectedOcularAddress, ocularVisitData } = await applyRecommendedOcularAddress(
-        ocularAppointment,
-        report.recommendedOcularAddress as any,
-      );
-      await ocularAppointment.save();
+      if (hasRecommendedOcularAddress) {
+        await applyRecommendedOcularAddress(
+          ocularAppointment,
+          report.recommendedOcularAddress as any,
+        );
+        await ocularAppointment.save();
+      }
       await promoteConsultationReportsToOcularAppointment(
         ocularAppointment._id,
         appt._id,
@@ -1954,37 +1950,56 @@ export async function submitReport(
       }
 
       const readableSlot = formatOcularSlot(recommendedOcularSlot!);
-      const addressLine = selectedOcularAddress.formattedAddress || ocularAppointment.formattedAddress || 'the selected project address';
-      const requiresOcularFee = !ocularVisitData.ocularFeeBreakdown.isWithinNCR && ocularVisitData.ocularFee > 0;
-
-      if (requiresOcularFee) {
+      if (!hasRecommendedOcularAddress) {
         await createAndSendNotification(
           report.customerId,
-          NotificationCategory.PAYMENT,
-          'Ocular Visit Payment Required',
-          `Your ocular visit for ${recommendedOcularDate} at ${readableSlot} uses ${addressLine}. Please pay the ocular fee of ₱${ocularVisitData.ocularFee.toLocaleString()} to proceed.`,
-          `/appointments/${ocularAppointment._id}/pay-ocular-fee`,
+          NotificationCategory.APPOINTMENT,
+          'Ocular Visit Scheduled — Address Needed',
+          `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot}. Please add and pin your site address before the visit can be finalized.`,
+          `/appointments/${ocularAppointment._id}`,
         );
+        if (ocularAppointment.salesStaffId) {
+          await createAndSendNotification(
+            ocularAppointment.salesStaffId.toString(),
+            NotificationCategory.APPOINTMENT,
+            'Ocular Visit Scheduled — Customer Address Needed',
+            `The ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot}. Waiting for the customer to add and pin the site address.`,
+            `/appointments/${ocularAppointment._id}`,
+          );
+        }
       } else {
-        await createAndSendNotification(
-          report.customerId,
-          NotificationCategory.APPOINTMENT,
-          'Ocular Visit Scheduled',
-          `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot} at ${addressLine}. No ocular fee is required.`,
-          `/appointments/${ocularAppointment._id}`,
-        );
-      }
+        const addressLine = ocularAppointment.formattedAddress || 'the selected project address';
+        const requiresOcularFee = !ocularAppointment.ocularFeeBreakdown?.isWithinNCR && (ocularAppointment.ocularFee || 0) > 0;
 
-      if (ocularAppointment.salesStaffId) {
-        await createAndSendNotification(
-          ocularAppointment.salesStaffId.toString(),
-          NotificationCategory.APPOINTMENT,
-          requiresOcularFee ? 'Ocular Address Selected - Payment Pending' : 'Ocular Address Selected',
-          requiresOcularFee
-            ? `The customer address is set for ${recommendedOcularDate} at ${readableSlot}. Waiting for ocular fee payment.`
-            : `The customer address is set for ${recommendedOcularDate} at ${readableSlot}. You can finalize the ocular visit.`,
-          `/appointments/${ocularAppointment._id}`,
-        );
+        if (requiresOcularFee) {
+          await createAndSendNotification(
+            report.customerId,
+            NotificationCategory.PAYMENT,
+            'Ocular Visit Payment Required',
+            `Your ocular visit for ${recommendedOcularDate} at ${readableSlot} uses ${addressLine}. Please pay the ocular fee of ₱${ocularAppointment.ocularFee?.toLocaleString()} to proceed.`,
+            `/appointments/${ocularAppointment._id}/pay-ocular-fee`,
+          );
+        } else {
+          await createAndSendNotification(
+            report.customerId,
+            NotificationCategory.APPOINTMENT,
+            'Ocular Visit Scheduled',
+            `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot} at ${addressLine}. No ocular fee is required.`,
+            `/appointments/${ocularAppointment._id}`,
+          );
+        }
+
+        if (ocularAppointment.salesStaffId) {
+          await createAndSendNotification(
+            ocularAppointment.salesStaffId.toString(),
+            NotificationCategory.APPOINTMENT,
+            requiresOcularFee ? 'Ocular Address Selected - Payment Pending' : 'Ocular Address Selected',
+            requiresOcularFee
+              ? `The customer address is set for ${recommendedOcularDate} at ${readableSlot}. Waiting for ocular fee payment.`
+              : `The customer address is set for ${recommendedOcularDate} at ${readableSlot}. You can finalize the ocular visit.`,
+            `/appointments/${ocularAppointment._id}`,
+          );
+        }
       }
 
       if (appt.status !== AppointmentStatus.COMPLETED) {
