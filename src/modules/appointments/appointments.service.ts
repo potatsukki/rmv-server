@@ -1839,7 +1839,10 @@ export async function requestReschedule(
     );
   }
 
-  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.RESCHEDULE_REQUESTED);
+  const alreadyRequested = appointment.status === AppointmentStatus.RESCHEDULE_REQUESTED;
+  if (!alreadyRequested) {
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.RESCHEDULE_REQUESTED);
+  }
 
   appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
   appointment.rescheduleReason = input.reason;
@@ -1856,13 +1859,15 @@ export async function requestReschedule(
   });
 
   // Notify agents
-  await notifyRole(
-    Role.APPOINTMENT_AGENT,
-    NotificationCategory.APPOINTMENT,
-    'Reschedule Requested',
-    `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
-    `/appointments/${appointment._id}`,
-  );
+  if (!alreadyRequested) {
+    await notifyRole(
+      Role.APPOINTMENT_AGENT,
+      NotificationCategory.APPOINTMENT,
+      'Reschedule Requested',
+      `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
+      `/appointments/${appointment._id}`,
+    );
+  }
 
   return appointment;
 }
