@@ -98,6 +98,7 @@ export interface IAppointment extends Document {
   rescheduleCount: number;
   maxReschedules: number;
   rescheduleReason?: string;
+  previousStatusBeforeReschedule?: AppointmentStatus;
   requestedRescheduleDate?: string;
   requestedRescheduleSlotCode?: SlotCode;
 
@@ -200,6 +201,7 @@ const appointmentSchema = new Schema<IAppointment>(
     rescheduleCount: { type: Number, default: 0 },
     maxReschedules: { type: Number, default: 3 },
     rescheduleReason: { type: String },
+    previousStatusBeforeReschedule: { type: String, enum: Object.values(AppointmentStatus) },
     requestedRescheduleDate: { type: String },
     requestedRescheduleSlotCode: { type: String },
 
