@@ -1859,15 +1859,15 @@ export async function requestReschedule(
   });
 
   // Notify agents
-  if (!alreadyRequested) {
-    await notifyRole(
-      Role.APPOINTMENT_AGENT,
-      NotificationCategory.APPOINTMENT,
-      'Reschedule Requested',
-      `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
-      `/appointments/${appointment._id}`,
-    );
-  }
+  await notifyRole(
+    Role.APPOINTMENT_AGENT,
+    NotificationCategory.APPOINTMENT,
+    alreadyRequested ? 'Reschedule Request Updated' : 'Reschedule Requested',
+    alreadyRequested
+      ? `Customer updated the reschedule request for appointment on ${appointment.date}. New reason: ${input.reason}`
+      : `Reschedule requested for appointment on ${appointment.date}. Reason: ${input.reason}`,
+    `/appointments/${appointment._id}`,
+  );
 
   return appointment;
 }

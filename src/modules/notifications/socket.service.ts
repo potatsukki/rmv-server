@@ -9,6 +9,12 @@ import type { Types } from 'mongoose';
 
 let io: SocketServer | null = null;
 
+const INTERNAL_APPOINTMENT_NOTIFICATION_ROLES = new Set<Role>([
+  Role.APPOINTMENT_AGENT,
+  Role.SALES_STAFF,
+  Role.ADMIN,
+]);
+
 interface JwtPayload {
   userId: string;
   roles: Role[];
@@ -95,9 +101,14 @@ export async function createAndSendNotification(
     if (category !== NotificationCategory.SYSTEM) {
       const user = await User.findById(userId);
       if (user) {
-        const prefKey = category as keyof typeof user.notificationPreferences;
-        if (user.notificationPreferences[prefKey] === false) {
-          return; // User has explicitly disabled this category — skip entirely
+        const bypassPreferenceCheck = category === NotificationCategory.APPOINTMENT
+          && user.roles.some((role) => INTERNAL_APPOINTMENT_NOTIFICATION_ROLES.has(role));
+
+        if (!bypassPreferenceCheck) {
+          const prefKey = category as keyof typeof user.notificationPreferences;
+          if (user.notificationPreferences[prefKey] === false) {
+            return; // User has explicitly disabled this category — skip entirely
+          }
         }
       }
     }
