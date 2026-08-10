@@ -121,7 +121,13 @@ describe('requestReschedule', () => {
         userAgent: 'vitest-agent',
       }),
     );
-    expect(mockNotifyRole).not.toHaveBeenCalled();
+    expect(mockNotifyRole).toHaveBeenCalledWith(
+      'appointment_agent',
+      expect.anything(),
+      'Reschedule Request Updated',
+      'Customer updated the reschedule request for appointment on 2026-08-15. New reason: Need a later schedule',
+      '/appointments/appointment-1',
+    );
     expect(result).toBe(appointment);
   });
 });
