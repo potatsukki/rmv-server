@@ -896,11 +896,6 @@ export async function reviewAssignedAppointment(
   await assertSalesAvailable(salesStaffId, appointment.date, appointment.slotCode as SlotCode, appointment._id.toString());
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
 
-  if (appointment.type === AppointmentType.OCULAR) {
-    await lockSlot(appointment.date, appointment.slotCode as SlotCode, salesStaffId, salesStaffId);
-    await confirmSlotLock(appointment.date, appointment.slotCode as SlotCode, salesStaffId, appointment._id);
-  }
-
   appointment.status = AppointmentStatus.CONFIRMED;
   appointment.confirmedBy = salesStaffId as unknown as Types.ObjectId;
   await appointment.save();
@@ -934,7 +929,7 @@ export async function reviewAssignedAppointment(
     appointment._id,
     appointment.customerId,
     appointment.salesStaffId!,
-    appointment.type === AppointmentType.OCULAR ? 'ocular' : 'consultation',
+    'consultation',
     appointment.customerSiteDetails || undefined,
     appointment.serviceTypes,
     appointment.serviceTypes?.[0],
