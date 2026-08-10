@@ -104,6 +104,17 @@ export const reassignAppointmentSales = asyncHandler(async (req: Request, res: R
   res.json({ success: true, data: appointment });
 });
 
+export const reviewAssignedAppointment = asyncHandler(async (req: Request, res: Response) => {
+  const appointment = await appointmentsService.reviewAssignedAppointment(
+    req.params.id as string,
+    req.body,
+    req.userId!,
+    req.ip,
+    req.get('user-agent'),
+  );
+  res.json({ success: true, data: appointment });
+});
+
 // ── Complete ──
 export const completeAppointment = asyncHandler(async (req: Request, res: Response) => {
   const appointment = await appointmentsService.completeAppointment(

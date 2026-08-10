@@ -7,7 +7,7 @@ import {
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, Role, AuditAction,
-  NotificationCategory, PaymentMethod, OcularFeePaymentChoice, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
+  NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
@@ -28,6 +28,7 @@ import type {
   AgentCreateAppointmentInput,
   ConfirmAppointmentInput,
   ReassignAppointmentSalesInput,
+  SalesAppointmentDecisionInput,
   AppointmentQueueQuery,
   ConsultationAttendanceInput,
   RescheduleRequestInput,
@@ -332,20 +333,72 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
   }
 }
 
-async function assertSlotAvailable(dateStr: string, slotCode: string, type: string): Promise<void> {
+const SLOT_CAPACITY_FINAL_STATUSES = [
+  AppointmentStatus.COMPLETED,
+  AppointmentStatus.CANCELLED,
+  AppointmentStatus.NO_SHOW,
+];
+
+async function getSlotAvailability(
+  dateStr: string,
+  slotCode: string,
+  appointmentId?: string,
+) {
+  const salesStaff = await User.find({
+    roles: Role.SALES_STAFF,
+    isActive: true,
+    availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
+  }).select('_id').lean();
+
+  const salesStaffIds = salesStaff.map((staff) => staff._id.toString());
+  if (salesStaffIds.length === 0) return { available: false, remaining: 0 };
+
+  const unavailable = await SalesAvailability.find({
+    salesStaffId: { $in: salesStaffIds },
+    unavailableDates: dateStr,
+  }).select('salesStaffId').lean();
+  const unavailableIds = new Set(unavailable.map((entry) => entry.salesStaffId.toString()));
+  const eligibleIds = new Set(salesStaffIds.filter((id) => !unavailableIds.has(id)));
+  if (eligibleIds.size === 0) return { available: false, remaining: 0 };
+
+  const appointmentFilter: Record<string, unknown> = {
+    date: dateStr,
+    slotCode,
+    status: { $nin: SLOT_CAPACITY_FINAL_STATUSES },
+  };
+  if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
+
+  const scheduledAppointments = await Appointment.find(appointmentFilter)
+    .select('salesStaffId')
+    .lean();
+  const assignedStaffIds = new Set(
+    scheduledAppointments
+      .map((appointment) => appointment.salesStaffId?.toString())
+      .filter((id): id is string => Boolean(id && eligibleIds.has(id))),
+  );
+  const awaitingAssignment = scheduledAppointments.filter((appointment) => !appointment.salesStaffId).length;
+  const remaining = Math.max(0, eligibleIds.size - assignedStaffIds.size - awaitingAssignment);
+
+  return { available: remaining > 0, remaining };
+}
+
+async function assertSlotAvailable(
+  dateStr: string,
+  slotCode: string,
+  type: string,
+  appointmentId?: string,
+): Promise<void> {
   const blocked = await BlockedSlot.exists({ date: dateStr, slotCode, type });
   if (blocked) {
     throw AppError.conflict('This slot has been blocked by an administrator', ErrorCode.SLOT_LOCKED);
   }
 
-  const booked = await Appointment.countDocuments({
-    date: dateStr,
-    slotCode,
-    type,
-    status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED] },
-  });
-  if (booked > 0) {
-    throw AppError.conflict('This slot is no longer available', ErrorCode.SLOT_LOCKED);
+  const capacity = await getSlotAvailability(dateStr, slotCode, appointmentId);
+  if (!capacity.available) {
+    throw AppError.conflict(
+      'No sales staff is available for this date and time. Please choose another schedule.',
+      ErrorCode.SLOT_LOCKED,
+    );
   }
 }
 
@@ -514,17 +567,13 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
   // 1 booking per slot; also check admin/agent blocked slots
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
-      const booked = await Appointment.countDocuments({
-        date,
-        slotCode,
-        type,
-        status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED] },
-      });
       const blocked = await BlockedSlot.exists({ date, slotCode, type });
+      const capacity = blocked ? { available: false, remaining: 0 } : await getSlotAvailability(date, slotCode);
       return {
         slotCode,
         time: formatSlotTime(slotCode),
-        available: booked === 0 && !blocked,
+        available: capacity.available && !blocked,
+        remaining: capacity.remaining,
         blocked: !!blocked,
       };
     }),
@@ -664,7 +713,7 @@ export async function agentCreateAppointment(
   return appointment;
 }
 
-// ── Agent: Confirm Appointment ──
+// ── Agent: Assign Appointment for Sales Review ──
 
 export async function confirmAppointment(
   appointmentId: string,
@@ -673,104 +722,14 @@ export async function confirmAppointment(
   ip?: string,
   ua?: string,
 ) {
-  const appointment = await Appointment.findById(appointmentId);
-  if (!appointment) throw AppError.notFound('Appointment not found');
-
-  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
-
-  // Block confirmation for non-NCR ocular appointments if the ocular fee hasn't been paid
-  // Exception: if customer chose cash, the sales staff will collect it during the visit
-  if (
-    appointment.type === AppointmentType.OCULAR &&
-    appointment.ocularFeeBreakdown &&
-    !appointment.ocularFeeBreakdown.isWithinNCR &&
-    !appointment.ocularFeePaid &&
-    appointment.ocularFeePaymentChoice !== OcularFeePaymentChoice.CASH
-  ) {
-    throw AppError.badRequest(
-      'Ocular fee must be paid before confirming this appointment. The location is outside Metro Manila.',
-      ErrorCode.VALIDATION_ERROR,
-    );
-  }
-
-  // Assign or re-assign sales staff
-  const salesStaff = await User.findOne({
-    _id: input.salesStaffId,
-    roles: Role.SALES_STAFF,
-    isActive: true,
-  });
-  if (!salesStaff) throw AppError.notFound('Sales staff not found');
-  await assertSalesAvailable(
-    input.salesStaffId,
-    appointment.date,
-    appointment.slotCode as SlotCode,
-    appointment._id.toString(),
+  const appointment = await reassignAppointmentSales(
+    appointmentId,
+    { salesStaffId: input.salesStaffId, reason: input.internalNotes },
+    agentId,
+    [Role.APPOINTMENT_AGENT],
+    ip,
+    ua,
   );
-
-  // If ocular and sales changed, update slot lock
-  if (appointment.type === AppointmentType.OCULAR) {
-    if (appointment.salesStaffId && appointment.salesStaffId.toString() !== input.salesStaffId) {
-      await releaseSlotLock(appointment.date, appointment.slotCode as SlotCode, appointment.salesStaffId.toString());
-    }
-    await lockSlot(appointment.date, appointment.slotCode as SlotCode, input.salesStaffId, agentId);
-    await confirmSlotLock(appointment.date, appointment.slotCode as SlotCode, input.salesStaffId, appointment._id);
-  }
-
-  appointment.status = AppointmentStatus.CONFIRMED;
-  appointment.salesStaffId = salesStaff._id;
-  appointment.confirmedBy = agentId as unknown as Types.ObjectId;
-  if (input.internalNotes) appointment.internalNotes = input.internalNotes;
-  await appointment.save();
-
-  await AuditLog.create({
-    action: AuditAction.APPOINTMENT_CONFIRMED,
-    actorId: agentId,
-    targetType: 'appointment',
-    targetId: appointment._id,
-    details: { salesStaffId: input.salesStaffId },
-    ipAddress: ip,
-    userAgent: ua,
-  });
-
-  // Notify customer
-  const customer = await User.findById(appointment.customerId);
-  if (customer) {
-    await createAndSendNotification(
-      appointment.customerId,
-      NotificationCategory.APPOINTMENT,
-      'Appointment Confirmed',
-      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed.`,
-      `/appointments/${appointment._id}`,
-    );
-
-    await sendAppointmentConfirmedEmail(customer.email, {
-      date: appointment.date,
-      time: formatSlotTime(appointment.slotCode),
-      type: appointment.type === AppointmentType.OCULAR ? 'Ocular Visit' : 'Office Visit',
-    });
-  }
-
-  // Notify sales staff
-  await createAndSendNotification(
-    input.salesStaffId,
-    NotificationCategory.APPOINTMENT,
-    'New Appointment Assigned',
-    `You have been assigned an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
-    `/appointments/${appointment._id}`,
-  );
-
-  // ── Auto-create VisitReport (DRAFT) for the assigned sales staff ──
-  await autoCreateVisitReport(
-    appointment._id,
-    appointment.customerId,
-    salesStaff._id,
-    appointment.type === AppointmentType.OCULAR ? 'ocular' : 'consultation',
-    appointment.customerSiteDetails || undefined,
-    appointment.serviceTypes,
-    appointment.serviceTypes?.[0],
-    appointment.serviceTypeCustom,
-  );
-
   return appointment;
 }
 
@@ -797,10 +756,6 @@ export async function reassignAppointmentSales(
     throw AppError.forbidden('Only appointment agents, admins, or the assigned sales staff can reassign this appointment');
   }
 
-  if (appointment.status === AppointmentStatus.REQUESTED && !appointment.salesStaffId) {
-    throw AppError.badRequest('Use the confirm endpoint to assign sales staff for unconfirmed appointments');
-  }
-
   const nextSalesStaff = await User.findOne({
     _id: input.salesStaffId,
     roles: Role.SALES_STAFF,
@@ -820,7 +775,7 @@ export async function reassignAppointmentSales(
     appointment._id.toString(),
   );
 
-  if (appointment.type === AppointmentType.OCULAR) {
+  if (appointment.type === AppointmentType.OCULAR && appointment.status !== AppointmentStatus.REQUESTED) {
     if (previousSalesStaffId) {
       await releaseSlotLock(appointment.date, appointment.slotCode as SlotCode, previousSalesStaffId);
     }
@@ -831,7 +786,9 @@ export async function reassignAppointmentSales(
   appointment.salesStaffId = nextSalesStaff._id;
   await appointment.save();
 
-  const ownershipSync = await syncDraftOwnershipForReassignment(appointment._id, nextSalesStaff._id);
+  const ownershipSync = appointment.status === AppointmentStatus.REQUESTED
+    ? { draftVisitReportsUpdated: 0, projectsUpdated: 0 }
+    : await syncDraftOwnershipForReassignment(appointment._id, nextSalesStaff._id);
 
   await AuditLog.create({
     action: AuditAction.SALES_ASSIGNED,
@@ -852,8 +809,10 @@ export async function reassignAppointmentSales(
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
-    'Appointment Reassigned',
-    `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
+    appointment.status === AppointmentStatus.REQUESTED ? 'Appointment Review Required' : 'Appointment Reassigned',
+    appointment.status === AppointmentStatus.REQUESTED
+      ? `Please review the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} and accept or decline it.`
+      : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
     `/appointments/${appointment._id}`,
   );
 
@@ -867,12 +826,119 @@ export async function reassignAppointmentSales(
     );
   }
 
+  if (appointment.status !== AppointmentStatus.REQUESTED) {
+    await createAndSendNotification(
+      appointment.customerId,
+      NotificationCategory.APPOINTMENT,
+      'Appointment Team Update',
+      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has an updated assigned sales staff.`,
+      `/appointments/${appointment._id}`,
+    );
+  }
+
+  return appointment;
+}
+
+// ── Sales Staff: Review Assigned Appointment ──
+
+export async function reviewAssignedAppointment(
+  appointmentId: string,
+  input: SalesAppointmentDecisionInput,
+  salesStaffId: string,
+  ip?: string,
+  ua?: string,
+) {
+  const appointment = await Appointment.findById(appointmentId);
+  if (!appointment) throw AppError.notFound('Appointment not found');
+
+  if (appointment.type !== AppointmentType.OFFICE) {
+    throw AppError.badRequest('Ocular appointments are confirmed through the ocular finalization flow');
+  }
+
+  if (appointment.status !== AppointmentStatus.REQUESTED || appointment.salesStaffId?.toString() !== salesStaffId) {
+    throw AppError.forbidden('Only the assigned sales staff can review this pending appointment');
+  }
+
+  if (input.decision === 'decline') {
+    appointment.salesStaffId = undefined;
+    if (input.reason) appointment.internalNotes = input.reason;
+    await appointment.save();
+
+    await AuditLog.create({
+      action: AuditAction.APPOINTMENT_UPDATED,
+      actorId: salesStaffId,
+      targetType: 'appointment',
+      targetId: appointment._id,
+      details: { action: 'sales_assignment_declined', reason: input.reason || null },
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    await notifyRole(
+      Role.APPOINTMENT_AGENT,
+      NotificationCategory.APPOINTMENT,
+      'Sales Staff Reassignment Needed',
+      `The assigned sales staff declined the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}${input.reason ? `. Reason: ${input.reason}` : ''}. Please assign another staff member.`,
+      `/appointments/${appointment._id}`,
+    );
+
+    await createAndSendNotification(
+      appointment.customerId,
+      NotificationCategory.APPOINTMENT,
+      'Appointment Team Update',
+      'We are assigning another available sales staff member to your appointment.',
+      `/appointments/${appointment._id}`,
+    );
+
+    return appointment;
+  }
+
+  await assertSalesAvailable(salesStaffId, appointment.date, appointment.slotCode as SlotCode, appointment._id.toString());
+  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+
+  if (appointment.type === AppointmentType.OCULAR) {
+    await lockSlot(appointment.date, appointment.slotCode as SlotCode, salesStaffId, salesStaffId);
+    await confirmSlotLock(appointment.date, appointment.slotCode as SlotCode, salesStaffId, appointment._id);
+  }
+
+  appointment.status = AppointmentStatus.CONFIRMED;
+  appointment.confirmedBy = salesStaffId as unknown as Types.ObjectId;
+  await appointment.save();
+
+  await AuditLog.create({
+    action: AuditAction.APPOINTMENT_CONFIRMED,
+    actorId: salesStaffId,
+    targetType: 'appointment',
+    targetId: appointment._id,
+    details: { action: 'sales_assignment_accepted', salesStaffId },
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
   await createAndSendNotification(
     appointment.customerId,
     NotificationCategory.APPOINTMENT,
-    'Appointment Team Update',
-    `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has an updated assigned sales staff.`,
+    'Appointment Confirmed',
+    `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed.`,
     `/appointments/${appointment._id}`,
+  );
+  await notifyRole(
+    Role.APPOINTMENT_AGENT,
+    NotificationCategory.APPOINTMENT,
+    'Sales Staff Confirmed Appointment',
+    `The assigned sales staff confirmed the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
+    `/appointments/${appointment._id}`,
+  );
+
+  await autoCreateVisitReport(
+    appointment._id,
+    appointment.customerId,
+    appointment.salesStaffId!,
+    appointment.type === AppointmentType.OCULAR ? 'ocular' : 'consultation',
+    appointment.customerSiteDetails || undefined,
+    appointment.serviceTypes,
+    appointment.serviceTypes?.[0],
+    appointment.serviceTypeCustom,
   );
 
   return appointment;
@@ -1845,6 +1911,18 @@ export async function requestReschedule(
     appointment.previousStatusBeforeReschedule = appointment.status;
   }
 
+  if (input.newDate || input.newSlotCode) {
+    const requestedDate = input.newDate || appointment.requestedRescheduleDate || appointment.date;
+    const requestedSlotCode = input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode;
+    await assertDateAvailable(requestedDate);
+    await assertSlotAvailable(
+      requestedDate,
+      requestedSlotCode,
+      appointment.type,
+      appointment._id.toString(),
+    );
+  }
+
   appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
   appointment.rescheduleReason = input.reason;
   if (input.newDate) appointment.requestedRescheduleDate = input.newDate;
@@ -1867,7 +1945,9 @@ export async function requestReschedule(
     NotificationCategory.APPOINTMENT,
     alreadyRequested ? 'Reschedule Request Updated' : 'Reschedule Requested',
     alreadyRequested
-      ? `Customer requested ${input.newDate || appointment.requestedRescheduleDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode)}. Updated reason: ${input.reason}`
+      ? input.newDate || input.newSlotCode
+        ? `Customer requested ${input.newDate || appointment.requestedRescheduleDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode)}. Updated reason: ${input.reason}`
+        : `Customer updated the reschedule request for appointment on ${appointment.date}. New reason: ${input.reason}`
       : `Customer requested ${input.newDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.slotCode)}. Reason: ${input.reason}`,
     `/appointments/${appointment._id}`,
   );
@@ -1944,10 +2024,10 @@ export async function completeReschedule(
   }
 
   await assertDateAvailable(input.date);
-  await assertSlotAvailable(input.date, input.slotCode, appointment.type);
+  await assertSlotAvailable(input.date, input.slotCode, appointment.type, appointment._id.toString());
 
-  // Reschedule acceptance only confirms the requested schedule. The appointment
-  // agent assigns an available sales staff member afterward via reassign-sales.
+  // Reschedule acceptance updates the customer schedule first. The appointment
+  // agent then assigns an available sales staff member for review.
   if (appointment.type === AppointmentType.OCULAR) {
     // Release the previous staff member's old slot. The newly selected staff
     // member will receive a lock when the agent assigns them after acceptance.
@@ -1961,7 +2041,8 @@ export async function completeReschedule(
 
   appointment.date = input.date;
   appointment.slotCode = input.slotCode as SlotCode;
-  appointment.status = AppointmentStatus.CONFIRMED;
+  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.REQUESTED);
+  appointment.status = AppointmentStatus.REQUESTED;
   appointment.attendanceStatus = AppointmentAttendanceStatus.SCHEDULED;
   appointment.actualArrivalAt = undefined;
   appointment.consultationStartedAt = undefined;
@@ -1995,8 +2076,8 @@ export async function completeReschedule(
   await createAndSendNotification(
     appointment.customerId,
     NotificationCategory.APPOINTMENT,
-    'Appointment Rescheduled',
-    `Your appointment has been rescheduled to ${input.date} at ${formatSlotTime(input.slotCode)}.`,
+    'Reschedule Accepted',
+    `Your appointment has been rescheduled to ${input.date} at ${formatSlotTime(input.slotCode)}. We are assigning an available sales staff member for review.`,
     `/appointments/${appointment._id}`,
   );
 

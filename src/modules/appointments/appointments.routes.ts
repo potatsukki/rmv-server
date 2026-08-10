@@ -9,6 +9,7 @@ import {
   agentCreateAppointmentSchema,
   confirmAppointmentSchema,
   reassignAppointmentSalesSchema,
+  salesAppointmentDecisionSchema,
   rescheduleRequestSchema,
   rescheduleCompleteSchema,
   cancelAppointmentSchema,
@@ -119,6 +120,14 @@ router.post(
   authorize(Role.APPOINTMENT_AGENT, Role.ADMIN, Role.SALES_STAFF),
   validate(reassignAppointmentSalesSchema),
   ctrl.reassignAppointmentSales,
+);
+
+router.post(
+  '/:id/sales-decision',
+  authenticate,
+  authorize(Role.SALES_STAFF),
+  validate(salesAppointmentDecisionSchema),
+  ctrl.reviewAssignedAppointment,
 );
 
 router.post(
