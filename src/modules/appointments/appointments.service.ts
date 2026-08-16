@@ -406,6 +406,7 @@ async function assertSalesAvailable(
   salesId: string,
   dateStr: string,
   slotCode: SlotCode | string,
+  appointmentType: AppointmentType,
   appointmentId?: string,
 ): Promise<void> {
   const salesUser = await User.findOne({
@@ -424,6 +425,7 @@ async function assertSalesAvailable(
     session: await getOpenAvailabilitySession(salesId),
     dateStr,
     slotCode,
+    appointmentType,
     appointmentId,
   });
 
@@ -772,6 +774,7 @@ export async function reassignAppointmentSales(
     input.salesStaffId,
     appointment.date,
     appointment.slotCode as SlotCode,
+    appointment.type,
     appointment._id.toString(),
   );
 
@@ -817,11 +820,12 @@ export async function reassignAppointmentSales(
   );
 
   if (previousSalesStaffId) {
+    const nextSalesStaffName = fullName(nextSalesStaff) || 'the newly assigned sales staff';
     await createAndSendNotification(
       previousSalesStaffId,
       NotificationCategory.APPOINTMENT,
       'Appointment Reassignment',
-      `An appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} was reassigned to another sales staff member.`,
+      `You have been replaced by ${nextSalesStaffName} for the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. You no longer have access to this customer appointment.`,
       `/appointments/${appointment._id}`,
     );
   }
@@ -893,7 +897,13 @@ export async function reviewAssignedAppointment(
     return appointment;
   }
 
-  await assertSalesAvailable(salesStaffId, appointment.date, appointment.slotCode as SlotCode, appointment._id.toString());
+  await assertSalesAvailable(
+    salesStaffId,
+    appointment.date,
+    appointment.slotCode as SlotCode,
+    appointment.type,
+    appointment._id.toString(),
+  );
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
 
   appointment.status = AppointmentStatus.CONFIRMED;
@@ -1426,6 +1436,7 @@ export async function agentFinalizeOcular(
     resolvedSalesStaffId,
     appointment.date,
     appointment.slotCode as SlotCode,
+    appointment.type,
     appointment._id.toString(),
   );
 
@@ -1542,6 +1553,9 @@ export async function completeAppointment(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.salesStaffId?.toString() !== actorId) {
+    throw AppError.forbidden('Only the currently assigned sales staff can complete this appointment');
+  }
 
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
 
@@ -1616,6 +1630,9 @@ export async function updateVisitStatus(
 
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.salesStaffId?.toString() !== actorId) {
+    throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
+  }
 
   if (
     appointment.type === AppointmentType.OCULAR
@@ -1715,6 +1732,9 @@ export async function markNoShow(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.salesStaffId?.toString() !== actorId) {
+    throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
+  }
 
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.NO_SHOW);
 
@@ -2624,11 +2644,17 @@ export async function recordOcularFee(
   appointmentId: string,
   input: RecordOcularFeeInput,
   actorId: string,
+  actorRoles: Role[],
   ip?: string,
   ua?: string,
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+
+  const isAgent = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT].includes(role));
+  if (!isAgent && appointment.salesStaffId?.toString() !== actorId) {
+    throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
+  }
 
   if (appointment.type !== AppointmentType.OCULAR) {
     throw AppError.badRequest('Ocular fee only applies to ocular appointments');
@@ -2693,6 +2719,15 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
     .populate('confirmedBy', 'firstName lastName');
 
   if (!appointment) throw AppError.notFound('Appointment not found');
+
+  const isPrivilegedStaff = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT].includes(role));
+  if (
+    actorRoles.includes(Role.SALES_STAFF)
+    && !isPrivilegedStaff
+    && appointment.salesStaffId?._id?.toString() !== actorId
+  ) {
+    throw AppError.forbidden('This appointment is no longer assigned to you');
+  }
 
   // Customers can only view their own
   if (
