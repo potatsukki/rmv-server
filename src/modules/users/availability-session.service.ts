@@ -28,6 +28,7 @@ const FINAL_APPOINTMENT_STATUSES = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
 ];
+const MAX_OCULAR_APPOINTMENTS_PER_DAY = 2;
 const PH_TIMEZONE_OFFSET = '+08:00';
 
 export interface AvailabilityShiftState {
@@ -246,6 +247,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
   dateStr: string;
   slotCode: SlotCode | string;
   appointmentId?: string;
+  appointmentType?: AppointmentType;
 }): Promise<SalesAssignmentEligibility> {
   const {
     salesStaffId,
@@ -254,6 +256,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
     dateStr,
     slotCode,
     appointmentId,
+    appointmentType,
   } = input;
 
   // ⚠️  TESTING BYPASS – set to `true` to skip shift/availability checks.
@@ -311,8 +314,12 @@ export async function evaluateSalesAssignmentEligibility(input: {
   };
   if (appointmentId) ocularConflictFilter._id = { $ne: appointmentId };
 
-  const activeOcularAppointment = await Appointment.exists(ocularConflictFilter);
-  if (activeOcularAppointment) {
+  const activeOcularCount = await Appointment.countDocuments(ocularConflictFilter);
+  if (appointmentType === AppointmentType.OCULAR) {
+    if (activeOcularCount >= MAX_OCULAR_APPOINTMENTS_PER_DAY) {
+      return { assignmentEligible: false, assignmentBlockedReason: 'Daily ocular limit reached (2)' };
+    }
+  } else if (activeOcularCount > 0) {
     return { assignmentEligible: false, assignmentBlockedReason: 'In ocular visit for this date' };
   }
 

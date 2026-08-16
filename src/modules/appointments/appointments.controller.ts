@@ -222,6 +222,7 @@ export const recordOcularFee = asyncHandler(async (req: Request, res: Response) 
     (req.params.id as string),
     req.body,
     req.userId!,
+    req.userRoles!,
     req.ip,
     req.get('user-agent'),
   );

@@ -7,9 +7,10 @@ import {
   Notification,
   OtpToken,
   AvailabilitySession,
+  Appointment,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { AuditAction, Role, StaffAvailabilityStatus, type SlotCode } from '../../utils/constants.js';
+import { AppointmentType, AuditAction, Role, StaffAvailabilityStatus, type SlotCode } from '../../utils/constants.js';
 import type {
   CreateUserInput,
   UpdateUserInput,
@@ -540,6 +541,10 @@ export async function listByRole(
 
   const dateStr = assignmentContext.date;
   const slotCode = assignmentContext.slotCode as SlotCode;
+  const targetAppointment = assignmentContext.appointmentId
+    ? await Appointment.findById(assignmentContext.appointmentId).select('type').lean()
+    : null;
+  const appointmentType = targetAppointment?.type as AppointmentType | undefined;
   const salesUsers = withSummaries as Array<{
     _id: string | Types.ObjectId;
     availabilityStatus?: StaffAvailabilityStatus;
@@ -554,6 +559,7 @@ export async function listByRole(
         session: await getOpenAvailabilitySession(String(user._id)),
         dateStr,
         slotCode,
+        appointmentType,
         appointmentId: assignmentContext.appointmentId,
       });
 
@@ -652,5 +658,4 @@ export async function deleteAccount(userId: string, input: DeleteAccountInput, i
 
   return { message: 'Account deleted successfully.' };
 }
-
 
