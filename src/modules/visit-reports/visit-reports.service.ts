@@ -1614,9 +1614,10 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (attendanceStatus !== AppointmentAttendanceStatus.COMPLETED) {
+    if (![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
+      .includes(attendanceStatus)) {
       throw AppError.badRequest(
-        'Complete the consultation attendance before submitting the consultation report.',
+        'Check in and start the consultation before submitting the consultation report.',
         ErrorCode.VALIDATION_ERROR,
       );
     }
@@ -1663,6 +1664,34 @@ export async function submitReport(
           ErrorCode.VALIDATION_ERROR,
         );
       }
+    }
+
+    // Submitting the final consultation report is the completion action. This
+    // mirrors ocular report submission and avoids requiring the sales staff to
+    // leave the report just to click a separate "Complete Consultation" button.
+    if (attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS) {
+      const completedAt = new Date();
+      appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
+      appt.consultationCompletedAt = completedAt;
+      appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
+      appt.attendanceUpdatedAt = completedAt;
+      await appt.save();
+
+      await AuditLog.create({
+        action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+        actorId: salesStaffId,
+        targetType: 'appointment',
+        targetId: appt._id,
+        details: {
+          action: 'complete',
+          previousAttendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+          attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
+          consultationCompletedAt: completedAt,
+          reason: 'consultation_report_submitted',
+        },
+        ipAddress: ip,
+        userAgent: ua,
+      });
     }
   }
 
