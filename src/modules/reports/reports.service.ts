@@ -731,6 +731,11 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
         deletedAt: null,
         status: ProjectStatus.FABRICATION,
         ...(isCustomerOnly && userId ? { customerId: userId } : {}),
+        ...(userRoles?.includes(Role.ENGINEER)
+          && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r as Role))
+          && userId
+          ? { engineerIds: userId }
+          : {}),
       }).exec(),
       // Count draft/returned visit reports for the current user (sales staff KPI)
       userId
