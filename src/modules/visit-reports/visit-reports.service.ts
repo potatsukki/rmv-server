@@ -211,6 +211,7 @@ function sameServiceTypes(a?: string[], b?: string[]) {
 }
 
 async function getAppointmentVisitReportServiceTypes(appointmentId: Types.ObjectId | string) {
+  const validServiceTypes = new Set<string>(Object.values(ServiceType));
   const appointment = await Appointment.findById(appointmentId)
     .select('serviceTypes serviceType')
     .lean();
@@ -218,7 +219,9 @@ async function getAppointmentVisitReportServiceTypes(appointmentId: Types.Object
     undefined,
     appointment?.serviceTypes,
     (appointment as any)?.serviceType,
-  ).filter((serviceType) => serviceType !== ServiceType.CUSTOM);
+  ).filter((serviceType) => (
+    serviceType !== ServiceType.CUSTOM && validServiceTypes.has(serviceType)
+  ));
 
   if (appointmentServiceTypes.length > 0) {
     return appointmentServiceTypes;
@@ -227,11 +230,17 @@ async function getAppointmentVisitReportServiceTypes(appointmentId: Types.Object
   const reports = await VisitReport.find({ appointmentId, visitType: 'consultation' })
     .select('serviceType')
     .lean();
-  return [...new Set(
+  const reportServiceTypes = [...new Set(
     reports
       .map((report) => report.serviceType)
-      .filter((value): value is string => isNonEmptyString(value)),
+      .filter((value): value is string => (
+        isNonEmptyString(value) && validServiceTypes.has(value)
+      )),
   )];
+
+  return reportServiceTypes.length > 0
+    ? reportServiceTypes
+    : [ServiceType.CUSTOM];
 }
 
 function isEmptyDraftReport(report: any) {
@@ -1595,6 +1604,11 @@ export async function submitReport(
   );
   const consultationOutcome = report.consultationOutcome as 'schedule_ocular' | 'no_ocular' | undefined;
   const bypassAttendanceForOcular = consultationOutcome === 'schedule_ocular';
+  const saveSourceAppointment = () => (
+    bypassAttendanceForOcular
+      ? appt.save({ validateBeforeSave: false })
+      : appt.save()
+  );
 
   let siblingConsultationReportsSubmitted = false;
 
@@ -1686,7 +1700,7 @@ export async function submitReport(
       appt.consultationCompletedAt = completedAt;
       appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
       appt.attendanceUpdatedAt = completedAt;
-      await appt.save();
+      await saveSourceAppointment();
 
       await AuditLog.create({
         action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
@@ -1844,7 +1858,7 @@ export async function submitReport(
         );
         appt.status = AppointmentStatus.READY_FOR_OCULAR;
       }
-      await appt.save();
+      await saveSourceAppointment();
 
       const recommendedOcularDate = report.recommendedOcularDate
         ? report.recommendedOcularDate.toISOString().split('T')[0]
@@ -1989,7 +2003,7 @@ export async function submitReport(
           AppointmentStatus.COMPLETED,
         );
         appt.status = AppointmentStatus.COMPLETED;
-        await appt.save();
+        await saveSourceAppointment();
       }
 
       const readableSlot = formatOcularSlot(recommendedOcularSlot!);
@@ -2051,7 +2065,7 @@ export async function submitReport(
           AppointmentStatus.COMPLETED,
         );
         appt.status = AppointmentStatus.COMPLETED;
-        await appt.save();
+        await saveSourceAppointment();
       }
     } else {
       project.contractStatus = project.contractStatus || ContractStatus.MISSING;
@@ -2081,9 +2095,9 @@ export async function submitReport(
           AppointmentStatus.COMPLETED,
         );
         appt.status = AppointmentStatus.COMPLETED;
-        await appt.save();
+        await saveSourceAppointment();
       } else {
-        await appt.save();
+        await saveSourceAppointment();
       }
     }
 
