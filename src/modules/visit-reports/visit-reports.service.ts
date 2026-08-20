@@ -1217,7 +1217,10 @@ export async function createReport(
     userAgent: ua,
   });
 
-  return report;
+  // Keep mutation responses consistent with the detail endpoint. The frontend
+  // needs the populated appointment attendance fields after replacing its
+  // cached report with this response.
+  return populateVisitReportDetail(VisitReport.findById(report._id));
 }
 
 // ── Get by ID ──
@@ -1560,7 +1563,7 @@ export async function updateReport(
     userAgent: ua,
   });
 
-  return report;
+  return populateVisitReportDetail(VisitReport.findById(report._id));
 }
 
 // ── Submit Report (Sales Staff → Engineer) ──
@@ -1756,7 +1759,7 @@ export async function submitReport(
       ua,
     );
     await submitSiblingConsultationReports(report, appt, salesStaffId, ip, ua);
-    return report;
+    return populateVisitReportDetail(VisitReport.findById(report._id));
   }
 
   if (!alreadySubmittedConsultation) {
@@ -2172,7 +2175,7 @@ export async function submitReport(
     }
   }
 
-  return report;
+  return populateVisitReportDetail(VisitReport.findById(report._id));
 }
 
 // ── Delete Report (Sales Staff removes accidental extra project) ──
