@@ -1594,6 +1594,7 @@ export async function submitReport(
     && (report.recommendedOcularAddress as any).formattedAddress,
   );
   const consultationOutcome = report.consultationOutcome as 'schedule_ocular' | 'no_ocular' | undefined;
+  const bypassAttendanceForOcular = consultationOutcome === 'schedule_ocular';
 
   let siblingConsultationReportsSubmitted = false;
 
@@ -1617,8 +1618,11 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
-      .includes(attendanceStatus)) {
+    // Temporary bypass: an ocular handoff may complete attendance even when
+    // check-in/start was not recorded separately.
+    if (!bypassAttendanceForOcular
+      && ![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
+        .includes(attendanceStatus)) {
       throw AppError.badRequest(
         'Check in and start the consultation before submitting the consultation report.',
         ErrorCode.VALIDATION_ERROR,
@@ -1672,8 +1676,12 @@ export async function submitReport(
     // Submitting the final consultation report is the completion action. This
     // mirrors ocular report submission and avoids requiring the sales staff to
     // leave the report just to click a separate "Complete Consultation" button.
-    if (attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS) {
+    if (attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
+      || (bypassAttendanceForOcular && attendanceStatus !== AppointmentAttendanceStatus.COMPLETED)) {
       const completedAt = new Date();
+      if (!appt.consultationStartedAt) {
+        appt.consultationStartedAt = completedAt;
+      }
       appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
       appt.consultationCompletedAt = completedAt;
       appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
@@ -1687,10 +1695,13 @@ export async function submitReport(
         targetId: appt._id,
         details: {
           action: 'complete',
-          previousAttendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+          previousAttendanceStatus: attendanceStatus,
           attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
+          consultationStartedAt: appt.consultationStartedAt,
           consultationCompletedAt: completedAt,
-          reason: 'consultation_report_submitted',
+          reason: attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
+            ? 'consultation_report_submitted'
+            : 'consultation_report_submitted_attendance_bypass',
         },
         ipAddress: ip,
         userAgent: ua,
