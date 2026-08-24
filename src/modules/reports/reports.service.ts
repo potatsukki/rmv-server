@@ -1,12 +1,14 @@
 import {
   Project, Payment, PaymentPlan, Appointment,
-  FabricationUpdate, User, CashCollection, AuditLog, VisitReport, Blueprint, Config,
+  FabricationUpdate, User, CashCollection, AuditLog, Blueprint, Config,
 } from '../../models/index.js';
 import {
   ProjectStatus, PaymentStageStatus, FabricationStatus,
   AppointmentStatus, AppointmentType, Role, AuditAction,
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
+import { activeProjectStatusesForRoles } from '../projects/projects.list-policy.js';
+import { countPendingReportGroupsForSalesStaff } from '../visit-reports/visit-reports.service.js';
 
 type LifecycleEscalationProfile = {
   ownerTeam: string;
@@ -698,7 +700,9 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       Project.countDocuments({ deletedAt: null, ...customerProjectFilter }).exec(),
       Project.countDocuments({
         deletedAt: null,
-        status: { $nin: [ProjectStatus.COMPLETED, ProjectStatus.CANCELLED] },
+        status: userRoles?.includes(Role.SALES_STAFF) && !userRoles.includes(Role.ADMIN)
+          ? { $in: activeProjectStatusesForRoles(userRoles as Role[]) }
+          : { $nin: [ProjectStatus.COMPLETED, ProjectStatus.CANCELLED] },
         ...(userRoles?.includes(Role.ENGINEER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r as Role))
           ? { $or: [{ engineerIds: userId }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } }] }
           : userRoles?.includes(Role.FABRICATION_STAFF) && !userRoles?.some(r => [Role.ADMIN, Role.ENGINEER].includes(r as Role))
@@ -738,11 +742,8 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
           : {}),
       }).exec(),
       // Count draft/returned visit reports for the current user (sales staff KPI)
-      userId
-        ? VisitReport.countDocuments({
-            salesStaffId: userId,
-            status: { $in: ['draft', 'returned'] },
-          }).exec()
+      userId && userRoles?.includes(Role.SALES_STAFF)
+        ? countPendingReportGroupsForSalesStaff(userId)
         : Promise.resolve(0),
       // Count appointments with pending cash payment (scoped to sales staff)
       Appointment.countDocuments({
