@@ -11,6 +11,14 @@ const { mockConfigFindOne, mockConfigFindOneAndUpdate, mockAuditCreate } = vi.ho
   mockAuditCreate: vi.fn(),
 }));
 
+const { mockCountPendingReportGroupsForSalesStaff } = vi.hoisted(() => ({
+  mockCountPendingReportGroupsForSalesStaff: vi.fn(),
+}));
+
+vi.mock('../visit-reports/visit-reports.service.js', () => ({
+  countPendingReportGroupsForSalesStaff: mockCountPendingReportGroupsForSalesStaff,
+}));
+
 vi.mock('../../models/index.js', () => ({
   Project: {},
   Payment: {},

@@ -17,6 +17,7 @@ import { resolveOcularVisitData } from '../appointments/appointments.service.js'
 import type { ICustomerSiteDetails } from '../../models/Appointment.js';
 import type { UserAddressInput } from '../../utils/userAddresses.js';
 import { normalizeUserAddress, requirePinnedAddress } from '../../utils/userAddresses.js';
+import { visitReportStatusCondition } from './visit-reports.list-policy.js';
 
 function isNonEmptyString(value?: string | null) {
   return Boolean(value?.trim());
@@ -1411,13 +1412,7 @@ export async function listForSalesStaff(salesStaffId: string, query: {
 }) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
-  const { staleIds } = await getCanonicalActiveOcularAppointmentsForSalesStaff(salesStaffId);
-  await repairPromotableOcularReportsForSalesStaff(salesStaffId);
-  const filter: Record<string, unknown> = { salesStaffId, ...(await excludeCancelledDrafts()) };
-  if (staleIds.length > 0) {
-    filter.appointmentId = { $nin: staleIds };
-  }
-  if (query.status) filter.status = query.status;
+  const filter = await buildSalesStaffReportFilter(salesStaffId, query.status);
 
   const [reports, total] = await Promise.all([
     VisitReport.find(filter)
@@ -1430,6 +1425,25 @@ export async function listForSalesStaff(salesStaffId: string, query: {
   ]);
 
   return { items: reports, total, hasMore: page * limit < total };
+}
+
+async function buildSalesStaffReportFilter(salesStaffId: string, status?: string) {
+  const { staleIds } = await getCanonicalActiveOcularAppointmentsForSalesStaff(salesStaffId);
+  await repairPromotableOcularReportsForSalesStaff(salesStaffId);
+  const filter: Record<string, unknown> = { salesStaffId, ...(await excludeCancelledDrafts()) };
+  if (staleIds.length > 0) {
+    filter.appointmentId = { $nin: staleIds };
+  }
+
+  const statusCondition = visitReportStatusCondition(status);
+  if (statusCondition) filter.status = statusCondition;
+  return filter;
+}
+
+export async function countPendingReportGroupsForSalesStaff(salesStaffId: string) {
+  const filter = await buildSalesStaffReportFilter(salesStaffId, 'pending');
+  const appointmentIds = await VisitReport.distinct('appointmentId', filter).exec();
+  return appointmentIds.length;
 }
 
 async function repairPromotableOcularReportsForSalesStaff(salesStaffId: string) {
