@@ -36,7 +36,10 @@ import { PaymentStageStatus } from '../../utils/constants.js';
 import { getInstallmentConfig } from '../config/config.service.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
-import { activeProjectStatusesForRoles } from './projects.list-policy.js';
+import {
+  activeProjectStatusesForRoles,
+  maskProjectTotalCostForActor,
+} from './projects.list-policy.js';
 
 function readableServiceTitle(serviceType?: string, custom?: string) {
   if (serviceType === 'custom' && custom?.trim()) return custom.trim();
@@ -287,6 +290,7 @@ async function syncProjectItemFromReport(project: any, report: any) {
         notes: report.notes,
         selectedDesignTemplateId: report.selectedDesignTemplateId,
         selectedDesignTemplateName: report.selectedDesignTemplateName,
+        selectedDesignTemplateImageUrl: report.selectedDesignTemplateImageUrl,
         mediaKeys,
         ...(report.visitType === 'ocular'
           ? { ocularVisitReportId: report._id }
@@ -1470,19 +1474,8 @@ export async function getProjectById(
     }
   }
 
-  // Epic 9: Engineer/Fabrication staff masking (AND Admin as requested)
-  const isPrivileged = actorRoles.some((r) =>
-    [Role.SALES_STAFF, Role.CASHIER].includes(r as Role)
-  );
-
-  if (!isPrivileged) {
-    // Mask financial data for engineers/fabricators
-    const maskedProject = await attachProjectItems(project);
-    maskedProject.totalCost = undefined;
-    return maskedProject;
-  }
-
-  return attachProjectItems(project);
+  const projectWithItems = await attachProjectItems(project);
+  return maskProjectTotalCostForActor(projectWithItems, actorId, actorRoles);
 }
 
 // ── List Projects ──
@@ -1571,8 +1564,11 @@ export async function listProjects(
     Project.countDocuments(filter),
   ]);
 
+  const items = (await enrichProjectsForList(projects))
+    .map((item) => maskProjectTotalCostForActor(item, actorId, actorRoles));
+
   return {
-    items: await enrichProjectsForList(projects),
+    items,
     total,
     hasMore: page * limit < total,
     pagination: { page, limit, total, pages: Math.ceil(total / limit) },

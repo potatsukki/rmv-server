@@ -2,29 +2,56 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockAppointmentFindById,
+  mockAppointmentFindOne,
+  mockAppointmentFind,
+  mockAppointmentCreate,
   mockAuditCreate,
   mockNotifyRole,
   mockAssertTransition,
+  mockHolidayFindOne,
+  mockBlockedSlotExists,
+  mockUserFind,
+  mockSalesAvailabilityFind,
+  mockAutoCreateDraft,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
+  mockAppointmentFindOne: vi.fn(),
+  mockAppointmentFind: vi.fn(),
+  mockAppointmentCreate: vi.fn(),
   mockAuditCreate: vi.fn(),
   mockNotifyRole: vi.fn(),
   mockAssertTransition: vi.fn(),
+  mockHolidayFindOne: vi.fn(),
+  mockBlockedSlotExists: vi.fn(),
+  mockUserFind: vi.fn(),
+  mockSalesAvailabilityFind: vi.fn(),
+  mockAutoCreateDraft: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
   Appointment: {
     findById: mockAppointmentFindById,
+    findOne: mockAppointmentFindOne,
+    find: mockAppointmentFind,
+    create: mockAppointmentCreate,
   },
   SlotLock: {},
-  User: {},
+  User: {
+    find: mockUserFind,
+  },
   AuditLog: {
     create: mockAuditCreate,
   },
-  Holiday: {},
-  SalesAvailability: {},
+  Holiday: {
+    findOne: mockHolidayFindOne,
+  },
+  SalesAvailability: {
+    find: mockSalesAvailabilityFind,
+  },
   Config: {},
-  BlockedSlot: {},
+  BlockedSlot: {
+    exists: mockBlockedSlotExists,
+  },
   VisitReport: {},
   VisitReportStatus: {},
   Project: {},
@@ -46,7 +73,7 @@ vi.mock('../notifications/email.service.js', () => ({
 }));
 
 vi.mock('../visit-reports/visit-reports.service.js', () => ({
-  autoCreateDraft: vi.fn(),
+  autoCreateDraft: mockAutoCreateDraft,
 }));
 
 vi.mock('../maps/maps.service.js', () => ({
@@ -66,8 +93,15 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { requestReschedule } from './appointments.service.js';
-import { AppointmentStatus, AuditAction } from '../../utils/constants.js';
+import { requestAppointment, requestReschedule, submitSiteDetails } from './appointments.service.js';
+import {
+  AppointmentAttendanceStatus,
+  AppointmentStatus,
+  AppointmentType,
+  AuditAction,
+  Role,
+  ServiceType,
+} from '../../utils/constants.js';
 
 function createAppointment(overrides: Record<string, unknown> = {}) {
   return {
@@ -84,6 +118,60 @@ function createAppointment(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+function selectLeanResult<T>(value: T) {
+  return {
+    select: vi.fn().mockReturnValue({
+      lean: vi.fn().mockResolvedValue(value),
+    }),
+  };
+}
+
+describe('requestAppointment', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('persists the selected design snapshot on the appointment', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    mockAppointmentFindOne.mockResolvedValueOnce(null);
+    mockHolidayFindOne.mockResolvedValueOnce(null);
+    mockBlockedSlotExists.mockResolvedValueOnce(false);
+    mockUserFind.mockReturnValueOnce(selectLeanResult([{ _id: 'sales-1' }]));
+    mockSalesAvailabilityFind.mockReturnValueOnce(selectLeanResult([]));
+    mockAppointmentFind.mockReturnValueOnce(selectLeanResult([]));
+    mockAppointmentCreate.mockImplementationOnce(async (payload) => ({
+      _id: 'appointment-new',
+      ...payload,
+    }));
+    mockAuditCreate.mockResolvedValueOnce({});
+    mockNotifyRole.mockResolvedValueOnce(undefined);
+
+    await requestAppointment(
+      {
+        type: AppointmentType.OFFICE,
+        date: '2026-09-01',
+        slotCode: '09:00',
+        serviceTypes: [ServiceType.RAILINGS],
+        selectedDesignTemplateId: 'railings-commercial-guardrail',
+        selectedDesignTemplateName: 'Commercial Stainless Guardrail',
+        selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+      },
+      'customer-1',
+      [Role.CUSTOMER],
+    );
+
+    expect(mockAppointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      selectedDesignTemplateId: 'railings-commercial-guardrail',
+      selectedDesignTemplateName: 'Commercial Stainless Guardrail',
+      selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+    }));
+  });
+});
 
 describe('requestReschedule', () => {
   afterEach(() => {
@@ -129,5 +217,70 @@ describe('requestReschedule', () => {
       '/appointments/appointment-1',
     );
     expect(result).toBe(appointment);
+  });
+});
+
+describe('submitSiteDetails', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('accepts details after confirmation and refreshes the consultation draft', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      siteDetailsStatus: 'pending',
+      serviceTypes: [ServiceType.CUSTOM],
+      serviceTypeCustom: 'Custom food cart',
+      salesStaffId: 'sales-1',
+      slotCode: '09:00',
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockNotifyRole.mockResolvedValueOnce(undefined);
+    mockAutoCreateDraft.mockResolvedValueOnce({});
+
+    const input = {
+      serviceTypes: [ServiceType.CUSTOM],
+      serviceTypeCustom: 'Custom food cart',
+      customerRequirements: 'Mobile stainless cart with two shelves',
+    };
+
+    await submitSiteDetails('appointment-1', input, 'customer-1');
+
+    expect(appointment.siteDetailsStatus).toBe('submitted');
+    expect(appointment.customerSiteDetails).toEqual(input);
+    expect(appointment.save).toHaveBeenCalledTimes(1);
+    expect(mockAutoCreateDraft).toHaveBeenCalledWith(
+      'appointment-1',
+      appointment.customerId,
+      'sales-1',
+      'consultation',
+      input,
+      input.serviceTypes,
+      ServiceType.CUSTOM,
+      'Custom food cart',
+    );
+  });
+
+  it('rejects late details after the consultation has started', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      consultationStartedAt: new Date('2026-08-15T01:00:00.000Z'),
+      siteDetailsStatus: 'pending',
+      serviceTypes: [ServiceType.CUSTOM],
+      salesStaffId: 'sales-1',
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    await expect(submitSiteDetails(
+      'appointment-1',
+      { customerRequirements: 'Late request' },
+      'customer-1',
+    )).rejects.toThrow('Site details can only be submitted before the consultation begins');
+
+    expect(appointment.save).not.toHaveBeenCalled();
+    expect(mockAutoCreateDraft).not.toHaveBeenCalled();
   });
 });

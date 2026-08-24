@@ -151,6 +151,56 @@ function getSearchScope(actorRoles: Role[]): 'customer' | 'staff' {
   return isCustomerOnly ? 'customer' : 'staff';
 }
 
+interface SelectedDesignSnapshot {
+  selectedDesignTemplateId?: string;
+  selectedDesignTemplateName?: string;
+  selectedDesignTemplateImageUrl?: string;
+}
+
+function firstSelectedDesignValue(
+  sources: Array<SelectedDesignSnapshot | null | undefined>,
+  field: keyof SelectedDesignSnapshot,
+) {
+  return sources
+    .map((source) => source?.[field])
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function selectedDesignSnapshot(
+  ...sources: Array<SelectedDesignSnapshot | null | undefined>
+): SelectedDesignSnapshot {
+  return {
+    selectedDesignTemplateId: firstSelectedDesignValue(sources, 'selectedDesignTemplateId'),
+    selectedDesignTemplateName: firstSelectedDesignValue(sources, 'selectedDesignTemplateName'),
+    selectedDesignTemplateImageUrl: firstSelectedDesignValue(sources, 'selectedDesignTemplateImageUrl'),
+  };
+}
+
+function syncSelectedDesign(
+  target: SelectedDesignSnapshot,
+  source: SelectedDesignSnapshot,
+): boolean {
+  let changed = false;
+
+  if (source.selectedDesignTemplateId && target.selectedDesignTemplateId !== source.selectedDesignTemplateId) {
+    target.selectedDesignTemplateId = source.selectedDesignTemplateId;
+    changed = true;
+  }
+  if (source.selectedDesignTemplateName && target.selectedDesignTemplateName !== source.selectedDesignTemplateName) {
+    target.selectedDesignTemplateName = source.selectedDesignTemplateName;
+    changed = true;
+  }
+  if (
+    source.selectedDesignTemplateImageUrl
+    && target.selectedDesignTemplateImageUrl !== source.selectedDesignTemplateImageUrl
+  ) {
+    target.selectedDesignTemplateImageUrl = source.selectedDesignTemplateImageUrl;
+    changed = true;
+  }
+
+  return changed;
+}
+
 // ── Helpers ──
 
 async function getConfigValue<T>(key: string, defaultVal: T): Promise<T> {
@@ -624,6 +674,9 @@ export async function requestAppointment(
     customerNotes: input.purpose,
     serviceTypes: input.serviceTypes,
     serviceTypeCustom: input.serviceTypeCustom,
+    selectedDesignTemplateId: input.selectedDesignTemplateId,
+    selectedDesignTemplateName: input.selectedDesignTemplateName,
+    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl,
     bookedBy: customerId,
   });
 
@@ -964,9 +1017,19 @@ export async function submitSiteDetails(
     throw AppError.forbidden('You do not own this appointment');
   }
 
-  // Must be in REQUESTED status (not yet confirmed)
-  if (appointment.status !== AppointmentStatus.REQUESTED) {
-    throw AppError.badRequest('Site details can only be submitted for pending appointments');
+  // Customers can finish the custom brief before or shortly after staff confirmation.
+  if (![AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED].includes(appointment.status)) {
+    throw AppError.badRequest('Site details can only be submitted before the consultation begins');
+  }
+
+  if (
+    appointment.consultationStartedAt
+    || [
+      AppointmentAttendanceStatus.IN_PROGRESS,
+      AppointmentAttendanceStatus.COMPLETED,
+    ].includes(appointment.attendanceStatus as AppointmentAttendanceStatus)
+  ) {
+    throw AppError.badRequest('Site details can only be submitted before the consultation begins');
   }
 
   // Must not already be submitted
@@ -974,12 +1037,24 @@ export async function submitSiteDetails(
     throw AppError.badRequest('Site details have already been submitted for this appointment');
   }
 
-  // Office appointments: photos & reference images are recommended but not mandatory
-  // Customers can update them later from the site details page
+  // Office appointment photos and reference images are recommended, not mandatory.
 
   appointment.customerSiteDetails = input;
   appointment.siteDetailsStatus = 'submitted';
   await appointment.save();
+
+  if (appointment.status === AppointmentStatus.CONFIRMED && appointment.salesStaffId) {
+    await autoCreateVisitReport(
+      appointment._id,
+      appointment.customerId,
+      appointment.salesStaffId,
+      'consultation',
+      input,
+      input.serviceTypes || appointment.serviceTypes,
+      (input.serviceTypes || appointment.serviceTypes)?.[0],
+      input.serviceTypeCustom || appointment.serviceTypeCustom,
+    );
+  }
 
   // Notify appointment agents that site details have been submitted
   await notifyRole(
@@ -1076,6 +1151,13 @@ export async function agentCreateOcular(
   }
 
   const preassignedSalesStaffId: string | undefined = actorId;
+  const sourceConsultation = consultationContext.consultation;
+  const sourceConsultationReport = consultationContext.consultationReport;
+  const serviceTypes = [...new Set([
+    ...(sourceConsultation.serviceTypes || []),
+    ...(sourceConsultationReport.serviceType ? [sourceConsultationReport.serviceType] : []),
+  ].filter(Boolean))];
+  const selectedDesign = selectedDesignSnapshot(sourceConsultationReport, sourceConsultation);
 
   // Create ocular WITHOUT location/fee — customer provides these later
   const appointment = await Appointment.create({
@@ -1088,6 +1170,11 @@ export async function agentCreateOcular(
     customerNotes: input.visitReportId
       ? `Ocular follow-up from consultation report ${input.visitReportId}`
       : 'Ocular visit scheduled directly by sales staff',
+    sourceConsultationAppointmentId: sourceConsultation._id,
+    sourceConsultationReportId: sourceConsultationReport._id,
+    serviceTypes,
+    serviceTypeCustom: sourceConsultationReport.serviceTypeCustom || sourceConsultation.serviceTypeCustom,
+    ...selectedDesign,
     bookedBy: actorId,
   });
 
@@ -1188,6 +1275,7 @@ export async function customerSubmitOcularLocation(
     }
 
     const recommendedOcularDate = consultationReport.recommendedOcularDate.toISOString().split('T')[0];
+    const selectedDesign = selectedDesignSnapshot(consultationReport, appointment);
 
     let ocularAppointment = await Appointment.findOne({
       customerId: appointment.customerId,
@@ -1233,6 +1321,7 @@ export async function customerSubmitOcularLocation(
         sourceConsultationReportId: consultationReport._id,
         serviceTypes,
         serviceTypeCustom: consultationReport.serviceTypeCustom || appointment.serviceTypeCustom,
+        ...selectedDesign,
         customerSiteDetails: {
           serviceTypes,
           serviceTypeCustom: consultationReport.serviceTypeCustom || appointment.serviceTypeCustom,
@@ -1265,6 +1354,7 @@ export async function customerSubmitOcularLocation(
       ].filter(Boolean);
       ocularAppointment.sourceConsultationAppointmentId = appointment._id;
       ocularAppointment.sourceConsultationReportId = consultationReport._id;
+      syncSelectedDesign(ocularAppointment, selectedDesign);
       if (serviceTypes.length > 0) {
         ocularAppointment.serviceTypes = serviceTypes;
         ocularAppointment.customerSiteDetails = {
