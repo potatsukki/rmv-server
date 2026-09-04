@@ -189,7 +189,7 @@ async function isWithinNcr(customerLocation: LatLng, polygonFilePath: string): P
 async function fetchDirections(origin: LatLng, destination: LatLng): Promise<DirectionsResult> {
   try {
     const response = await axios.post(
-      'https://api.openrouteservice.org/v2/directions/driving-car',
+      'https://api.heigit.org/openrouteservice/v2/directions/driving-car',
       {
         coordinates: [
           [origin.lng, origin.lat],
