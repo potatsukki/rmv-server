@@ -1,20 +1,45 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as projectsService from './projects.service.js';
+import { maskProjectTotalCostForActor } from './projects.list-policy.js';
+
+function serializeProjectForActor(project: any, req: Request) {
+  if (!project || typeof project !== 'object') return project;
+  const plainProject = typeof project.toObject === 'function'
+    ? project.toObject()
+    : { ...project };
+
+  return maskProjectTotalCostForActor(
+    plainProject,
+    req.userId!,
+    req.userRoles || [],
+  );
+}
+
+function serializeProjectMutationResult(result: any, req: Request) {
+  if (!result || typeof result !== 'object' || !('project' in result)) {
+    return serializeProjectForActor(result, req);
+  }
+
+  return {
+    ...result,
+    project: serializeProjectForActor(result.project, req),
+  };
+}
 
 export const createProject = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.createProject(req.body, req.userId!, req.ip, req.get('user-agent'));
-  res.status(201).json({ success: true, data: project });
+  res.status(201).json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const updateProject = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.updateProject((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const assignEngineers = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.assignEngineers((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const reassignProjectSalesStaff = asyncHandler(async (req: Request, res: Response) => {
@@ -26,17 +51,17 @@ export const reassignProjectSalesStaff = asyncHandler(async (req: Request, res: 
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const assignFabricationStaff = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.assignFabricationStaff((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const transitionProject = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.transitionProject((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const getProjectByVisitReportId = asyncHandler(async (req: Request, res: Response) => {
@@ -61,12 +86,12 @@ export const repairMissingProjectNumbers = asyncHandler(async (_req: Request, re
 
 export const addMediaKeys = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.addMediaKeys((req.params.id as string), req.body.keys, req.userId!);
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const removeMediaKey = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.removeMediaKey((req.params.id as string), req.body.key, req.userId!);
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const generateContract = asyncHandler(async (req: Request, res: Response) => {
@@ -85,7 +110,7 @@ export const uploadSignedContract = asyncHandler(async (req: Request, res: Respo
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const getContractDownloadUrl = asyncHandler(async (req: Request, res: Response) => {
@@ -121,7 +146,7 @@ export const reviewInitialDesign = asyncHandler(async (req: Request, res: Respon
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const resubmitInitialDesign = asyncHandler(async (req: Request, res: Response) => {
@@ -132,7 +157,7 @@ export const resubmitInitialDesign = asyncHandler(async (req: Request, res: Resp
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const backfillInitialDesign = asyncHandler(async (req: Request, res: Response) => {
@@ -143,7 +168,7 @@ export const backfillInitialDesign = asyncHandler(async (req: Request, res: Resp
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const selectPaymentPlan = asyncHandler(async (req: Request, res: Response) => {
@@ -154,7 +179,7 @@ export const selectPaymentPlan = asyncHandler(async (req: Request, res: Response
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: serializeProjectMutationResult(result, req) });
 });
 
 export const confirmInstallation = asyncHandler(async (req: Request, res: Response) => {
@@ -164,7 +189,7 @@ export const confirmInstallation = asyncHandler(async (req: Request, res: Respon
     req.userRoles!,
     (req.body?.projectItemId || req.query.projectItemId) as string | undefined,
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const submitProjectReview = asyncHandler(async (req: Request, res: Response) => {
@@ -176,7 +201,7 @@ export const submitProjectReview = asyncHandler(async (req: Request, res: Respon
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
 export const skipProjectReview = asyncHandler(async (req: Request, res: Response) => {
@@ -188,5 +213,5 @@ export const skipProjectReview = asyncHandler(async (req: Request, res: Response
     req.ip,
     req.get('user-agent'),
   );
-  res.json({ success: true, data: project });
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
 });

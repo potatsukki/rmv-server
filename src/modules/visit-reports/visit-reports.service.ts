@@ -5,7 +5,7 @@ import { VisitReportStatus } from '../../models/VisitReport.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, ContractStatus, ProjectStatus, Role, AuditAction, NotificationCategory,
-  ServiceType,
+  MeasurementUnit, ServiceType,
 } from '../../utils/constants.js';
 import { visitReportStateMachine, appointmentStateMachine } from '../../utils/stateMachine.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
@@ -13,6 +13,7 @@ import { createAndSendNotification, notifyRole } from '../notifications/socket.s
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
 import { resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { synchronizeConsultationAttendanceByTime } from '../appointments/consultation-attendance-automation.js';
 
 import type { ICustomerSiteDetails } from '../../models/Appointment.js';
 import type { UserAddressInput } from '../../utils/userAddresses.js';
@@ -21,6 +22,48 @@ import { visitReportStatusCondition } from './visit-reports.list-policy.js';
 
 function isNonEmptyString(value?: string | null) {
   return Boolean(value?.trim());
+}
+
+interface SelectedDesignSnapshot {
+  selectedDesignTemplateId?: string;
+  selectedDesignTemplateName?: string;
+  selectedDesignTemplateImageUrl?: string;
+}
+
+function selectedDesignSnapshot(
+  ...sources: Array<SelectedDesignSnapshot | null | undefined>
+): SelectedDesignSnapshot {
+  const firstValue = (field: keyof SelectedDesignSnapshot) => sources
+    .map((source) => source?.[field])
+    .find((value): value is string => isNonEmptyString(value));
+
+  return {
+    selectedDesignTemplateId: firstValue('selectedDesignTemplateId'),
+    selectedDesignTemplateName: firstValue('selectedDesignTemplateName'),
+    selectedDesignTemplateImageUrl: firstValue('selectedDesignTemplateImageUrl'),
+  };
+}
+
+function syncSelectedDesign(target: SelectedDesignSnapshot, source: SelectedDesignSnapshot) {
+  let changed = false;
+
+  if (source.selectedDesignTemplateId && target.selectedDesignTemplateId !== source.selectedDesignTemplateId) {
+    target.selectedDesignTemplateId = source.selectedDesignTemplateId;
+    changed = true;
+  }
+  if (source.selectedDesignTemplateName && target.selectedDesignTemplateName !== source.selectedDesignTemplateName) {
+    target.selectedDesignTemplateName = source.selectedDesignTemplateName;
+    changed = true;
+  }
+  if (
+    source.selectedDesignTemplateImageUrl
+    && target.selectedDesignTemplateImageUrl !== source.selectedDesignTemplateImageUrl
+  ) {
+    target.selectedDesignTemplateImageUrl = source.selectedDesignTemplateImageUrl;
+    changed = true;
+  }
+
+  return changed;
 }
 
 function hasSpecificationData(specifications?: {
@@ -244,26 +287,30 @@ async function getAppointmentVisitReportServiceTypes(appointmentId: Types.Object
     : [ServiceType.CUSTOM];
 }
 
+function hasEditableDraftDetails(report: any) {
+  return hasReportValue(report.lineItems)
+    || hasReportValue(report.measurements)
+    || hasReportValue(report.siteConditions)
+    || hasReportValue(report.materials)
+    || hasReportValue(report.finishes)
+    || hasReportValue(report.preferredDesign)
+    || hasReportValue(report.customerRequirements)
+    || hasReportValue(report.notes)
+    || hasReportValue(report.specifications)
+    || hasReportValue(report.discussionNotes)
+    || hasReportValue(report.initialDesignKeys)
+    || hasReportValue(report.initialDesignNotes)
+    || hasReportValue(report.photoKeys)
+    || hasReportValue(report.videoKeys)
+    || hasReportValue(report.sketchKeys)
+    || hasReportValue(report.referenceImageKeys);
+}
+
 function isEmptyDraftReport(report: any) {
-  return !hasReportValue(report.lineItems)
-    && !hasReportValue(report.measurements)
-    && !hasReportValue(report.siteConditions)
-    && !hasReportValue(report.materials)
-    && !hasReportValue(report.finishes)
-    && !hasReportValue(report.preferredDesign)
-    && !hasReportValue(report.customerRequirements)
-    && !hasReportValue(report.notes)
-    && !hasReportValue(report.specifications)
-    && !hasReportValue(report.discussionNotes)
-    && !hasReportValue(report.initialDesignKeys)
-    && !hasReportValue(report.initialDesignNotes)
+  return !hasEditableDraftDetails(report)
     && !hasReportValue(report.selectedDesignTemplateId)
     && !hasReportValue(report.selectedDesignTemplateName)
-    && !hasReportValue(report.selectedDesignTemplateImageUrl)
-    && !hasReportValue(report.photoKeys)
-    && !hasReportValue(report.videoKeys)
-    && !hasReportValue(report.sketchKeys)
-    && !hasReportValue(report.referenceImageKeys);
+    && !hasReportValue(report.selectedDesignTemplateImageUrl);
 }
 
 async function ensureAppointmentServiceTypeReports(
@@ -284,12 +331,25 @@ async function ensureAppointmentServiceTypeReports(
     serviceTypeOverride,
   );
   const customServiceTypeLabel = customerSiteDetails?.serviceTypeCustom || serviceTypeCustomOverride;
+  const appointmentContext = await Appointment.findById(appointmentId)
+    .select(
+      'serviceTypes sourceConsultationAppointmentId selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl',
+    )
+    .lean();
+  const sourceConsultationContext = appointmentContext?.sourceConsultationAppointmentId
+    ? await Appointment.findById(appointmentContext.sourceConsultationAppointmentId)
+      .select('serviceTypes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl')
+      .lean()
+    : undefined;
+  const bookingSelectedDesign = selectedDesignSnapshot(appointmentContext, sourceConsultationContext);
+  const selectedDesignServiceType = (
+    sourceConsultationContext?.serviceTypes?.[0]
+    || appointmentContext?.serviceTypes?.[0]
+    || requestedServiceTypes[0]
+  );
 
   if (visitType === 'ocular') {
-    const ocularAppointment = await Appointment.findById(appointmentId)
-      .select('sourceConsultationAppointmentId')
-      .lean();
-    const sourceConsultationAppointmentId = ocularAppointment?.sourceConsultationAppointmentId;
+    const sourceConsultationAppointmentId = appointmentContext?.sourceConsultationAppointmentId;
     await promoteConsultationReportsToOcularAppointment(
       appointmentId,
       sourceConsultationAppointmentId || appointmentId,
@@ -330,33 +390,69 @@ async function ensureAppointmentServiceTypeReports(
       changed = true;
     }
 
-    if (report.serviceType === ServiceType.CUSTOM && customServiceTypeLabel && report.serviceTypeCustom !== customServiceTypeLabel) {
+    if (
+      report.serviceType === ServiceType.CUSTOM
+      && customServiceTypeLabel
+      && !isNonEmptyString(report.serviceTypeCustom)
+    ) {
       report.serviceTypeCustom = customServiceTypeLabel;
       changed = true;
     }
 
+    if (report.serviceType === selectedDesignServiceType) {
+      if (!isNonEmptyString(report.selectedDesignTemplateId) && bookingSelectedDesign.selectedDesignTemplateId) {
+        report.selectedDesignTemplateId = bookingSelectedDesign.selectedDesignTemplateId;
+        changed = true;
+      }
+      if (!isNonEmptyString(report.selectedDesignTemplateName) && bookingSelectedDesign.selectedDesignTemplateName) {
+        report.selectedDesignTemplateName = bookingSelectedDesign.selectedDesignTemplateName;
+        changed = true;
+      }
+      if (
+        !isNonEmptyString(report.selectedDesignTemplateImageUrl)
+        && bookingSelectedDesign.selectedDesignTemplateImageUrl
+      ) {
+        report.selectedDesignTemplateImageUrl = bookingSelectedDesign.selectedDesignTemplateImageUrl;
+        changed = true;
+      }
+    }
+
     if (customerSiteDetails) {
-      if (customerSiteDetails.materials && report.materials !== customerSiteDetails.materials) {
+      const canReplaceDefaultMeasurementUnit = !hasEditableDraftDetails(report);
+
+      // Site details can arrive after confirmation. Seed empty draft fields only so
+      // a late customer submission never replaces notes already entered by staff.
+      if (customerSiteDetails.materials && !isNonEmptyString(report.materials)) {
         report.materials = customerSiteDetails.materials;
         changed = true;
       }
-      if (customerSiteDetails.finishes && report.finishes !== customerSiteDetails.finishes) {
+      if (customerSiteDetails.finishes && !isNonEmptyString(report.finishes)) {
         report.finishes = customerSiteDetails.finishes;
         changed = true;
       }
-      if (customerSiteDetails.preferredDesign && report.preferredDesign !== customerSiteDetails.preferredDesign) {
+      if (customerSiteDetails.preferredDesign && !isNonEmptyString(report.preferredDesign)) {
         report.preferredDesign = customerSiteDetails.preferredDesign;
         changed = true;
       }
-      if (customerSiteDetails.customerRequirements && report.customerRequirements !== customerSiteDetails.customerRequirements) {
+      if (customerSiteDetails.customerRequirements && !isNonEmptyString(report.customerRequirements)) {
         report.customerRequirements = customerSiteDetails.customerRequirements;
         changed = true;
       }
-      if (customerSiteDetails.notes && report.notes !== customerSiteDetails.notes) {
+      if (customerSiteDetails.notes && !isNonEmptyString(report.notes)) {
         report.notes = customerSiteDetails.notes;
         changed = true;
       }
-      if (customerSiteDetails.measurementUnit && report.measurementUnit !== customerSiteDetails.measurementUnit) {
+      if (
+        customerSiteDetails.measurementUnit
+        && report.measurementUnit !== customerSiteDetails.measurementUnit
+        && (
+          !isNonEmptyString(report.measurementUnit)
+          || (
+            report.measurementUnit === MeasurementUnit.CM
+            && canReplaceDefaultMeasurementUnit
+          )
+        )
+      ) {
         report.measurementUnit = customerSiteDetails.measurementUnit;
         changed = true;
       }
@@ -409,6 +505,7 @@ async function ensureAppointmentServiceTypeReports(
       preferredDesign: customerSiteDetails?.preferredDesign,
       customerRequirements: customerSiteDetails?.customerRequirements,
       notes: customerSiteDetails?.notes,
+      ...(serviceType === selectedDesignServiceType && bookingSelectedDesign),
       photoKeys: customerSiteDetails?.photoKeys || [],
       videoKeys: customerSiteDetails?.videoKeys || [],
       sketchKeys: customerSiteDetails?.sketchKeys || [],
@@ -1239,7 +1336,7 @@ function populateVisitReportDetail(query: any) {
   return query
     .populate('customerId', 'firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName email')
-    .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
+    .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
 }
 
 async function findFirstVisitReportForAppointment(appointmentId: string) {
@@ -1253,7 +1350,7 @@ async function resolveVisitReportFromAppointmentId(appointmentId: string) {
   if (report) return report;
 
   const appointment = await Appointment.findById(appointmentId)
-    .select('customerId salesStaffId type serviceTypes serviceTypeCustom customerSiteDetails sourceConsultationAppointmentId');
+    .select('customerId salesStaffId type serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails sourceConsultationAppointmentId');
 
   if (!appointment?.salesStaffId) return null;
 
@@ -1330,7 +1427,7 @@ export async function getVisitReport(reportId: string) {
       })
         .populate('customerId', 'firstName lastName email phone')
         .populate('salesStaffId', 'firstName lastName email')
-        .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
+        .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
 
       if (canonicalReport) {
         report = canonicalReport;
@@ -1351,6 +1448,8 @@ export async function getVisitReport(reportId: string) {
       report._id,
     );
   }
+
+  await synchronizeConsultationAttendanceByTime(report.appointmentId as any);
 
   // Fetch sample projects for the customer
   const customerId = report.customerId instanceof Object ? (report.customerId as any)._id : report.customerId;
@@ -1379,7 +1478,7 @@ export async function getVisitReport(reportId: string) {
 
 export async function getByAppointment(appointmentId: string) {
   const appointment = await Appointment.findById(appointmentId)
-    .select('customerId salesStaffId type serviceTypes serviceTypeCustom customerSiteDetails')
+    .select('customerId salesStaffId type serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails')
     .lean();
 
   if (appointment?.salesStaffId) {
@@ -1607,6 +1706,7 @@ export async function submitReport(
   // Ensure the linked appointment is in a valid status before allowing submission
   const appt = await Appointment.findById(report.appointmentId);
   if (!appt) throw AppError.notFound('Linked appointment not found');
+  await synchronizeConsultationAttendanceByTime(appt);
 
   const isConsultationReport = report.visitType === 'consultation';
   const hasRecommendedOcularSchedule = Boolean(report.recommendedOcularDate && report.recommendedOcularSlot);
@@ -1646,13 +1746,10 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    // Temporary bypass: an ocular handoff may complete attendance even when
-    // check-in/start was not recorded separately.
-    if (!bypassAttendanceForOcular
-      && ![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
-        .includes(attendanceStatus)) {
+    if (![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
+      .includes(attendanceStatus)) {
       throw AppError.badRequest(
-        'Check in and start the consultation before submitting the consultation report.',
+        'Wait until the scheduled consultation begins before submitting the consultation report.',
         ErrorCode.VALIDATION_ERROR,
       );
     }
@@ -1701,40 +1798,6 @@ export async function submitReport(
       }
     }
 
-    // Submitting the final consultation report is the completion action. This
-    // mirrors ocular report submission and avoids requiring the sales staff to
-    // leave the report just to click a separate "Complete Consultation" button.
-    if (attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
-      || (bypassAttendanceForOcular && attendanceStatus !== AppointmentAttendanceStatus.COMPLETED)) {
-      const completedAt = new Date();
-      if (!appt.consultationStartedAt) {
-        appt.consultationStartedAt = completedAt;
-      }
-      appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
-      appt.consultationCompletedAt = completedAt;
-      appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
-      appt.attendanceUpdatedAt = completedAt;
-      await saveSourceAppointment();
-
-      await AuditLog.create({
-        action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
-        actorId: salesStaffId,
-        targetType: 'appointment',
-        targetId: appt._id,
-        details: {
-          action: 'complete',
-          previousAttendanceStatus: attendanceStatus,
-          attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
-          consultationStartedAt: appt.consultationStartedAt,
-          consultationCompletedAt: completedAt,
-          reason: attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
-            ? 'consultation_report_submitted'
-            : 'consultation_report_submitted_attendance_bypass',
-        },
-        ipAddress: ip,
-        userAgent: ua,
-      });
-    }
   }
 
   if (report.visitType === 'ocular' && appt.status !== AppointmentStatus.COMPLETED) {
@@ -1903,6 +1966,7 @@ export async function submitReport(
 
       let ocularAppointment = activeOcular;
       const ocularServiceTypeCustom = report.serviceTypeCustom || appt.serviceTypeCustom;
+      const ocularSelectedDesign = selectedDesignSnapshot(report, appt);
 
       if (!ocularAppointment) {
         ocularAppointment = await Appointment.create({
@@ -1917,6 +1981,7 @@ export async function submitReport(
           sourceConsultationReportId: report._id,
           serviceTypes: consultationServiceTypes,
           serviceTypeCustom: appt.serviceTypeCustom,
+          ...ocularSelectedDesign,
           customerSiteDetails: {
             serviceTypes: consultationServiceTypes,
             serviceTypeCustom: appt.serviceTypeCustom,
@@ -1970,6 +2035,9 @@ export async function submitReport(
         }
         if (!ocularAppointment.serviceTypeCustom && ocularServiceTypeCustom) {
           ocularAppointment.serviceTypeCustom = ocularServiceTypeCustom;
+          changedExistingOcular = true;
+        }
+        if (syncSelectedDesign(ocularAppointment, ocularSelectedDesign)) {
           changedExistingOcular = true;
         }
         if (!ocularAppointment.customerSiteDetails) {

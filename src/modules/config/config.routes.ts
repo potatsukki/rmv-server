@@ -27,7 +27,8 @@ router.put('/configs/:key', authenticate, authorize(Role.ADMIN), validate(update
 router.post('/configs/:key/preview', authenticate, authorize(Role.ADMIN), validate(previewConfigImpactSchema), ctrl.previewConfigImpact);
 router.post('/configs/:key/rollback', authenticate, authorize(Role.ADMIN), validate(rollbackConfigVersionSchema), ctrl.rollbackConfigVersion);
 
-router.get('/holidays', authenticate, authorize(Role.ADMIN, Role.APPOINTMENT_AGENT), ctrl.listHolidays);
+// Customers need the same holiday calendar the booking service validates against.
+router.get('/holidays', authenticate, ctrl.listHolidays);
 router.post('/holidays', authenticate, authorize(Role.ADMIN), validate(createHolidaySchema), ctrl.createHoliday);
 router.delete('/holidays/:id', authenticate, authorize(Role.ADMIN), ctrl.deleteHoliday);
 

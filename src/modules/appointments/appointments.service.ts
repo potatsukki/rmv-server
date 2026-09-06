@@ -20,9 +20,12 @@ import { formatCurrency } from '../../utils/helpers.js';
 import { matchesAppointmentSearch, normalizeAppointmentSearchTerm } from './appointments.search.js';
 import type { SortOrder } from 'mongoose';
 import {
+  buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
   getOpenAvailabilitySession,
+  getOpenAvailabilitySessionsByUserIds,
 } from '../users/availability-session.service.js';
+import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -149,6 +152,56 @@ function getSearchScope(actorRoles: Role[]): 'customer' | 'staff' {
   const isCustomerOnly = actorRoles.includes(Role.CUSTOMER)
     && !actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT, Role.SALES_STAFF].includes(role));
   return isCustomerOnly ? 'customer' : 'staff';
+}
+
+interface SelectedDesignSnapshot {
+  selectedDesignTemplateId?: string;
+  selectedDesignTemplateName?: string;
+  selectedDesignTemplateImageUrl?: string;
+}
+
+function firstSelectedDesignValue(
+  sources: Array<SelectedDesignSnapshot | null | undefined>,
+  field: keyof SelectedDesignSnapshot,
+) {
+  return sources
+    .map((source) => source?.[field])
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function selectedDesignSnapshot(
+  ...sources: Array<SelectedDesignSnapshot | null | undefined>
+): SelectedDesignSnapshot {
+  return {
+    selectedDesignTemplateId: firstSelectedDesignValue(sources, 'selectedDesignTemplateId'),
+    selectedDesignTemplateName: firstSelectedDesignValue(sources, 'selectedDesignTemplateName'),
+    selectedDesignTemplateImageUrl: firstSelectedDesignValue(sources, 'selectedDesignTemplateImageUrl'),
+  };
+}
+
+function syncSelectedDesign(
+  target: SelectedDesignSnapshot,
+  source: SelectedDesignSnapshot,
+): boolean {
+  let changed = false;
+
+  if (source.selectedDesignTemplateId && target.selectedDesignTemplateId !== source.selectedDesignTemplateId) {
+    target.selectedDesignTemplateId = source.selectedDesignTemplateId;
+    changed = true;
+  }
+  if (source.selectedDesignTemplateName && target.selectedDesignTemplateName !== source.selectedDesignTemplateName) {
+    target.selectedDesignTemplateName = source.selectedDesignTemplateName;
+    changed = true;
+  }
+  if (
+    source.selectedDesignTemplateImageUrl
+    && target.selectedDesignTemplateImageUrl !== source.selectedDesignTemplateImageUrl
+  ) {
+    target.selectedDesignTemplateImageUrl = source.selectedDesignTemplateImageUrl;
+    changed = true;
+  }
+
+  return changed;
 }
 
 // ── Helpers ──
@@ -347,10 +400,32 @@ async function getSlotAvailability(
   const salesStaff = await User.find({
     roles: Role.SALES_STAFF,
     isActive: true,
-    availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
-  }).select('_id').lean();
+    availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+  }).select('_id roles availabilityStatus').lean();
 
-  const salesStaffIds = salesStaff.map((staff) => staff._id.toString());
+  const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
+    salesStaff.map((staff) => staff._id),
+  );
+  const isSlotCountEligible = (staff: { _id: Types.ObjectId | string; roles?: Array<Role | string>; availabilityStatus?: StaffAvailabilityStatus }) => {
+    if (staff.availabilityStatus !== StaffAvailabilityStatus.AVAILABLE) {
+      return false;
+    }
+
+    const summary = buildAvailabilityStateSummary(
+      {
+        roles: staff.roles,
+        availabilityStatus: staff.availabilityStatus,
+      },
+      sessionsByUserId.get(staff._id.toString()),
+    );
+
+    return summary.availabilityStatus === StaffAvailabilityStatus.AVAILABLE
+      && !summary.availabilitySetupRequired;
+  };
+
+  const salesStaffIds = salesStaff
+    .filter(isSlotCountEligible)
+    .map((staff) => staff._id.toString());
   if (salesStaffIds.length === 0) return { available: false, remaining: 0 };
 
   const unavailable = await SalesAvailability.find({
@@ -624,6 +699,9 @@ export async function requestAppointment(
     customerNotes: input.purpose,
     serviceTypes: input.serviceTypes,
     serviceTypeCustom: input.serviceTypeCustom,
+    selectedDesignTemplateId: input.selectedDesignTemplateId,
+    selectedDesignTemplateName: input.selectedDesignTemplateName,
+    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl,
     bookedBy: customerId,
   });
 
@@ -964,9 +1042,19 @@ export async function submitSiteDetails(
     throw AppError.forbidden('You do not own this appointment');
   }
 
-  // Must be in REQUESTED status (not yet confirmed)
-  if (appointment.status !== AppointmentStatus.REQUESTED) {
-    throw AppError.badRequest('Site details can only be submitted for pending appointments');
+  // Customers can finish the custom brief before or shortly after staff confirmation.
+  if (![AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED].includes(appointment.status)) {
+    throw AppError.badRequest('Site details can only be submitted before the consultation begins');
+  }
+
+  if (
+    appointment.consultationStartedAt
+    || [
+      AppointmentAttendanceStatus.IN_PROGRESS,
+      AppointmentAttendanceStatus.COMPLETED,
+    ].includes(appointment.attendanceStatus as AppointmentAttendanceStatus)
+  ) {
+    throw AppError.badRequest('Site details can only be submitted before the consultation begins');
   }
 
   // Must not already be submitted
@@ -974,12 +1062,24 @@ export async function submitSiteDetails(
     throw AppError.badRequest('Site details have already been submitted for this appointment');
   }
 
-  // Office appointments: photos & reference images are recommended but not mandatory
-  // Customers can update them later from the site details page
+  // Office appointment photos and reference images are recommended, not mandatory.
 
   appointment.customerSiteDetails = input;
   appointment.siteDetailsStatus = 'submitted';
   await appointment.save();
+
+  if (appointment.status === AppointmentStatus.CONFIRMED && appointment.salesStaffId) {
+    await autoCreateVisitReport(
+      appointment._id,
+      appointment.customerId,
+      appointment.salesStaffId,
+      'consultation',
+      input,
+      input.serviceTypes || appointment.serviceTypes,
+      (input.serviceTypes || appointment.serviceTypes)?.[0],
+      input.serviceTypeCustom || appointment.serviceTypeCustom,
+    );
+  }
 
   // Notify appointment agents that site details have been submitted
   await notifyRole(
@@ -1076,6 +1176,13 @@ export async function agentCreateOcular(
   }
 
   const preassignedSalesStaffId: string | undefined = actorId;
+  const sourceConsultation = consultationContext.consultation;
+  const sourceConsultationReport = consultationContext.consultationReport;
+  const serviceTypes = [...new Set([
+    ...(sourceConsultation.serviceTypes || []),
+    ...(sourceConsultationReport.serviceType ? [sourceConsultationReport.serviceType] : []),
+  ].filter(Boolean))];
+  const selectedDesign = selectedDesignSnapshot(sourceConsultationReport, sourceConsultation);
 
   // Create ocular WITHOUT location/fee — customer provides these later
   const appointment = await Appointment.create({
@@ -1088,6 +1195,11 @@ export async function agentCreateOcular(
     customerNotes: input.visitReportId
       ? `Ocular follow-up from consultation report ${input.visitReportId}`
       : 'Ocular visit scheduled directly by sales staff',
+    sourceConsultationAppointmentId: sourceConsultation._id,
+    sourceConsultationReportId: sourceConsultationReport._id,
+    serviceTypes,
+    serviceTypeCustom: sourceConsultationReport.serviceTypeCustom || sourceConsultation.serviceTypeCustom,
+    ...selectedDesign,
     bookedBy: actorId,
   });
 
@@ -1188,6 +1300,7 @@ export async function customerSubmitOcularLocation(
     }
 
     const recommendedOcularDate = consultationReport.recommendedOcularDate.toISOString().split('T')[0];
+    const selectedDesign = selectedDesignSnapshot(consultationReport, appointment);
 
     let ocularAppointment = await Appointment.findOne({
       customerId: appointment.customerId,
@@ -1233,6 +1346,7 @@ export async function customerSubmitOcularLocation(
         sourceConsultationReportId: consultationReport._id,
         serviceTypes,
         serviceTypeCustom: consultationReport.serviceTypeCustom || appointment.serviceTypeCustom,
+        ...selectedDesign,
         customerSiteDetails: {
           serviceTypes,
           serviceTypeCustom: consultationReport.serviceTypeCustom || appointment.serviceTypeCustom,
@@ -1265,6 +1379,7 @@ export async function customerSubmitOcularLocation(
       ].filter(Boolean);
       ocularAppointment.sourceConsultationAppointmentId = appointment._id;
       ocularAppointment.sourceConsultationReportId = consultationReport._id;
+      syncSelectedDesign(ocularAppointment, selectedDesign);
       if (serviceTypes.length > 0) {
         ocularAppointment.serviceTypes = serviceTypes;
         ocularAppointment.customerSiteDetails = {
@@ -1790,6 +1905,7 @@ export async function updateConsultationAttendance(
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
   }
 
+  await synchronizeConsultationAttendanceByTime(appointment);
   const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
   let nextStatus = currentStatus;
   const now = new Date();
@@ -1810,14 +1926,6 @@ export async function updateConsultationAttendance(
     appointment.actualArrivalAt = arrivalAt;
     changes.actualArrivalAt = arrivalAt;
     changes.outsideWindow = outsideWindow;
-  } else if (input.action === 'start') {
-    nextStatus = AppointmentAttendanceStatus.IN_PROGRESS;
-    appointment.consultationStartedAt = now;
-    changes.consultationStartedAt = now;
-  } else if (input.action === 'complete') {
-    nextStatus = AppointmentAttendanceStatus.COMPLETED;
-    appointment.consultationCompletedAt = now;
-    changes.consultationCompletedAt = now;
   } else if (input.action === 'no_show') {
     if (!input.notes?.trim()) {
       throw AppError.badRequest('No-show attendance requires notes', ErrorCode.VALIDATION_ERROR);
@@ -2738,6 +2846,8 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
       throw AppError.forbidden('Access denied');
     }
   }
+
+  await synchronizeConsultationAttendanceByTime(appointment);
 
   const appointmentObject: any = appointment.toObject();
   const consultationReport = await getRecommendedOcularScheduleForAppointment(appointment);

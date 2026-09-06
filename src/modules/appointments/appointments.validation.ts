@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AppointmentType, PaymentMethod, OcularFeePaymentChoice, ServiceType, MeasurementUnit, Environment, SLOT_CODES } from '../../utils/constants.js';
+import { isSafeLocalCatalogImagePath } from '../../utils/selectedDesign.js';
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -16,6 +17,14 @@ const addressStructuredSchema = z.object({
   zip: z.string().max(10).trim(),
 });
 
+const selectedDesignImageUrlSchema = z.string()
+  .max(1000)
+  .trim()
+  .refine(
+    isSafeLocalCatalogImagePath,
+    'Selected design image must use a local catalog path',
+  );
+
 const appointmentRequestBaseSchema = z.object({
   type: z.nativeEnum(AppointmentType),
   date: z.string().regex(dateRegex, 'Date must be YYYY-MM-DD'),
@@ -29,7 +38,11 @@ const appointmentRequestBaseSchema = z.object({
   ocularFeePaymentChoice: z.nativeEnum(OcularFeePaymentChoice).optional(),
 });
 
-export const requestAppointmentSchema = appointmentRequestBaseSchema;
+export const requestAppointmentSchema = appointmentRequestBaseSchema.extend({
+  selectedDesignTemplateId: z.string().max(100).trim().optional(),
+  selectedDesignTemplateName: z.string().max(200).trim().optional(),
+  selectedDesignTemplateImageUrl: selectedDesignImageUrlSchema.optional(),
+});
 
 export const agentCreateAppointmentSchema = appointmentRequestBaseSchema.extend({
   customerId: z.string().min(1),
@@ -72,7 +85,7 @@ export const noShowSchema = z.object({
 });
 
 export const consultationAttendanceSchema = z.object({
-  action: z.enum(['check_in', 'start', 'complete', 'no_show', 'reschedule', 'customer_declined']),
+  action: z.enum(['check_in', 'no_show', 'reschedule', 'customer_declined']),
   actualArrivalAt: z.string().datetime().optional(),
   notes: z.string().max(1000).trim().optional(),
   overrideReason: z.string().max(1000).trim().optional(),

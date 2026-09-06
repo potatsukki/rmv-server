@@ -7,6 +7,7 @@ import { processEmailRetries } from './modules/notifications/email.service.js';
 import { processPaymentReminders } from './jobs/paymentReminders.js';
 import { processContractExpiries } from './jobs/contractExpiry.js';
 import { processAvailabilityShiftReminders } from './jobs/availabilityShiftReminders.js';
+import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
 import { seedDefaultConfigs } from './modules/config/config.service.js';
 import { logger } from './utils/logger.js';
 
@@ -23,6 +24,8 @@ let paymentReminderInterval: NodeJS.Timeout;
 let contractExpiryInterval: NodeJS.Timeout;
 // ── Availability Shift Reminder Processor (every 15 minutes) ──
 let availabilityReminderInterval: NodeJS.Timeout;
+// ── Consultation attendance automation (every minute) ──
+let consultationAttendanceInterval: NodeJS.Timeout;
 
 async function startServer(): Promise<void> {
   try {
@@ -68,12 +71,29 @@ async function startServer(): Promise<void> {
       }
     }, 15 * 60 * 1000); // every 15 minutes
 
+    consultationAttendanceInterval = setInterval(async () => {
+      try {
+        await processAutomatedConsultationAttendance(
+          new Date(),
+          (message, error) => logger.error(message, error),
+        );
+      } catch (error) {
+        logger.error('Consultation attendance automation error:', error);
+      }
+    }, 60 * 1000); // every minute
+
     // Run contract check once on startup
     processContractExpiries().catch(err =>
       logger.error('Initial contract expiry check failed:', err)
     );
     processAvailabilityShiftReminders().catch(err =>
       logger.error('Initial availability reminder check failed:', err)
+    );
+    processAutomatedConsultationAttendance(
+      new Date(),
+      (message, error) => logger.error(message, error),
+    ).catch(err =>
+      logger.error('Initial consultation attendance automation failed:', err)
     );
 
     // Start HTTP server
@@ -107,6 +127,9 @@ function gracefulShutdown(signal: string): void {
     }
     if (availabilityReminderInterval) {
       clearInterval(availabilityReminderInterval);
+    }
+    if (consultationAttendanceInterval) {
+      clearInterval(consultationAttendanceInterval);
     }
 
     // Close MongoDB connection

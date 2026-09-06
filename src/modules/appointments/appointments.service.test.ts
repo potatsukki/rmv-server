@@ -2,29 +2,61 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockAppointmentFindById,
+  mockAppointmentFindOne,
+  mockAppointmentFind,
+  mockAppointmentCreate,
   mockAuditCreate,
   mockNotifyRole,
   mockAssertTransition,
+  mockHolidayFindOne,
+  mockBlockedSlotExists,
+  mockUserFind,
+  mockAvailabilitySessionFind,
+  mockSalesAvailabilityFind,
+  mockAutoCreateDraft,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
+  mockAppointmentFindOne: vi.fn(),
+  mockAppointmentFind: vi.fn(),
+  mockAppointmentCreate: vi.fn(),
   mockAuditCreate: vi.fn(),
   mockNotifyRole: vi.fn(),
   mockAssertTransition: vi.fn(),
+  mockHolidayFindOne: vi.fn(),
+  mockBlockedSlotExists: vi.fn(),
+  mockUserFind: vi.fn(),
+  mockAvailabilitySessionFind: vi.fn(),
+  mockSalesAvailabilityFind: vi.fn(),
+  mockAutoCreateDraft: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
   Appointment: {
     findById: mockAppointmentFindById,
+    findOne: mockAppointmentFindOne,
+    find: mockAppointmentFind,
+    create: mockAppointmentCreate,
   },
   SlotLock: {},
-  User: {},
+  User: {
+    find: mockUserFind,
+  },
+  AvailabilitySession: {
+    find: mockAvailabilitySessionFind,
+  },
   AuditLog: {
     create: mockAuditCreate,
   },
-  Holiday: {},
-  SalesAvailability: {},
+  Holiday: {
+    findOne: mockHolidayFindOne,
+  },
+  SalesAvailability: {
+    find: mockSalesAvailabilityFind,
+  },
   Config: {},
-  BlockedSlot: {},
+  BlockedSlot: {
+    exists: mockBlockedSlotExists,
+  },
   VisitReport: {},
   VisitReportStatus: {},
   Project: {},
@@ -46,7 +78,7 @@ vi.mock('../notifications/email.service.js', () => ({
 }));
 
 vi.mock('../visit-reports/visit-reports.service.js', () => ({
-  autoCreateDraft: vi.fn(),
+  autoCreateDraft: mockAutoCreateDraft,
 }));
 
 vi.mock('../maps/maps.service.js', () => ({
@@ -66,8 +98,21 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { requestReschedule } from './appointments.service.js';
-import { AppointmentStatus, AuditAction } from '../../utils/constants.js';
+import {
+  getAvailableSlots,
+  requestAppointment,
+  requestReschedule,
+  submitSiteDetails,
+} from './appointments.service.js';
+import {
+  AppointmentAttendanceStatus,
+  AppointmentStatus,
+  AppointmentType,
+  AuditAction,
+  Role,
+  ServiceType,
+  StaffAvailabilityStatus,
+} from '../../utils/constants.js';
 
 function createAppointment(overrides: Record<string, unknown> = {}) {
   return {
@@ -84,6 +129,205 @@ function createAppointment(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+function selectLeanResult<T>(value: T) {
+  return {
+    select: vi.fn().mockReturnValue({
+      lean: vi.fn().mockResolvedValue(value),
+    }),
+  };
+}
+
+describe('getAvailableSlots', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('counts only sales staff whose persisted and effective availability labels are Available', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+
+    const availableStaff = {
+      _id: 'sales-available',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const setupRequiredStaff = {
+      _id: 'sales-setup-required',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const staleAvailableSessionStaff = {
+      _id: 'sales-stale-session',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: undefined,
+    };
+    const availableSession = {
+      _id: { toString: () => 'session-available' },
+      userId: { toString: () => 'sales-available' },
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+    };
+    const staleAvailableSession = {
+      _id: { toString: () => 'session-stale' },
+      userId: { toString: () => 'sales-stale-session' },
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+    };
+
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(false);
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      availableStaff,
+      setupRequiredStaff,
+      staleAvailableSessionStaff,
+    ]));
+    mockAvailabilitySessionFind.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([availableSession, staleAvailableSession]),
+    });
+    mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const result = await getAvailableSlots({
+      date: '2026-09-10',
+      type: AppointmentType.OFFICE,
+    });
+
+    expect(result.slots).toHaveLength(7);
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+    expect(mockUserFind).toHaveBeenCalledWith({
+      roles: Role.SALES_STAFF,
+      isActive: true,
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    });
+  });
+
+  it('excludes setup-required and expired-shift staff from slot count totals', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+
+    const activeStaff = {
+      _id: 'sales-active',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const setupRequiredStaff = {
+      _id: 'sales-setup-required',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const endedShiftStaff = {
+      _id: 'sales-ended-shift',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(false);
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      activeStaff,
+      setupRequiredStaff,
+      endedShiftStaff,
+    ]));
+    mockAvailabilitySessionFind.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: { toString: () => 'session-active' },
+          userId: { toString: () => 'sales-active' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+          shiftEndAt: new Date('2026-09-07T00:00:00.000Z'),
+          closedAt: undefined,
+        },
+        {
+          _id: { toString: () => 'session-setup' },
+          userId: { toString: () => 'sales-setup-required' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: undefined,
+          shiftEndAt: undefined,
+          closedAt: undefined,
+        },
+        {
+          _id: { toString: () => 'session-ended' },
+          userId: { toString: () => 'sales-ended-shift' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: new Date('2026-09-05T00:00:00.000Z'),
+          shiftEndAt: new Date('2026-09-05T12:00:00.000Z'),
+          closedAt: undefined,
+        },
+      ]),
+    });
+    mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const result = await getAvailableSlots({
+      date: '2026-09-10',
+      type: AppointmentType.OFFICE,
+    });
+
+    expect(result.slots.every((slot) => slot.remaining === 1)).toBe(true);
+    expect(result.slots.every((slot) => slot.available)).toBe(true);
+  });
+});
+
+describe('requestAppointment', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('persists the selected design snapshot on the appointment', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    mockAppointmentFindOne.mockResolvedValueOnce(null);
+    mockHolidayFindOne.mockResolvedValueOnce(null);
+    mockBlockedSlotExists.mockResolvedValueOnce(false);
+    mockUserFind.mockReturnValueOnce(selectLeanResult([{
+      _id: 'sales-1',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    }]));
+    mockAvailabilitySessionFind.mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([{
+        _id: { toString: () => 'session-sales-1' },
+        userId: { toString: () => 'sales-1' },
+        availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+        shiftStartAt: new Date('2026-08-24T00:00:00.000Z'),
+      }]),
+    });
+    mockSalesAvailabilityFind.mockReturnValueOnce(selectLeanResult([]));
+    mockAppointmentFind.mockReturnValueOnce(selectLeanResult([]));
+    mockAppointmentCreate.mockImplementationOnce(async (payload) => ({
+      _id: 'appointment-new',
+      ...payload,
+    }));
+    mockAuditCreate.mockResolvedValueOnce({});
+    mockNotifyRole.mockResolvedValueOnce(undefined);
+
+    await requestAppointment(
+      {
+        type: AppointmentType.OFFICE,
+        date: '2026-09-01',
+        slotCode: '09:00',
+        serviceTypes: [ServiceType.RAILINGS],
+        selectedDesignTemplateId: 'railings-commercial-guardrail',
+        selectedDesignTemplateName: 'Commercial Stainless Guardrail',
+        selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+      },
+      'customer-1',
+      [Role.CUSTOMER],
+    );
+
+    expect(mockAppointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      selectedDesignTemplateId: 'railings-commercial-guardrail',
+      selectedDesignTemplateName: 'Commercial Stainless Guardrail',
+      selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+    }));
+  });
+});
 
 describe('requestReschedule', () => {
   afterEach(() => {
@@ -129,5 +373,70 @@ describe('requestReschedule', () => {
       '/appointments/appointment-1',
     );
     expect(result).toBe(appointment);
+  });
+});
+
+describe('submitSiteDetails', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('accepts details after confirmation and refreshes the consultation draft', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      siteDetailsStatus: 'pending',
+      serviceTypes: [ServiceType.CUSTOM],
+      serviceTypeCustom: 'Custom food cart',
+      salesStaffId: 'sales-1',
+      slotCode: '09:00',
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockNotifyRole.mockResolvedValueOnce(undefined);
+    mockAutoCreateDraft.mockResolvedValueOnce({});
+
+    const input = {
+      serviceTypes: [ServiceType.CUSTOM],
+      serviceTypeCustom: 'Custom food cart',
+      customerRequirements: 'Mobile stainless cart with two shelves',
+    };
+
+    await submitSiteDetails('appointment-1', input, 'customer-1');
+
+    expect(appointment.siteDetailsStatus).toBe('submitted');
+    expect(appointment.customerSiteDetails).toEqual(input);
+    expect(appointment.save).toHaveBeenCalledTimes(1);
+    expect(mockAutoCreateDraft).toHaveBeenCalledWith(
+      'appointment-1',
+      appointment.customerId,
+      'sales-1',
+      'consultation',
+      input,
+      input.serviceTypes,
+      ServiceType.CUSTOM,
+      'Custom food cart',
+    );
+  });
+
+  it('rejects late details after the consultation has started', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      consultationStartedAt: new Date('2026-08-15T01:00:00.000Z'),
+      siteDetailsStatus: 'pending',
+      serviceTypes: [ServiceType.CUSTOM],
+      salesStaffId: 'sales-1',
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    await expect(submitSiteDetails(
+      'appointment-1',
+      { customerRequirements: 'Late request' },
+      'customer-1',
+    )).rejects.toThrow('Site details can only be submitted before the consultation begins');
+
+    expect(appointment.save).not.toHaveBeenCalled();
+    expect(mockAutoCreateDraft).not.toHaveBeenCalled();
   });
 });

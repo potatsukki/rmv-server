@@ -54,6 +54,7 @@ function formatAppointment(appt: any) {
 // ── Get Available Slots ──
 export const getAvailableSlots = asyncHandler(async (req: Request, res: Response) => {
   const result = await appointmentsService.getAvailableSlots(req.query as any);
+  res.set('Cache-Control', 'no-store');
   res.json({ success: true, data: result });
 });
 

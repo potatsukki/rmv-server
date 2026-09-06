@@ -89,6 +89,9 @@ export interface IAppointment extends Document {
   // Service types (set at booking time)
   serviceTypes?: string[];
   serviceTypeCustom?: string;
+  selectedDesignTemplateId?: string;
+  selectedDesignTemplateName?: string;
+  selectedDesignTemplateImageUrl?: string;
 
   // Cancellation
   cancellationReason?: string;
@@ -194,6 +197,9 @@ const appointmentSchema = new Schema<IAppointment>(
 
     serviceTypes: [{ type: String, enum: [...Object.values(ServiceType)] }],
     serviceTypeCustom: { type: String, trim: true },
+    selectedDesignTemplateId: { type: String, trim: true, maxlength: 100 },
+    selectedDesignTemplateName: { type: String, trim: true, maxlength: 200 },
+    selectedDesignTemplateImageUrl: { type: String, trim: true, maxlength: 1000 },
 
     cancellationReason: { type: String },
     cancelledBy: { type: Schema.Types.ObjectId, ref: 'User' },

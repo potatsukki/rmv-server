@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ServiceType, MeasurementUnit, Environment } from '../../utils/constants.js';
+import { isSafeLocalCatalogImagePath } from '../../utils/selectedDesign.js';
 
 // ── Line Item ──
 const lineItemSchema = z.object({
@@ -114,7 +115,14 @@ export const updateVisitReportSchema = z.object({
   initialDesignNotes: z.string().max(2000).trim().optional(),
   selectedDesignTemplateId: z.string().max(100).trim().optional(),
   selectedDesignTemplateName: z.string().max(200).trim().optional(),
-  selectedDesignTemplateImageUrl: z.string().max(1000).trim().optional(),
+  selectedDesignTemplateImageUrl: z.string()
+    .max(1000)
+    .trim()
+    .refine(
+      isSafeLocalCatalogImagePath,
+      'Selected design image must use a local catalog path',
+    )
+    .optional(),
   recommendedOcularDate: z.string().datetime().optional(),
   recommendedOcularSlot: z.string().max(20).trim().optional(),
   recommendedOcularAddressId: z.string().max(80).trim().optional(),
