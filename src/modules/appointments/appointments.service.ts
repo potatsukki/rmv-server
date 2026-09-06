@@ -400,6 +400,7 @@ async function getSlotAvailability(
   const salesStaff = await User.find({
     roles: Role.SALES_STAFF,
     isActive: true,
+    availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
   }).select('_id roles availabilityStatus').lean();
 
   const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
@@ -407,6 +408,10 @@ async function getSlotAvailability(
   );
   const salesStaffIds = salesStaff
     .filter((staff) => {
+      if (staff.availabilityStatus !== StaffAvailabilityStatus.AVAILABLE) {
+        return false;
+      }
+
       const summary = buildAvailabilityStateSummary(
         {
           roles: staff.roles,

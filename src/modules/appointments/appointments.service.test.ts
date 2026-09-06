@@ -144,7 +144,7 @@ describe('getAvailableSlots', () => {
     vi.clearAllMocks();
   });
 
-  it('counts only sales staff whose effective availability label is Available', async () => {
+  it('counts only sales staff whose persisted and effective availability labels are Available', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
 
@@ -158,9 +158,20 @@ describe('getAvailableSlots', () => {
       roles: [Role.SALES_STAFF],
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
     };
+    const staleAvailableSessionStaff = {
+      _id: 'sales-stale-session',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: undefined,
+    };
     const availableSession = {
       _id: { toString: () => 'session-available' },
       userId: { toString: () => 'sales-available' },
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+    };
+    const staleAvailableSession = {
+      _id: { toString: () => 'session-stale' },
+      userId: { toString: () => 'sales-stale-session' },
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
     };
@@ -170,9 +181,10 @@ describe('getAvailableSlots', () => {
     mockUserFind.mockImplementation(() => selectLeanResult([
       availableStaff,
       setupRequiredStaff,
+      staleAvailableSessionStaff,
     ]));
     mockAvailabilitySessionFind.mockReturnValue({
-      sort: vi.fn().mockResolvedValue([availableSession]),
+      sort: vi.fn().mockResolvedValue([availableSession, staleAvailableSession]),
     });
     mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
     mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
@@ -184,6 +196,11 @@ describe('getAvailableSlots', () => {
 
     expect(result.slots).toHaveLength(7);
     expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+    expect(mockUserFind).toHaveBeenCalledWith({
+      roles: Role.SALES_STAFF,
+      isActive: true,
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    });
   });
 });
 
