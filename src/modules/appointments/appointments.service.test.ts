@@ -11,6 +11,7 @@ const {
   mockHolidayFindOne,
   mockBlockedSlotExists,
   mockUserFind,
+  mockAvailabilitySessionFind,
   mockSalesAvailabilityFind,
   mockAutoCreateDraft,
 } = vi.hoisted(() => ({
@@ -24,6 +25,7 @@ const {
   mockHolidayFindOne: vi.fn(),
   mockBlockedSlotExists: vi.fn(),
   mockUserFind: vi.fn(),
+  mockAvailabilitySessionFind: vi.fn(),
   mockSalesAvailabilityFind: vi.fn(),
   mockAutoCreateDraft: vi.fn(),
 }));
@@ -38,6 +40,9 @@ vi.mock('../../models/index.js', () => ({
   SlotLock: {},
   User: {
     find: mockUserFind,
+  },
+  AvailabilitySession: {
+    find: mockAvailabilitySessionFind,
   },
   AuditLog: {
     create: mockAuditCreate,
@@ -93,7 +98,12 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { requestAppointment, requestReschedule, submitSiteDetails } from './appointments.service.js';
+import {
+  getAvailableSlots,
+  requestAppointment,
+  requestReschedule,
+  submitSiteDetails,
+} from './appointments.service.js';
 import {
   AppointmentAttendanceStatus,
   AppointmentStatus,
@@ -101,6 +111,7 @@ import {
   AuditAction,
   Role,
   ServiceType,
+  StaffAvailabilityStatus,
 } from '../../utils/constants.js';
 
 function createAppointment(overrides: Record<string, unknown> = {}) {
@@ -127,6 +138,55 @@ function selectLeanResult<T>(value: T) {
   };
 }
 
+describe('getAvailableSlots', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('counts only sales staff whose effective availability label is Available', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+
+    const availableStaff = {
+      _id: 'sales-available',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const setupRequiredStaff = {
+      _id: 'sales-setup-required',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const availableSession = {
+      _id: { toString: () => 'session-available' },
+      userId: { toString: () => 'sales-available' },
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+    };
+
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(false);
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      availableStaff,
+      setupRequiredStaff,
+    ]));
+    mockAvailabilitySessionFind.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([availableSession]),
+    });
+    mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const result = await getAvailableSlots({
+      date: '2026-09-10',
+      type: AppointmentType.OFFICE,
+    });
+
+    expect(result.slots).toHaveLength(7);
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+  });
+});
+
 describe('requestAppointment', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -140,7 +200,19 @@ describe('requestAppointment', () => {
     mockAppointmentFindOne.mockResolvedValueOnce(null);
     mockHolidayFindOne.mockResolvedValueOnce(null);
     mockBlockedSlotExists.mockResolvedValueOnce(false);
-    mockUserFind.mockReturnValueOnce(selectLeanResult([{ _id: 'sales-1' }]));
+    mockUserFind.mockReturnValueOnce(selectLeanResult([{
+      _id: 'sales-1',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    }]));
+    mockAvailabilitySessionFind.mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([{
+        _id: { toString: () => 'session-sales-1' },
+        userId: { toString: () => 'sales-1' },
+        availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+        shiftStartAt: new Date('2026-08-24T00:00:00.000Z'),
+      }]),
+    });
     mockSalesAvailabilityFind.mockReturnValueOnce(selectLeanResult([]));
     mockAppointmentFind.mockReturnValueOnce(selectLeanResult([]));
     mockAppointmentCreate.mockImplementationOnce(async (payload) => ({

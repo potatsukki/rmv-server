@@ -13,6 +13,7 @@ import { createAndSendNotification, notifyRole } from '../notifications/socket.s
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
 import { resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { synchronizeConsultationAttendanceByTime } from '../appointments/consultation-attendance-automation.js';
 
 import type { ICustomerSiteDetails } from '../../models/Appointment.js';
 import type { UserAddressInput } from '../../utils/userAddresses.js';
@@ -1448,6 +1449,8 @@ export async function getVisitReport(reportId: string) {
     );
   }
 
+  await synchronizeConsultationAttendanceByTime(report.appointmentId as any);
+
   // Fetch sample projects for the customer
   const customerId = report.customerId instanceof Object ? (report.customerId as any)._id : report.customerId;
   const customerProjects = await Project.find({ customerId })
@@ -1703,6 +1706,7 @@ export async function submitReport(
   // Ensure the linked appointment is in a valid status before allowing submission
   const appt = await Appointment.findById(report.appointmentId);
   if (!appt) throw AppError.notFound('Linked appointment not found');
+  await synchronizeConsultationAttendanceByTime(appt);
 
   const isConsultationReport = report.visitType === 'consultation';
   const hasRecommendedOcularSchedule = Boolean(report.recommendedOcularDate && report.recommendedOcularSlot);
@@ -1742,13 +1746,10 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    // Temporary bypass: an ocular handoff may complete attendance even when
-    // check-in/start was not recorded separately.
-    if (!bypassAttendanceForOcular
-      && ![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
-        .includes(attendanceStatus)) {
+    if (![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
+      .includes(attendanceStatus)) {
       throw AppError.badRequest(
-        'Check in and start the consultation before submitting the consultation report.',
+        'Wait until the scheduled consultation begins before submitting the consultation report.',
         ErrorCode.VALIDATION_ERROR,
       );
     }
@@ -1797,40 +1798,6 @@ export async function submitReport(
       }
     }
 
-    // Submitting the final consultation report is the completion action. This
-    // mirrors ocular report submission and avoids requiring the sales staff to
-    // leave the report just to click a separate "Complete Consultation" button.
-    if (attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
-      || (bypassAttendanceForOcular && attendanceStatus !== AppointmentAttendanceStatus.COMPLETED)) {
-      const completedAt = new Date();
-      if (!appt.consultationStartedAt) {
-        appt.consultationStartedAt = completedAt;
-      }
-      appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
-      appt.consultationCompletedAt = completedAt;
-      appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
-      appt.attendanceUpdatedAt = completedAt;
-      await saveSourceAppointment();
-
-      await AuditLog.create({
-        action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
-        actorId: salesStaffId,
-        targetType: 'appointment',
-        targetId: appt._id,
-        details: {
-          action: 'complete',
-          previousAttendanceStatus: attendanceStatus,
-          attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
-          consultationStartedAt: appt.consultationStartedAt,
-          consultationCompletedAt: completedAt,
-          reason: attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS
-            ? 'consultation_report_submitted'
-            : 'consultation_report_submitted_attendance_bypass',
-        },
-        ipAddress: ip,
-        userAgent: ua,
-      });
-    }
   }
 
   if (report.visitType === 'ocular' && appt.status !== AppointmentStatus.COMPLETED) {

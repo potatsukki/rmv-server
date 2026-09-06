@@ -20,9 +20,12 @@ import { formatCurrency } from '../../utils/helpers.js';
 import { matchesAppointmentSearch, normalizeAppointmentSearchTerm } from './appointments.search.js';
 import type { SortOrder } from 'mongoose';
 import {
+  buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
   getOpenAvailabilitySession,
+  getOpenAvailabilitySessionsByUserIds,
 } from '../users/availability-session.service.js';
+import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -397,10 +400,25 @@ async function getSlotAvailability(
   const salesStaff = await User.find({
     roles: Role.SALES_STAFF,
     isActive: true,
-    availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
-  }).select('_id').lean();
+  }).select('_id roles availabilityStatus').lean();
 
-  const salesStaffIds = salesStaff.map((staff) => staff._id.toString());
+  const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
+    salesStaff.map((staff) => staff._id),
+  );
+  const salesStaffIds = salesStaff
+    .filter((staff) => {
+      const summary = buildAvailabilityStateSummary(
+        {
+          roles: staff.roles,
+          availabilityStatus: staff.availabilityStatus,
+        },
+        sessionsByUserId.get(staff._id.toString()),
+      );
+
+      return summary.availabilityStatus === StaffAvailabilityStatus.AVAILABLE
+        && !summary.availabilitySetupRequired;
+    })
+    .map((staff) => staff._id.toString());
   if (salesStaffIds.length === 0) return { available: false, remaining: 0 };
 
   const unavailable = await SalesAvailability.find({
@@ -1880,6 +1898,7 @@ export async function updateConsultationAttendance(
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
   }
 
+  await synchronizeConsultationAttendanceByTime(appointment);
   const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
   let nextStatus = currentStatus;
   const now = new Date();
@@ -1900,14 +1919,6 @@ export async function updateConsultationAttendance(
     appointment.actualArrivalAt = arrivalAt;
     changes.actualArrivalAt = arrivalAt;
     changes.outsideWindow = outsideWindow;
-  } else if (input.action === 'start') {
-    nextStatus = AppointmentAttendanceStatus.IN_PROGRESS;
-    appointment.consultationStartedAt = now;
-    changes.consultationStartedAt = now;
-  } else if (input.action === 'complete') {
-    nextStatus = AppointmentAttendanceStatus.COMPLETED;
-    appointment.consultationCompletedAt = now;
-    changes.consultationCompletedAt = now;
   } else if (input.action === 'no_show') {
     if (!input.notes?.trim()) {
       throw AppError.badRequest('No-show attendance requires notes', ErrorCode.VALIDATION_ERROR);
@@ -2828,6 +2839,8 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
       throw AppError.forbidden('Access denied');
     }
   }
+
+  await synchronizeConsultationAttendanceByTime(appointment);
 
   const appointmentObject: any = appointment.toObject();
   const consultationReport = await getRecommendedOcularScheduleForAppointment(appointment);
