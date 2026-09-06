@@ -406,23 +406,25 @@ async function getSlotAvailability(
   const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
     salesStaff.map((staff) => staff._id),
   );
+  const isSlotCountEligible = (staff: { _id: Types.ObjectId | string; roles?: Array<Role | string>; availabilityStatus?: StaffAvailabilityStatus }) => {
+    if (staff.availabilityStatus !== StaffAvailabilityStatus.AVAILABLE) {
+      return false;
+    }
+
+    const summary = buildAvailabilityStateSummary(
+      {
+        roles: staff.roles,
+        availabilityStatus: staff.availabilityStatus,
+      },
+      sessionsByUserId.get(staff._id.toString()),
+    );
+
+    return summary.availabilityStatus === StaffAvailabilityStatus.AVAILABLE
+      && !summary.availabilitySetupRequired;
+  };
+
   const salesStaffIds = salesStaff
-    .filter((staff) => {
-      if (staff.availabilityStatus !== StaffAvailabilityStatus.AVAILABLE) {
-        return false;
-      }
-
-      const summary = buildAvailabilityStateSummary(
-        {
-          roles: staff.roles,
-          availabilityStatus: staff.availabilityStatus,
-        },
-        sessionsByUserId.get(staff._id.toString()),
-      );
-
-      return summary.availabilityStatus === StaffAvailabilityStatus.AVAILABLE
-        && !summary.availabilitySetupRequired;
-    })
+    .filter(isSlotCountEligible)
     .map((staff) => staff._id.toString());
   if (salesStaffIds.length === 0) return { available: false, remaining: 0 };
 

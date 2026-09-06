@@ -202,6 +202,73 @@ describe('getAvailableSlots', () => {
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
     });
   });
+
+  it('excludes setup-required and expired-shift staff from slot count totals', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+
+    const activeStaff = {
+      _id: 'sales-active',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const setupRequiredStaff = {
+      _id: 'sales-setup-required',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+    const endedShiftStaff = {
+      _id: 'sales-ended-shift',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    };
+
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(false);
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      activeStaff,
+      setupRequiredStaff,
+      endedShiftStaff,
+    ]));
+    mockAvailabilitySessionFind.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: { toString: () => 'session-active' },
+          userId: { toString: () => 'sales-active' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+          shiftEndAt: new Date('2026-09-07T00:00:00.000Z'),
+          closedAt: undefined,
+        },
+        {
+          _id: { toString: () => 'session-setup' },
+          userId: { toString: () => 'sales-setup-required' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: undefined,
+          shiftEndAt: undefined,
+          closedAt: undefined,
+        },
+        {
+          _id: { toString: () => 'session-ended' },
+          userId: { toString: () => 'sales-ended-shift' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: new Date('2026-09-05T00:00:00.000Z'),
+          shiftEndAt: new Date('2026-09-05T12:00:00.000Z'),
+          closedAt: undefined,
+        },
+      ]),
+    });
+    mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const result = await getAvailableSlots({
+      date: '2026-09-10',
+      type: AppointmentType.OFFICE,
+    });
+
+    expect(result.slots.every((slot) => slot.remaining === 1)).toBe(true);
+    expect(result.slots.every((slot) => slot.available)).toBe(true);
+  });
 });
 
 describe('requestAppointment', () => {
