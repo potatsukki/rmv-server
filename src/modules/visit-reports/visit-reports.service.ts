@@ -8,7 +8,6 @@ import {
   MeasurementUnit, ServiceType,
 } from '../../utils/constants.js';
 import { visitReportStateMachine, appointmentStateMachine } from '../../utils/stateMachine.js';
-import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
@@ -109,14 +108,6 @@ function getAddressStructured(address: UserAddressInput) {
     province: address.province || '',
     zip: address.zip || '',
   };
-}
-
-function getVisitReportProjectSiteAddress(appt: any, report: any) {
-  return appt.formattedAddress
-    || appt.customerAddress
-    || report.recommendedOcularAddress?.formattedAddress
-    || report.recommendedOcularAddress?.address
-    || '';
 }
 
 async function applyRecommendedOcularAddress(appointment: any, addressInput: UserAddressInput) {
@@ -810,48 +801,6 @@ async function getCanonicalActiveOcularAppointment(appointment: any) {
   return candidates.find((candidate) => serviceSetKey(candidate) === targetKey) || null;
 }
 
-function hasAnyMeasuredDimensions(report: {
-  lineItems?: Array<{
-    length?: number;
-    width?: number;
-    height?: number;
-    area?: number;
-    thickness?: number;
-  }>;
-  measurements?: {
-    length?: number;
-    width?: number;
-    height?: number;
-    area?: number;
-    thickness?: number;
-    raw?: string;
-  };
-}) {
-  const hasLineItemMeasurements = Boolean(
-    report.lineItems?.some((item) =>
-      item.length != null ||
-      item.width != null ||
-      item.height != null ||
-      item.area != null ||
-      item.thickness != null,
-    ),
-  );
-
-  const legacy = report.measurements;
-  const hasLegacyMeasurements = Boolean(
-    legacy && (
-      legacy.length != null ||
-      legacy.width != null ||
-      legacy.height != null ||
-      legacy.area != null ||
-      legacy.thickness != null ||
-      legacy.raw?.trim()
-    ),
-  );
-
-  return hasLineItemMeasurements || hasLegacyMeasurements;
-}
-
 function getIncompleteOcularFields(report: {
   actualVisitDateTime?: Date | string | null;
   lineItems?: Array<{
@@ -881,6 +830,10 @@ function getIncompleteOcularFields(report: {
     accessNotes?: string;
     obstaclesOrConstraints?: string;
   };
+  specifications?: {
+    measurements?: Record<string, string | number | boolean>;
+    siteConditions?: Record<string, string | number | boolean>;
+  };
   materials?: string;
   finishes?: string;
   preferredDesign?: string;
@@ -896,7 +849,8 @@ function getIncompleteOcularFields(report: {
   }
 
   const lineItems = report.lineItems || [];
-  if (lineItems.length > 0) {
+  const hasSpecMeasurements = hasSpecificationData(report.specifications, 'measurements');
+  if (lineItems.length > 0 && !hasSpecMeasurements) {
     lineItems.forEach((item, index) => {
       const isComplete = isNonEmptyString(item.label)
         && item.quantity != null
@@ -924,198 +878,20 @@ function getIncompleteOcularFields(report: {
       && isNonEmptyString(legacy.raw),
     );
 
-    if (!hasCompleteLegacyMeasurements) {
+    if (!hasCompleteLegacyMeasurements && !hasSpecMeasurements) {
       missing.push('at least one complete measurement item');
     }
   }
 
-  if (!isNonEmptyString(report.siteConditions?.environment)) missing.push('site environment');
-  if (!isNonEmptyString(report.siteConditions?.floorType)) missing.push('floor type');
-  if (!isNonEmptyString(report.siteConditions?.wallMaterial)) missing.push('wall material');
-  if (!isNonEmptyString(report.siteConditions?.accessNotes)) missing.push('access notes');
-  if (!isNonEmptyString(report.siteConditions?.obstaclesOrConstraints)) missing.push('obstacles or constraints');
-
-  if (!isNonEmptyString(report.materials)) missing.push('materials');
-  if (!isNonEmptyString(report.finishes)) missing.push('finishes');
-  if (!isNonEmptyString(report.preferredDesign)) missing.push('preferred design');
+  if (!hasSpecificationData(report.specifications, 'siteConditions')) {
+    if (!isNonEmptyString(report.siteConditions?.environment)) missing.push('site environment');
+    if (!isNonEmptyString(report.siteConditions?.floorType)) missing.push('floor type');
+    if (!isNonEmptyString(report.siteConditions?.wallMaterial)) missing.push('wall material');
+    if (!isNonEmptyString(report.siteConditions?.accessNotes)) missing.push('access notes');
+    if (!isNonEmptyString(report.siteConditions?.obstaclesOrConstraints)) missing.push('obstacles or constraints');
+  }
   if ((report.photoKeys?.length || 0) === 0) missing.push('site photos');
-  const hasInitialDesignReference = (report.initialDesignKeys?.length || 0) > 0
-    || isNonEmptyString(report.selectedDesignTemplateImageUrl);
-  if (!hasInitialDesignReference) missing.push('initial design files');
   return [...new Set(missing)];
-}
-
-function getIncompleteNoOcularFields(report: {
-  title?: string;
-  serviceType?: string;
-  serviceTypeCustom?: string;
-  discussionNotes?: string;
-  customerRequirements?: string;
-  notes?: string;
-  lineItems?: Array<{
-    label?: string;
-    length?: number;
-    width?: number;
-    height?: number;
-    area?: number;
-    thickness?: number;
-    quantity?: number;
-    notes?: string;
-  }>;
-  measurements?: {
-    length?: number;
-    width?: number;
-    height?: number;
-    area?: number;
-    thickness?: number;
-    raw?: string;
-  };
-  materials?: string;
-  preferredDesign?: string;
-  specifications?: {
-    measurements?: Record<string, string | number | boolean>;
-    siteConditions?: Record<string, string | number | boolean>;
-    materialsDesign?: Record<string, string | number | boolean>;
-    additional?: Record<string, string | number | boolean>;
-  };
-  photoKeys?: string[];
-  referenceImageKeys?: string[];
-  initialDesignKeys?: string[];
-  selectedDesignTemplateImageUrl?: string;
-}) {
-  const missing: string[] = [];
-
-  const hasServiceDetails = isNonEmptyString(report.title)
-    || isNonEmptyString(report.serviceType)
-    || isNonEmptyString(report.serviceTypeCustom);
-  if (!hasServiceDetails) missing.push('project title or service details');
-
-  const hasDescription = isNonEmptyString(report.discussionNotes)
-    || isNonEmptyString(report.customerRequirements)
-    || isNonEmptyString(report.notes);
-  if (!hasDescription) missing.push('project description or requirement notes');
-
-  if (!hasAnyMeasuredDimensions(report) && !hasSpecificationData(report.specifications, 'measurements')) {
-    missing.push('measurements/dimensions');
-  }
-
-  if (!isNonEmptyString(report.materials) && !hasSpecificationData(report.specifications, 'materialsDesign')) {
-    missing.push('material preference');
-  }
-
-  const hasDesignReferences = isNonEmptyString(report.preferredDesign)
-    || (report.referenceImageKeys?.length || 0) > 0
-    || (report.initialDesignKeys?.length || 0) > 0
-    || isNonEmptyString(report.selectedDesignTemplateImageUrl)
-    || hasSpecificationData(report.specifications, 'materialsDesign');
-  if (!hasDesignReferences) {
-    missing.push('design/reference details');
-  }
-
-  if ((report.photoKeys?.length || 0) === 0) {
-    missing.push('uploaded reference files/images');
-  }
-
-  return [...new Set(missing)];
-}
-
-async function ensureConsultationDraftProject(
-  report: any,
-  appt: any,
-  salesStaffId: string,
-  reason: string,
-  ip?: string,
-  ua?: string,
-) {
-  const serviceTypes = await getAppointmentVisitReportServiceTypes(report.appointmentId);
-  const serviceLabel = serviceTypes.length > 0
-    ? serviceTypes.join(', ')
-    : report.serviceTypeCustom || report.serviceType || 'General Fabrication';
-  const customerNotes = (appt.customerNotes || '').trim();
-  const notesNormalized = customerNotes.toLowerCase();
-  const serviceLabelNormalized = serviceLabel.toLowerCase();
-  const titleBase = customerNotes && notesNormalized !== serviceLabelNormalized
-    ? customerNotes
-    : serviceLabel;
-
-  const existingProject = await Project.findOne({
-    $or: [
-      { appointmentId: report.appointmentId },
-      { visitReportId: report._id },
-    ],
-  });
-  if (existingProject) {
-    if (!existingProject.contractStatus) {
-      existingProject.contractStatus = ContractStatus.MISSING;
-    }
-    const nextServiceTypes = [...new Set([...(existingProject.serviceTypes || []), ...serviceTypes])];
-    existingProject.serviceTypes = nextServiceTypes;
-    existingProject.serviceType = nextServiceTypes.length > 0 ? nextServiceTypes.join(', ') : serviceLabel;
-    existingProject.title = existingProject.title || titleBase;
-    existingProject.mediaKeys = [...new Set([
-      ...(existingProject.mediaKeys || []),
-      ...report.photoKeys,
-      ...report.sketchKeys,
-      ...report.referenceImageKeys,
-    ])];
-    await existingProject.save();
-
-    if (!report.linkedProjectId || report.linkedProjectId.toString() !== existingProject._id.toString()) {
-      report.linkedProjectId = existingProject._id;
-      await report.save();
-    }
-
-    const relatedReports = await VisitReport.find({ appointmentId: report.appointmentId });
-    for (const relatedReport of relatedReports) {
-      await upsertProjectItemFromVisitReport(existingProject, relatedReport);
-    }
-
-    return existingProject;
-  }
-
-  const project = await Project.create({
-    projectNumber: await generateProjectNumber(),
-    appointmentId: report.appointmentId,
-    visitReportId: report._id,
-    customerId: report.customerId,
-    salesStaffId: report.salesStaffId,
-    title: titleBase,
-    serviceType: serviceLabel,
-    serviceTypes,
-    description: report.customerRequirements || report.notes || 'Created from consultation',
-    siteAddress: getVisitReportProjectSiteAddress(appt, report),
-    measurements: report.measurements,
-    materialType: report.materials,
-    finishColor: report.finishes,
-    quantity: 1,
-    notes: report.notes,
-    designReviewStatus: 'not_required',
-    status: ProjectStatus.DRAFT,
-    contractStatus: ContractStatus.MISSING,
-    mediaKeys: [...report.photoKeys, ...report.sketchKeys, ...report.referenceImageKeys],
-  });
-
-  if (!report.linkedProjectId || report.linkedProjectId.toString() !== project._id.toString()) {
-    report.linkedProjectId = project._id;
-    await report.save();
-  }
-
-  const relatedReports = await VisitReport.find({ appointmentId: report.appointmentId });
-  for (const relatedReport of relatedReports) {
-    await upsertProjectItemFromVisitReport(project, relatedReport);
-  }
-
-  await AuditLog.create({
-    action: AuditAction.PROJECT_CREATED,
-    actorId: salesStaffId,
-    targetType: 'project',
-    targetId: project._id,
-    details: { triggeredBy: 'system', reason, visitReportId: report._id },
-    ipAddress: ip,
-    userAgent: ua,
-  });
-
-  return project;
 }
 
 async function notifySalesContractUploadRequired(project: any, serviceLabel: string, reason: string) {
@@ -1222,7 +998,7 @@ async function completeOcularAppointmentForReport(appt: any, salesStaffId: strin
     actorId: salesStaffId,
     targetType: 'appointment',
     targetId: appt._id,
-    details: { reason: 'ocular_report_project_created' },
+    details: { reason: 'ocular_report_submitted' },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1279,7 +1055,7 @@ export async function autoCreateDraft(
   );
 }
 
-// ── Create Report (Sales Staff adds another project/report to an appointment) ──
+// ── Create Report (Sales Staff adds a service report to an appointment) ──
 
 export async function createReport(
   input: CreateVisitReportInput,
@@ -1771,51 +1547,6 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (consultationOutcome === 'no_ocular') {
-      report.recommendedOcularDate = undefined;
-      report.recommendedOcularSlot = undefined;
-      const missingFields = getIncompleteNoOcularFields({
-        title: readableServiceTitle(report.serviceType, report.serviceTypeCustom),
-        serviceType: report.serviceType,
-        serviceTypeCustom: report.serviceTypeCustom,
-        discussionNotes: report.discussionNotes,
-        customerRequirements: report.customerRequirements,
-        notes: report.notes,
-        lineItems: report.lineItems,
-        measurements: report.measurements,
-        materials: report.materials,
-        preferredDesign: report.preferredDesign,
-        photoKeys: report.photoKeys,
-        referenceImageKeys: report.referenceImageKeys,
-        initialDesignKeys: report.initialDesignKeys,
-        selectedDesignTemplateImageUrl: report.selectedDesignTemplateImageUrl,
-      });
-      if (missingFields.length > 0) {
-        throw AppError.badRequest(
-          `Proceeding without ocular requires complete project details. Missing: ${missingFields.join(', ')}.`,
-          ErrorCode.VALIDATION_ERROR,
-        );
-      }
-    }
-
-  }
-
-  if (report.visitType === 'ocular' && appt.status !== AppointmentStatus.COMPLETED) {
-    if (appt.status !== AppointmentStatus.IN_PROGRESS) {
-      throw AppError.badRequest(
-        'Start the site visit first before submitting the final ocular report.',
-        ErrorCode.VALIDATION_ERROR,
-      );
-    }
-
-    await completeOcularAppointmentForReport(appt, salesStaffId, ip, ua);
-  }
-
-  if (!isConsultationReport && appt.status !== AppointmentStatus.COMPLETED) {
-    throw AppError.badRequest(
-      'The appointment must be marked as complete before submitting reports',
-      ErrorCode.VALIDATION_ERROR,
-    );
   }
 
   // Block submission for ocular visits with unpaid fees when the site is outside NCR.
@@ -1841,6 +1572,24 @@ export async function submitReport(
     }
   }
 
+  if (report.visitType === 'ocular' && appt.status !== AppointmentStatus.COMPLETED) {
+    if (appt.status !== AppointmentStatus.IN_PROGRESS) {
+      throw AppError.badRequest(
+        'Start the site visit first before submitting the final ocular report.',
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+
+    await completeOcularAppointmentForReport(appt, salesStaffId, ip, ua);
+  }
+
+  if (!isConsultationReport && appt.status !== AppointmentStatus.COMPLETED) {
+    throw AppError.badRequest(
+      'The appointment must be marked as complete before submitting reports',
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
   if (isConsultationReport && consultationOutcome === 'no_ocular') {
     report.recommendedOcularDate = undefined;
     report.recommendedOcularSlot = undefined;
@@ -1852,14 +1601,6 @@ export async function submitReport(
 
   if (alreadySubmittedConsultation && consultationOutcome === 'no_ocular') {
     await report.save();
-    await ensureConsultationDraftProject(
-      report,
-      appt,
-      salesStaffId,
-      'consultation_resubmitted_repair',
-      ip,
-      ua,
-    );
     await submitSiblingConsultationReports(report, appt, salesStaffId, ip, ua);
     return populateVisitReportDetail(VisitReport.findById(report._id));
   }
@@ -1883,17 +1624,8 @@ export async function submitReport(
   }
 
   if (isConsultationReport) {
-    // ── Consultation: auto-create DRAFT project, then branch by ocular decision ──
+    // Record the consultation outcome independently of project creation.
     const serviceLabel = report.serviceTypeCustom || report.serviceType || 'General Fabrication';
-    const project = await ensureConsultationDraftProject(
-      report,
-      appt,
-      salesStaffId,
-      'consultation_submitted',
-      ip,
-      ua,
-    );
-
     const formatOcularSlot = (slot: string) => {
       const h = parseInt(slot.split(':')[0]);
       return `${h > 12 ? h - 12 : h === 0 ? 12 : h}:00 ${h >= 12 ? 'PM' : 'AM'}`;
@@ -1907,21 +1639,13 @@ export async function submitReport(
         Role.APPOINTMENT_AGENT,
         NotificationCategory.APPOINTMENT,
         'Consultation Completed — Schedule Ocular',
-        `Consultation report submitted for "${serviceLabel}". A DRAFT project has been created.${ocularDateInfo} Schedule an ocular visit for the customer.`,
+        `Consultation report submitted for "${serviceLabel}".${ocularDateInfo} Schedule an ocular visit for the customer.`,
         `/appointments/${appt._id}`,
-      );
-
-      await notifyRole(
-        Role.ADMIN,
-        NotificationCategory.PROJECT,
-        'New Draft Project from Consultation',
-        `A new draft project "${serviceLabel}" has been created from a consultation. Awaiting ocular visit.`,
-        `/projects/${project._id}`,
       );
 
       await createAndSendNotification(
         report.customerId,
-        NotificationCategory.PROJECT,
+        NotificationCategory.APPOINTMENT,
         'Consultation Complete',
         `Your consultation has been completed for "${serviceLabel}". An ocular visit will be scheduled next.`,
         `/appointments/${appt._id}`,
@@ -2075,7 +1799,7 @@ export async function submitReport(
         report.customerId,
         report.salesStaffId,
         consultationServiceTypes,
-        project._id,
+        report.linkedProjectId,
         report._id,
       );
 
@@ -2150,24 +1874,12 @@ export async function submitReport(
         await saveSourceAppointment();
       }
     } else {
-      project.contractStatus = project.contractStatus || ContractStatus.MISSING;
-      if (project.status !== ProjectStatus.DRAFT) {
-        project.status = ProjectStatus.DRAFT;
-      }
-      await project.save();
-
-      const item = await upsertProjectItemFromVisitReport(project, report);
-      item.status = ProjectStatus.DRAFT;
-      await item.save();
-
-      await notifySalesContractUploadRequired(project, serviceLabel, 'Sales marked ocular as not needed.');
-
       await createAndSendNotification(
         report.customerId,
-        NotificationCategory.PROJECT,
+        NotificationCategory.APPOINTMENT,
         'Consultation Complete',
-        `Your consultation has been completed for "${serviceLabel}". The project will continue without an ocular visit.`,
-        `/projects/${project._id}`,
+        `Your consultation has been completed for "${serviceLabel}". No ocular visit is needed.`,
+        `/appointments/${appt._id}`,
       );
 
       appt.consultationReportSubmitted = true;
@@ -2187,10 +1899,10 @@ export async function submitReport(
       await submitSiblingConsultationReports(report, appt, salesStaffId, ip, ua);
     }
   } else {
-    // ── Ocular: update existing project with measurements, transition DRAFT → SUBMITTED ──
+    // Preserve updates for explicitly linked legacy projects only.
     const linkedProject = report.linkedProjectId
       ? await Project.findById(report.linkedProjectId)
-      : await Project.findOne({ visitReportId: { $ne: report._id }, appointmentId: { $exists: true }, customerId: report.customerId, status: { $in: [ProjectStatus.DRAFT, ProjectStatus.SUBMITTED] } }).sort({ createdAt: -1 });
+      : await Project.findOne({ visitReportId: report._id, customerId: report.customerId });
 
     if (linkedProject) {
       // Update project with ocular data
@@ -2233,59 +1945,13 @@ export async function submitReport(
         linkedProject.serviceType || linkedProject.title,
         'Ocular measurements have been submitted.',
       );
-    } else {
-      // Fallback: no linked project found — create one as draft pending signed contract upload.
-      const existingProject = await Project.findOne({ visitReportId: report._id });
-      if (!existingProject) {
-        const serviceLabel = report.serviceTypeCustom || report.serviceType || 'General Fabrication';
-        const customerNotes = (appt.customerNotes || '').trim();
-        const notesNormalized = customerNotes.toLowerCase();
-        const serviceLabelNormalized = serviceLabel.toLowerCase();
-        const titleBase = customerNotes && notesNormalized !== serviceLabelNormalized
-          ? customerNotes
-          : serviceLabel;
-        const project = await Project.create({
-          projectNumber: await generateProjectNumber(),
-          appointmentId: report.appointmentId,
-          visitReportId: report._id,
-          customerId: report.customerId,
-          salesStaffId: report.salesStaffId,
-          title: titleBase,
-          serviceType: serviceLabel,
-          description: report.customerRequirements || report.notes || 'Created from visit report',
-          siteAddress: getVisitReportProjectSiteAddress(appt, report),
-          measurements: report.measurements,
-          materialType: report.materials,
-          finishColor: report.finishes,
-          quantity: 1,
-          notes: report.notes,
-          initialDesignKeys: report.initialDesignKeys || [],
-          initialDesignNotes: report.initialDesignNotes,
-          designReviewStatus: (report.initialDesignKeys?.length || report.initialDesignNotes) ? 'pending' : 'not_required',
-          status: ProjectStatus.DRAFT,
-          contractStatus: ContractStatus.MISSING,
-          mediaKeys: [...report.photoKeys, ...report.sketchKeys, ...report.referenceImageKeys],
-        });
-
-        await AuditLog.create({
-          action: AuditAction.PROJECT_CREATED,
-          actorId: salesStaffId,
-          targetType: 'project',
-          targetId: project._id,
-          details: { triggeredBy: 'system', reason: 'visit_report_submitted', visitReportId: reportId },
-          ipAddress: ip,
-          userAgent: ua,
-        });
-
-        await notifySalesContractUploadRequired(project, serviceLabel, 'The ocular visit report created a project.');
-      }
     }
   }
 
   return populateVisitReportDetail(VisitReport.findById(report._id));
 }
 
-// ── Delete Report (Sales Staff removes accidental extra project) ──
+// ── Delete Report (Sales Staff removes an accidental extra report) ──
 
 export async function deleteReport(
   reportId: string,
@@ -2480,7 +2146,3 @@ export async function markCompleted(
 
   return report;
 }
-
-export const __visitReportServiceInternals = {
-  getIncompleteNoOcularFields,
-};

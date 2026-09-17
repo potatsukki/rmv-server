@@ -1,12 +1,33 @@
 import { z } from 'zod';
 import { ProjectStatus } from '../../utils/constants.js';
+import { updateVisitReportSchema } from '../visit-reports/visit-reports.validation.js';
+
+const projectDetailsSchema = updateVisitReportSchema.pick({
+  serviceTypeCustom: true,
+  measurementUnit: true,
+  lineItems: true,
+  specifications: true,
+  preferredDesign: true,
+  customerRequirements: true,
+  initialDesignKeys: true,
+  initialDesignNotes: true,
+  selectedDesignTemplateId: true,
+  selectedDesignTemplateName: true,
+  selectedDesignTemplateImageUrl: true,
+  photoKeys: true,
+  videoKeys: true,
+  sketchKeys: true,
+  referenceImageKeys: true,
+});
 
 export const createProjectSchema = z.object({
-  appointmentId: z.string().min(1),
-  title: z.string().min(1).max(100).trim(),
-  serviceType: z.string().min(1).max(100).trim(),
-  description: z.string().min(1).max(2000).trim(),
-  siteAddress: z.string().min(1).max(500).trim(),
+  ...projectDetailsSchema.shape,
+  customerId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid customer ID').optional(),
+  appointmentId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid appointment ID').optional(),
+  title: z.string().trim().min(1).max(100),
+  serviceType: z.string().trim().min(1).max(100),
+  description: z.string().trim().min(1).max(2000),
+  siteAddress: z.string().trim().min(1).max(500),
   measurements: z.object({
     length: z.number().positive().optional(),
     width: z.number().positive().optional(),
@@ -15,10 +36,13 @@ export const createProjectSchema = z.object({
     thickness: z.number().positive().optional(),
     unit: z.string().default('cm'),
   }).optional(),
-  materialType: z.string().max(100).optional(),
-  finishColor: z.string().max(50).optional(),
+  materialType: z.string().max(1000).optional(),
+  finishColor: z.string().max(500).optional(),
   quantity: z.number().int().min(1).default(1),
   notes: z.string().max(2000).trim().optional(),
+}).refine((input) => Boolean(input.customerId || input.appointmentId), {
+  message: 'Select a customer for the project',
+  path: ['customerId'],
 });
 
 export const updateProjectSchema = z.object({

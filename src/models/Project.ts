@@ -1,9 +1,10 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { ContractStatus, ProjectStatus } from '../utils/constants.js';
+import type { IProjectItem } from './ProjectItem.js';
 
 export interface IProject extends Document {
   _id: Types.ObjectId;
-  appointmentId: Types.ObjectId;
+  appointmentId?: Types.ObjectId;
   projectNumber: string; // RMV-YYYY-#####
   visitReportId?: Types.ObjectId; // link back to the specific visit report
   customerId: Types.ObjectId;
@@ -16,6 +17,19 @@ export interface IProject extends Document {
   totalCost?: number;
   serviceType: string; // e.g., gate, railing, kitchen
   serviceTypes?: string[];
+  serviceTypeCustom?: string;
+  measurementUnit?: string;
+  lineItems?: IProjectItem['lineItems'];
+  specifications?: IProjectItem['specifications'];
+  preferredDesign?: string;
+  customerRequirements?: string;
+  selectedDesignTemplateId?: string;
+  selectedDesignTemplateName?: string;
+  selectedDesignTemplateImageUrl?: string;
+  photoKeys?: string[];
+  videoKeys?: string[];
+  sketchKeys?: string[];
+  referenceImageKeys?: string[];
   description: string;
   siteAddress: string;
   siteAddressStructured?: {
@@ -89,7 +103,7 @@ export interface IProject extends Document {
 
 const projectSchema = new Schema<IProject>(
   {
-    appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment', required: true },
+    appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
     projectNumber: { type: String, required: true, unique: true },
     visitReportId: { type: Schema.Types.ObjectId, ref: 'VisitReport' },
     customerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -102,6 +116,19 @@ const projectSchema = new Schema<IProject>(
     totalCost: { type: Number },
     serviceType: { type: String, required: true, trim: true },
     serviceTypes: [{ type: String, trim: true }],
+    serviceTypeCustom: String,
+    measurementUnit: String,
+    lineItems: { type: [Schema.Types.Mixed], default: [] },
+    specifications: { type: Schema.Types.Mixed },
+    preferredDesign: String,
+    customerRequirements: String,
+    selectedDesignTemplateId: String,
+    selectedDesignTemplateName: String,
+    selectedDesignTemplateImageUrl: String,
+    photoKeys: [String],
+    videoKeys: [String],
+    sketchKeys: [String],
+    referenceImageKeys: [String],
     description: { type: String, required: true },
     siteAddress: { type: String, required: true },
     siteAddressStructured: {

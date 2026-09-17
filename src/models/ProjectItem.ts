@@ -4,7 +4,7 @@ import { ProjectStatus } from '../utils/constants.js';
 export interface IProjectItem extends Document {
   _id: Types.ObjectId;
   projectId: Types.ObjectId;
-  appointmentId: Types.ObjectId;
+  appointmentId?: Types.ObjectId;
   consultationVisitReportId?: Types.ObjectId;
   ocularVisitReportId?: Types.ObjectId;
   serviceType: string;
@@ -75,7 +75,7 @@ const lineItemSchema = new Schema(
 const projectItemSchema = new Schema<IProjectItem>(
   {
     projectId: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
-    appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment', required: true },
+    appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
     consultationVisitReportId: { type: Schema.Types.ObjectId, ref: 'VisitReport' },
     ocularVisitReportId: { type: Schema.Types.ObjectId, ref: 'VisitReport' },
     serviceType: { type: String, required: true, trim: true },

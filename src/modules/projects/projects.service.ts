@@ -319,7 +319,7 @@ async function ensureProjectItems(project: any) {
   const reports = await VisitReport.find({
     $or: [
       { linkedProjectId: project._id },
-      { appointmentId: project.appointmentId },
+      ...(project.visitReportId ? [{ _id: project.visitReportId }] : []),
     ],
   }).sort({ visitType: 1, createdAt: 1 });
 
@@ -343,6 +343,15 @@ async function ensureProjectItems(project: any) {
       title: readableServiceTitle(serviceType),
       status: project.status || ProjectStatus.DRAFT,
       measurements: project.measurements,
+      serviceTypeCustom: project.serviceTypeCustom,
+      measurementUnit: project.measurementUnit,
+      lineItems: project.lineItems,
+      specifications: project.specifications,
+      preferredDesign: project.preferredDesign,
+      customerRequirements: project.customerRequirements,
+      selectedDesignTemplateId: project.selectedDesignTemplateId,
+      selectedDesignTemplateName: project.selectedDesignTemplateName,
+      selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
       materials: project.materialType,
       finishes: project.finishColor,
       notes: project.notes,
@@ -388,38 +397,43 @@ async function attachProjectItems(project: any) {
   return projectObject;
 }
 
-// ── Create Project (from completed appointment) ──
+// ── Create Project (optionally linked to a completed appointment) ──
 
 export async function createProject(
   input: CreateProjectInput,
   actorId: string,
   ip?: string,
   ua?: string,
+  actorRoles: Role[] = [],
 ) {
-  const appointment = await Appointment.findById(input.appointmentId);
-  if (!appointment) throw AppError.notFound('Appointment not found');
-
-  if (appointment.status !== AppointmentStatus.COMPLETED) {
-    throw AppError.badRequest('Project can only be created from a completed appointment');
+  const appointment = input.appointmentId ? await Appointment.findById(input.appointmentId) : null;
+  if (input.appointmentId && !appointment) throw AppError.notFound('Appointment not found');
+  if (appointment) {
+    if (!actorRoles.includes(Role.ADMIN) && appointment.salesStaffId?.toString() !== actorId) {
+      throw AppError.forbidden('Only the assigned sales staff can link this appointment');
+    }
+    if (appointment.status !== AppointmentStatus.COMPLETED) {
+      throw AppError.badRequest('Only completed appointments can be linked to a project');
+    }
+    if (input.customerId && appointment.customerId.toString() !== input.customerId) {
+      throw AppError.badRequest('The appointment must belong to the selected customer');
+    }
+    const existing = await Project.findOne({ appointmentId: input.appointmentId });
+    if (existing) throw AppError.conflict('A project already exists for this appointment', ErrorCode.DUPLICATE_ENTRY);
   }
 
-  // Check 1:1 relationship
-  const existing = await Project.findOne({ appointmentId: input.appointmentId });
-  if (existing) throw AppError.conflict('A project already exists for this appointment', ErrorCode.DUPLICATE_ENTRY);
-
-  // Link the latest submitted visit report from this appointment
-  const latestReport = await VisitReport.findOne({
-    appointmentId: input.appointmentId,
-    status: { $in: [VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED] },
-  }).sort({ createdAt: -1 }).select('_id');
+  const customerId = input.customerId || appointment?.customerId.toString();
+  if (!customerId) throw AppError.badRequest('Select a customer for the project');
+  const customer = await User.findOne({ _id: customerId, roles: Role.CUSTOMER, isActive: true });
+  if (!customer) throw AppError.badRequest('Select an active customer for the project');
 
   const projectNumber = await generateProjectNumber();
 
   const project = await Project.create({
     appointmentId: input.appointmentId,
     projectNumber,
-    customerId: appointment.customerId,
-    salesStaffId: appointment.salesStaffId || actorId,
+    customerId,
+    salesStaffId: appointment?.salesStaffId || actorId,
     title: input.title,
     serviceType: input.serviceType,
     description: input.description,
@@ -429,10 +443,25 @@ export async function createProject(
     finishColor: input.finishColor,
     quantity: input.quantity,
     notes: input.notes,
-    designReviewStatus: 'not_required',
+    serviceTypeCustom: input.serviceTypeCustom,
+    measurementUnit: input.measurementUnit,
+    lineItems: input.lineItems,
+    specifications: input.specifications,
+    preferredDesign: input.preferredDesign,
+    customerRequirements: input.customerRequirements,
+    selectedDesignTemplateId: input.selectedDesignTemplateId,
+    selectedDesignTemplateName: input.selectedDesignTemplateName,
+    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl,
+    initialDesignKeys: input.initialDesignKeys,
+    initialDesignNotes: input.initialDesignNotes,
+    photoKeys: input.photoKeys,
+    videoKeys: input.videoKeys,
+    sketchKeys: input.sketchKeys,
+    referenceImageKeys: input.referenceImageKeys,
+    mediaKeys: [...new Set([...(input.photoKeys || []), ...(input.videoKeys || []), ...(input.sketchKeys || []), ...(input.referenceImageKeys || [])])],
+    designReviewStatus: input.initialDesignKeys?.length || input.initialDesignNotes?.trim() ? 'pending' : 'not_required',
     status: ProjectStatus.DRAFT,
     contractStatus: ContractStatus.MISSING,
-    ...(latestReport && { visitReportId: latestReport._id }),
   });
 
   await AuditLog.create({
@@ -440,7 +469,7 @@ export async function createProject(
     actorId,
     targetType: 'project',
     targetId: project._id,
-    details: { appointmentId: input.appointmentId, title: input.title },
+    details: { customerId, appointmentId: input.appointmentId, title: input.title },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -601,7 +630,7 @@ export async function reassignProjectSalesStaff(
   project.salesStaffId = input.salesStaffId as unknown as Types.ObjectId;
   await project.save();
 
-  const [appointmentUpdate, visitReportUpdate] = await Promise.all([
+  const [appointmentUpdate, visitReportUpdate] = project.appointmentId ? await Promise.all([
     Appointment.updateOne(
       { _id: project.appointmentId, status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] } },
       { $set: { salesStaffId: nextSalesStaff._id } },
@@ -610,7 +639,7 @@ export async function reassignProjectSalesStaff(
       { appointmentId: project.appointmentId, status: VisitReportStatus.DRAFT },
       { $set: { salesStaffId: nextSalesStaff._id } },
     ),
-  ]);
+  ]) : [{ modifiedCount: 0 }, { modifiedCount: 0 }];
 
   await AuditLog.create({
     action: AuditAction.PROJECT_REASSIGNED,
@@ -1445,10 +1474,10 @@ export async function getProjectById(
 
   if (!project) throw AppError.notFound('Project not found');
 
-  // Fallback: if visitReportId was never linked, find the latest submitted report for the appointment
-  if (!project.visitReportId && project.appointmentId) {
+  // Recover only an explicit report link; an appointment reference does not copy project details.
+  if (!project.visitReportId) {
     const fallbackReport = await VisitReport.findOne({
-      appointmentId: project.appointmentId,
+      linkedProjectId: project._id,
       status: { $in: [VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED] },
     }).sort({ createdAt: -1 });
 
@@ -1655,6 +1684,15 @@ async function enrichProjectsForList(projects: any[]) {
               title: readableServiceTitle(serviceType),
               status: project.status || ProjectStatus.DRAFT,
               measurements: project.measurements,
+              serviceTypeCustom: project.serviceTypeCustom,
+              measurementUnit: project.measurementUnit,
+              lineItems: project.lineItems,
+              specifications: project.specifications,
+              preferredDesign: project.preferredDesign,
+              customerRequirements: project.customerRequirements,
+              selectedDesignTemplateId: project.selectedDesignTemplateId,
+              selectedDesignTemplateName: project.selectedDesignTemplateName,
+              selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
               materials: project.materialType,
               finishes: project.finishColor,
               notes: project.notes,

@@ -28,7 +28,7 @@ function serializeProjectMutationResult(result: any, req: Request) {
 }
 
 export const createProject = asyncHandler(async (req: Request, res: Response) => {
-  const project = await projectsService.createProject(req.body, req.userId!, req.ip, req.get('user-agent'));
+  const project = await projectsService.createProject(req.body, req.userId!, req.ip, req.get('user-agent'), req.userRoles || []);
   res.status(201).json({ success: true, data: serializeProjectForActor(project, req) });
 });
 

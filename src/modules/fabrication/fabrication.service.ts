@@ -492,15 +492,19 @@ export async function seedFabricationItems(projectId: string) {
     return;
   }
 
-  // Find the latest submitted/completed visit report for the appointment
+  // Use only reports explicitly linked to this project.
   const latestReport = await VisitReport.findOne({
-    appointmentId: project.appointmentId,
+    $or: [
+      { linkedProjectId: project._id },
+      ...(project.visitReportId ? [{ _id: project.visitReportId }] : []),
+    ],
     status: { $in: [VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED] },
   }).sort({ createdAt: -1 });
 
-  if (latestReport && latestReport.lineItems && latestReport.lineItems.length > 0) {
+  const lineItems = project.lineItems?.length ? project.lineItems : latestReport?.lineItems;
+  if (lineItems?.length) {
     // Generate items from line items
-    const items = latestReport.lineItems.map(li => ({
+    const items = lineItems.map(li => ({
       projectId: project._id,
       title: li.label,
       description: li.notes || '',
@@ -509,7 +513,7 @@ export async function seedFabricationItems(projectId: string) {
     }));
 
     await FabricationItem.insertMany(items);
-    logger.info(`Seeded ${items.length} fabrication items for project ${projectId} from VisitReport ${latestReport._id}`);
+    logger.info(`Seeded ${items.length} fabrication items for project ${projectId} from its component measurements`);
   } else {
     // Fallback: create generic item
     await FabricationItem.create({
