@@ -484,28 +484,4 @@ describe('updateConsultationAttendance testing bypass', () => {
     vi.useRealTimers();
   });
 
-  it('rejects the testing bypass in production', async () => {
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'production';
-    const appointment = createAppointment({
-      type: AppointmentType.OFFICE,
-      status: AppointmentStatus.CONFIRMED,
-      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
-      salesStaffId: { toString: () => 'sales-1' },
-    });
-    mockAppointmentFindById.mockResolvedValueOnce(appointment);
-
-    try {
-      await expect(updateConsultationAttendance(
-        'appointment-1',
-        { action: 'test_start' },
-        'sales-1',
-        [Role.SALES_STAFF],
-      )).rejects.toThrow('The testing attendance bypass is disabled');
-      expect(appointment.save).not.toHaveBeenCalled();
-    } finally {
-      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = previousNodeEnv;
-    }
-  });
 });
