@@ -35,6 +35,7 @@ vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.ge
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 
 import { createProject } from './projects.service.js';
+import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -51,6 +52,7 @@ const input = {
   materialType: 'Stainless steel 304',
   finishColor: 'Brushed',
   notes: 'Use project measurements',
+  contractFileKey: 'contracts/signed-contract.pdf',
 };
 
 function appointment(overrides: Record<string, unknown> = {}) {
@@ -75,6 +77,7 @@ describe('createProject', () => {
     mocks.generateProjectNumber.mockResolvedValue('RMV-2026-0001');
     mocks.projectCreate.mockImplementation(async (payload) => ({ _id: 'project-1', ...payload }));
     mocks.auditCreate.mockResolvedValue({});
+    vi.mocked(verifyFileExists).mockResolvedValue(true);
   });
 
   it('creates a standalone draft using the project form and the acting sales staff', async () => {
@@ -84,8 +87,9 @@ describe('createProject', () => {
       ...input,
       projectNumber: 'RMV-2026-0001',
       salesStaffId: actorId,
-      status: ProjectStatus.DRAFT,
-      contractStatus: ContractStatus.MISSING,
+      status: ProjectStatus.SUBMITTED,
+      contractStatus: ContractStatus.UPLOADED,
+      contractFileKey: input.contractFileKey,
     });
     expect(project.appointmentId).toBeUndefined();
     expect(mocks.appointmentFindById).not.toHaveBeenCalled();
@@ -186,6 +190,12 @@ describe('createProject', () => {
   it('rejects an input without either a customer or an appointment', async () => {
     const { customerId: _customerId, ...missingCustomerInput } = input;
     await expect(createProject(missingCustomerInput, actorId)).rejects.toThrow('Select a customer');
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects creation when the uploaded contract cannot be verified', async () => {
+    vi.mocked(verifyFileExists).mockResolvedValue(false);
+    await expect(createProject(input, actorId)).rejects.toThrow('Uploaded contract file could not be verified');
     expect(mocks.projectCreate).not.toHaveBeenCalled();
   });
 });
