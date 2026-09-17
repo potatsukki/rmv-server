@@ -427,7 +427,14 @@ export async function createProject(
   const customer = await User.findOne({ _id: customerId, roles: Role.CUSTOMER, isActive: true });
   if (!customer) throw AppError.badRequest('Select an active customer for the project');
 
+  assertSignedContractKey(input.contractFileKey);
+  const contractExists = await verifyFileExists(input.contractFileKey);
+  if (!contractExists) {
+    throw AppError.badRequest('Uploaded contract file could not be verified. Please upload the file again.');
+  }
+
   const projectNumber = await generateProjectNumber();
+  const contractUploadedAt = new Date();
 
   const project = await Project.create({
     appointmentId: input.appointmentId,
@@ -460,8 +467,14 @@ export async function createProject(
     referenceImageKeys: input.referenceImageKeys,
     mediaKeys: [...new Set([...(input.photoKeys || []), ...(input.videoKeys || []), ...(input.sketchKeys || []), ...(input.referenceImageKeys || [])])],
     designReviewStatus: input.initialDesignKeys?.length || input.initialDesignNotes?.trim() ? 'pending' : 'not_required',
-    status: ProjectStatus.DRAFT,
-    contractStatus: ContractStatus.MISSING,
+    status: ProjectStatus.SUBMITTED,
+    contractStatus: ContractStatus.UPLOADED,
+    contractFileKey: input.contractFileKey,
+    contractFileName: input.contractFileName || getObjectFileName(input.contractFileKey),
+    contractContentType: input.contractContentType || inferContractContentType(input.contractFileKey),
+    contractFileSize: input.contractFileSize,
+    contractUploadedAt,
+    contractUploadedBy: actorId,
   });
 
   await AuditLog.create({
@@ -469,10 +482,18 @@ export async function createProject(
     actorId,
     targetType: 'project',
     targetId: project._id,
-    details: { customerId, appointmentId: input.appointmentId, title: input.title },
+    details: {
+      customerId,
+      appointmentId: input.appointmentId,
+      title: input.title,
+      contractFileKey: input.contractFileKey,
+      contractStatus: ContractStatus.UPLOADED,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
+
+  await notifyProjectSubmittedAfterContract(project);
 
   return project;
 }

@@ -20,6 +20,14 @@ const projectDetailsSchema = updateVisitReportSchema.pick({
   referenceImageKeys: true,
 });
 
+const signedContractFileKeySchema = z.string()
+  .min(1, 'Contract file is required')
+  .refine((key) => key.startsWith('contracts/'), 'Contract file must be uploaded to the contracts folder')
+  .refine(
+    (key) => /\.(pdf|jpe?g|png)$/i.test(key),
+    'Signed contract must be a PDF, JPG, JPEG, or PNG file',
+  );
+
 export const createProjectSchema = z.object({
   ...projectDetailsSchema.shape,
   customerId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid customer ID').optional(),
@@ -40,6 +48,10 @@ export const createProjectSchema = z.object({
   finishColor: z.string().max(500).optional(),
   quantity: z.number().int().min(1).default(1),
   notes: z.string().max(2000).trim().optional(),
+  contractFileKey: signedContractFileKeySchema,
+  contractFileName: z.string().max(255).trim().optional(),
+  contractContentType: z.string().max(100).trim().optional(),
+  contractFileSize: z.number().int().positive().optional(),
 }).refine((input) => Boolean(input.customerId || input.appointmentId), {
   message: 'Select a customer for the project',
   path: ['customerId'],
@@ -91,14 +103,6 @@ export const signContractSchema = z.object({
 export const signEngineerContractSchema = z.object({
   signatureKey: z.string().min(1, 'Engineer signature is required'),
 });
-
-const signedContractFileKeySchema = z.string()
-  .min(1, 'Contract file is required')
-  .refine((key) => key.startsWith('contracts/'), 'Contract file must be uploaded to the contracts folder')
-  .refine(
-    (key) => /\.(pdf|jpe?g|png)$/i.test(key),
-    'Signed contract must be a PDF, JPG, JPEG, or PNG file',
-  );
 
 export const uploadSignedContractSchema = z.object({
   contractFileKey: signedContractFileKeySchema,

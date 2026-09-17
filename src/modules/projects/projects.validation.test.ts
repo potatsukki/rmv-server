@@ -10,6 +10,7 @@ const details = {
   serviceType: 'countertops',
   description: 'Counter with two shelves',
   siteAddress: '123 Project Street',
+  contractFileKey: 'contracts/signed-contract.pdf',
 };
 
 describe('createProjectSchema', () => {
@@ -48,6 +49,12 @@ describe('createProjectSchema', () => {
     const result = createProjectSchema.safeParse(details);
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.path).toEqual(['customerId']);
+  });
+
+  it('requires a signed contract uploaded to the contracts folder', () => {
+    const { contractFileKey: _contractFileKey, ...withoutContract } = details;
+    expect(createProjectSchema.safeParse({ ...withoutContract, customerId }).success).toBe(false);
+    expect(createProjectSchema.safeParse({ ...details, customerId, contractFileKey: 'projects/contract.pdf' }).success).toBe(false);
   });
 
   it.each(['customerId', 'appointmentId'])('rejects a malformed %s', (field) => {
