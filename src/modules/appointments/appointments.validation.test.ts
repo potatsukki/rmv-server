@@ -83,6 +83,7 @@ describe('appointmentQueueQuerySchema', () => {
 describe('consultationAttendanceSchema automation contract', () => {
   it('keeps arrival and exception actions available', () => {
     expect(consultationAttendanceSchema.parse({ action: 'check_in' })).toEqual({ action: 'check_in' });
+    expect(consultationAttendanceSchema.parse({ action: 'test_start' })).toEqual({ action: 'test_start' });
     expect(consultationAttendanceSchema.parse({ action: 'customer_declined' })).toEqual({
       action: 'customer_declined',
     });
