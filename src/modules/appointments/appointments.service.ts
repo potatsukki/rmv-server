@@ -47,6 +47,12 @@ import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
 
+function isTestingAttendanceBypassEnabled() {
+  const configured = process.env.TESTING_ATTENDANCE_BYPASS_ENABLED?.trim().toLowerCase();
+  const explicitlyDisabled = ['false', '0', 'no', 'off'].includes(configured || '');
+  return process.env.NODE_ENV !== 'production' && !explicitlyDisabled;
+}
+
 const APPOINTMENT_QUEUE_RECENT_DAYS = 14;
 const APPOINTMENT_QUEUE_ACTIONABLE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
@@ -1903,6 +1909,50 @@ export async function updateConsultationAttendance(
 
   if (!isAdmin && !isAssignedSales) {
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
+  }
+
+  if (input.action === 'test_start') {
+    if (!isTestingAttendanceBypassEnabled()) {
+      throw AppError.forbidden('The testing attendance bypass is disabled');
+    }
+    if (appointment.status !== AppointmentStatus.CONFIRMED) {
+      throw AppError.badRequest('Only a confirmed consultation can be started for testing');
+    }
+
+    const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
+    if (![AppointmentAttendanceStatus.SCHEDULED, AppointmentAttendanceStatus.ON_TIME, AppointmentAttendanceStatus.LATE_ARRIVAL]
+      .includes(currentStatus)) {
+      throw AppError.badRequest(
+        `Testing bypass cannot start attendance from ${currentStatus}`,
+        ErrorCode.INVALID_TRANSITION,
+      );
+    }
+
+    const now = new Date();
+    appointment.attendanceStatus = AppointmentAttendanceStatus.IN_PROGRESS;
+    appointment.actualArrivalAt ||= now;
+    appointment.consultationStartedAt = now;
+    appointment.attendanceUpdatedBy = actorId as unknown as Types.ObjectId;
+    appointment.attendanceUpdatedAt = now;
+    appointment.attendanceOverrideReason = 'Temporary testing bypass';
+    await appointment.save();
+
+    await AuditLog.create({
+      action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+      actorId,
+      targetType: 'appointment',
+      targetId: appointment._id,
+      details: {
+        action: input.action,
+        previousAttendanceStatus: currentStatus,
+        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+        overrideReason: 'Temporary testing bypass',
+      },
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    return appointment;
   }
 
   await synchronizeConsultationAttendanceByTime(appointment);

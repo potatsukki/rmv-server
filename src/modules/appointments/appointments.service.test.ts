@@ -103,6 +103,7 @@ import {
   requestAppointment,
   requestReschedule,
   submitSiteDetails,
+  updateConsultationAttendance,
 } from './appointments.service.js';
 import {
   AppointmentAttendanceStatus,
@@ -438,5 +439,73 @@ describe('submitSiteDetails', () => {
 
     expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateConsultationAttendance testing bypass', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('starts a confirmed consultation early for its assigned sales staff', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T02:00:00.000Z'));
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    await updateConsultationAttendance(
+      'appointment-1',
+      { action: 'test_start' },
+      'sales-1',
+      [Role.SALES_STAFF],
+      '127.0.0.1',
+      'vitest-agent',
+    );
+
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.IN_PROGRESS);
+    expect(appointment.actualArrivalAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
+    expect(appointment.consultationStartedAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
+    expect(appointment.attendanceOverrideReason).toBe('Temporary testing bypass');
+    expect(appointment.save).toHaveBeenCalledTimes(1);
+    expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+      actorId: 'sales-1',
+      details: expect.objectContaining({
+        action: 'test_start',
+        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      }),
+    }));
+
+    vi.useRealTimers();
+  });
+
+  it('rejects the testing bypass in production', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    try {
+      await expect(updateConsultationAttendance(
+        'appointment-1',
+        { action: 'test_start' },
+        'sales-1',
+        [Role.SALES_STAFF],
+      )).rejects.toThrow('The testing attendance bypass is disabled');
+      expect(appointment.save).not.toHaveBeenCalled();
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+    }
   });
 });
