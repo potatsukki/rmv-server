@@ -13,6 +13,7 @@ const {
   mockPaymentPlanFindOne,
   mockAuditLogCreate,
   mockUserFindById,
+  mockItemCount, mockItemInsert, mockReportFindOne,
 } = vi.hoisted(() => ({
   mockProjectFindById: vi.fn(),
   mockFabricationUpdateFindOne: vi.fn(),
@@ -20,9 +21,12 @@ const {
   mockPaymentPlanFindOne: vi.fn(),
   mockAuditLogCreate: vi.fn(),
   mockUserFindById: vi.fn(),
+  mockItemCount: vi.fn(), mockItemInsert: vi.fn(), mockReportFindOne: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
+  FabricationItem: { countDocuments: mockItemCount, insertMany: mockItemInsert },
+  VisitReport: { findOne: mockReportFindOne },
   Project: {
     findById: mockProjectFindById,
   },
@@ -74,7 +78,7 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { createFabricationUpdate } from './fabrication.service.js';
+import { createFabricationUpdate, seedFabricationItems } from './fabrication.service.js';
 
 describe('createFabricationUpdate', () => {
   beforeEach(() => {
@@ -125,5 +129,21 @@ describe('createFabricationUpdate', () => {
 
     expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
     expect(mockAuditLogCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('project component measurements', () => {
+  it('uses the components entered in Create Project without a visit report', async () => {
+    vi.clearAllMocks();
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-independent',
+      lineItems: [{ label: 'Left panel', quantity: 2, notes: 'Rounded edges' }],
+    });
+    mockItemCount.mockResolvedValue(0);
+    mockReportFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
+    await seedFabricationItems('project-independent');
+    expect(mockItemInsert).toHaveBeenCalledWith([{
+      projectId: 'project-independent', title: 'Left panel', description: 'Rounded edges', quantity: 2, isCompleted: false,
+    }]);
   });
 });

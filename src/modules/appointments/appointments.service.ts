@@ -3096,14 +3096,6 @@ export async function listAppointmentQueue(
     .limit(fetchLimit);
 
   const appointmentIds = appointments.map((appointment) => appointment._id);
-  const customerIds = Array.from(
-    new Set(
-      appointments
-        .map((appointment: any) => (appointment.customerId?._id ?? appointment.customerId)?.toString?.())
-        .filter((value): value is string => Boolean(value)),
-    ),
-  );
-
   const [linkedReports, customerProjects] = await Promise.all([
     appointmentIds.length
       ? VisitReport.find({
@@ -3114,9 +3106,9 @@ export async function listAppointmentQueue(
         .sort({ createdAt: -1 })
         .lean()
       : Promise.resolve([]),
-    customerIds.length
+    appointmentIds.length
       ? Project.find({
-        customerId: { $in: customerIds },
+        appointmentId: { $in: appointmentIds },
         status: { $ne: ProjectStatus.CANCELLED },
       })
         .select('_id appointmentId customerId projectNumber title serviceType status createdAt')
@@ -3133,15 +3125,9 @@ export async function listAppointmentQueue(
     }
   }
 
-  const projectsByCustomer = new Map<string, any[]>();
   const projectByAppointmentId = new Map<string, any>();
   for (const project of customerProjects as any[]) {
-    const customerId = String(project.customerId);
     const appointmentId = project.appointmentId ? String(project.appointmentId) : undefined;
-
-    const projectList = projectsByCustomer.get(customerId) || [];
-    projectList.push(project);
-    projectsByCustomer.set(customerId, projectList);
 
     if (appointmentId && !projectByAppointmentId.has(appointmentId)) {
       projectByAppointmentId.set(appointmentId, project);
@@ -3151,9 +3137,8 @@ export async function listAppointmentQueue(
   let queueItems: AppointmentQueueItem[] = appointments.map((appointment: any) => {
     const appointmentId = String(appointment._id);
     const customerId = String(appointment.customerId?._id ?? appointment.customerId ?? '');
-    const linkedProject = projectByAppointmentId.get(appointmentId)
-      || projectsByCustomer.get(customerId)?.[0];
-    const customerSampleProjects = (projectsByCustomer.get(customerId) || []).slice(0, 2);
+    const linkedProject = projectByAppointmentId.get(appointmentId);
+    const customerSampleProjects = linkedProject ? [linkedProject] : [];
 
     const reportId = reportByAppointmentId.get(appointmentId);
     const hasPendingReport = linkedReports.some((r: any) => 
@@ -3177,10 +3162,11 @@ export async function listAppointmentQueue(
       reviewReportPath: reportId ? `/visit-reports/${reportId}` : undefined,
       projectPath: linkedProject ? `/projects/${linkedProject._id}` : undefined,
       createProjectPath:
-        appointment.type === AppointmentType.OFFICE
-        && isReadyForOcular
+        appointment.status === AppointmentStatus.COMPLETED
+        && !linkedProject
         && customerId
-          ? `/appointments/book?customerId=${customerId}&mode=ocular-followup&consultationId=${appointmentId}`
+        && actorRoles.some((role) => [Role.SALES_STAFF, Role.ADMIN].includes(role))
+          ? `/projects/create?customerId=${customerId}&appointmentId=${appointmentId}`
           : undefined,
       reassignPath: APPOINTMENT_REASSIGNABLE_STATUSES.includes(appointment.status)
         ? `/appointments/${appointmentId}/reassign`
@@ -3205,10 +3191,8 @@ export async function listAppointmentQueue(
   if (normalizedSearch) {
     queueItems = queueItems.filter((item) => {
       const appointment = item.appointment as any;
-      const customerId = String(appointment.customerId?._id ?? appointment.customerId ?? '');
       const linkedProjects = [
         ...(projectByAppointmentId.get(String(appointment._id)) ? [projectByAppointmentId.get(String(appointment._id))] : []),
-        ...(projectsByCustomer.get(customerId) || []).slice(0, 3),
       ];
 
       return matchesAppointmentSearch(
@@ -3431,25 +3415,10 @@ export async function listAppointments(query: {
     .sort(sortSpec);
 
   const appointmentIds = appointments.map((appointment) => appointment._id);
-  const customerIds = Array.from(
-    new Set(
-      appointments
-        .map((appointment: any) => (appointment.customerId?._id ?? appointment.customerId)?.toString?.())
-        .filter((value): value is string => Boolean(value)),
-    ),
-  );
-
-  const relatedProjects = appointmentIds.length || customerIds.length
+  const relatedProjects = appointmentIds.length
     ? await Project.find({
-      $and: [
-        { status: { $ne: ProjectStatus.CANCELLED } },
-        {
-          $or: [
-            ...(appointmentIds.length ? [{ appointmentId: { $in: appointmentIds } }] : []),
-            ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
-          ],
-        },
-      ],
+      status: { $ne: ProjectStatus.CANCELLED },
+      appointmentId: { $in: appointmentIds },
     })
       .select('_id appointmentId customerId projectNumber title serviceType createdAt')
       .sort({ createdAt: -1 })
@@ -3457,10 +3426,8 @@ export async function listAppointments(query: {
     : [];
 
   const projectsByAppointmentId = new Map<string, any[]>();
-  const projectsByCustomerId = new Map<string, any[]>();
   for (const project of relatedProjects as any[]) {
     const appointmentId = project.appointmentId ? String(project.appointmentId) : undefined;
-    const customerId = String(project.customerId);
 
     if (appointmentId) {
       const appointmentProjects = projectsByAppointmentId.get(appointmentId) || [];
@@ -3468,18 +3435,11 @@ export async function listAppointments(query: {
       projectsByAppointmentId.set(appointmentId, appointmentProjects);
     }
 
-    const customerProjects = projectsByCustomerId.get(customerId) || [];
-    customerProjects.push(project);
-    projectsByCustomerId.set(customerId, customerProjects);
   }
 
   const filteredAppointments = appointments.filter((appointment: any) => {
     const appointmentId = String(appointment._id);
-    const customerId = String(appointment.customerId?._id ?? appointment.customerId ?? '');
-    const linkedProjects = [
-      ...(projectsByAppointmentId.get(appointmentId) || []),
-      ...(projectsByCustomerId.get(customerId) || []).slice(0, 3),
-    ];
+    const linkedProjects = projectsByAppointmentId.get(appointmentId) || [];
 
     return matchesAppointmentSearch(
       {
