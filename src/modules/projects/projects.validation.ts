@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ProjectStatus } from '../../utils/constants.js';
+import { DeliveryType, ProjectStatus } from '../../utils/constants.js';
 import { updateVisitReportSchema } from '../visit-reports/visit-reports.validation.js';
 
 const projectDetailsSchema = updateVisitReportSchema.pick({
@@ -34,6 +34,7 @@ export const createProjectSchema = z.object({
   appointmentId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid appointment ID').optional(),
   title: z.string().trim().min(1).max(100),
   serviceType: z.string().trim().min(1).max(100),
+  deliveryType: z.nativeEnum(DeliveryType).optional(),
   description: z.string().trim().min(1).max(2000),
   siteAddress: z.string().trim().min(1).max(500),
   measurements: z.object({
@@ -60,6 +61,7 @@ export const createProjectSchema = z.object({
 export const updateProjectSchema = z.object({
   title: z.string().min(1).max(100).trim().optional(),
   serviceType: z.string().min(1).max(100).trim().optional(),
+  deliveryType: z.nativeEnum(DeliveryType).optional(),
   description: z.string().min(1).max(2000).trim().optional(),
   siteAddress: z.string().min(1).max(500).trim().optional(),
   measurements: z.object({

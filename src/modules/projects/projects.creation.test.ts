@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   appointmentFindById: vi.fn(),
   projectFindOne: vi.fn(),
+  projectFindById: vi.fn(),
   projectCreate: vi.fn(),
   userFindOne: vi.fn(),
   auditCreate: vi.fn(),
@@ -13,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: { findOne: mocks.projectFindOne, create: mocks.projectCreate },
+  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, create: mocks.projectCreate },
   ProjectItem: { create: mocks.projectItemCreate },
   Appointment: { findById: mocks.appointmentFindById },
   User: { findOne: mocks.userFindOne },
@@ -34,9 +35,9 @@ vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() })
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 
-import { createProject } from './projects.service.js';
+import { createProject, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
-import { AppointmentStatus, AuditAction, ContractStatus, ProjectStatus, Role } from '../../utils/constants.js';
+import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const appointmentId = 'bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -88,6 +89,7 @@ describe('createProject', () => {
       projectNumber: 'RMV-2026-0001',
       salesStaffId: actorId,
       status: ProjectStatus.SUBMITTED,
+      deliveryType: DeliveryType.SHOP_FABRICATED,
       contractStatus: ContractStatus.UPLOADED,
       contractFileKey: input.contractFileKey,
     });
@@ -197,5 +199,37 @@ describe('createProject', () => {
     vi.mocked(verifyFileExists).mockResolvedValue(false);
     await expect(createProject(input, actorId)).rejects.toThrow('Uploaded contract file could not be verified');
     expect(mocks.projectCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateProject delivery type authorization', () => {
+  it('allows only admins to change delivery type', async () => {
+    const project = {
+      _id: 'project-1',
+      status: ProjectStatus.SUBMITTED,
+      deliveryType: DeliveryType.SHOP_FABRICATED,
+      save: vi.fn(),
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+
+    await expect(updateProject(
+      'project-1',
+      { deliveryType: DeliveryType.ON_SITE_INSTALLATION },
+      actorId,
+      undefined,
+      undefined,
+      [Role.SALES_STAFF],
+    )).rejects.toThrow('Only an admin can change the delivery type');
+
+    await updateProject(
+      'project-1',
+      { deliveryType: DeliveryType.ON_SITE_INSTALLATION },
+      'admin-1',
+      undefined,
+      undefined,
+      [Role.ADMIN],
+    );
+    expect(project.deliveryType).toBe(DeliveryType.ON_SITE_INSTALLATION);
+    expect(project.save).toHaveBeenCalled();
   });
 });

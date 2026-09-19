@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Project } from '../../models/Project.js';
 import { ProjectItem } from '../../models/ProjectItem.js';
 import { createProjectSchema } from './projects.validation.js';
+import { DeliveryType } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const appointmentId = 'bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -19,6 +20,12 @@ describe('createProjectSchema', () => {
     expect(result.customerId).toBe(customerId);
     expect(result.appointmentId).toBeUndefined();
     expect(result.quantity).toBe(1);
+  });
+
+  it('accepts only supported delivery types', () => {
+    expect(createProjectSchema.safeParse({ ...details, customerId, deliveryType: DeliveryType.SHOP_FABRICATED }).success).toBe(true);
+    expect(createProjectSchema.safeParse({ ...details, customerId, deliveryType: DeliveryType.ON_SITE_INSTALLATION }).success).toBe(true);
+    expect(createProjectSchema.safeParse({ ...details, customerId, deliveryType: 'courier' }).success).toBe(false);
   });
 
   it('accepts an optional appointment link and the legacy appointment-only customer reference', () => {

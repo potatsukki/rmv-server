@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
-import { ContractStatus, ProjectStatus } from '../utils/constants.js';
+import { ContractStatus, DeliveryType, ProjectStatus } from '../utils/constants.js';
 import type { IProjectItem } from './ProjectItem.js';
 
 export interface IProject extends Document {
@@ -18,6 +18,7 @@ export interface IProject extends Document {
   serviceType: string; // e.g., gate, railing, kitchen
   serviceTypes?: string[];
   serviceTypeCustom?: string;
+  deliveryType?: DeliveryType;
   measurementUnit?: string;
   lineItems?: IProjectItem['lineItems'];
   specifications?: IProjectItem['specifications'];
@@ -117,6 +118,7 @@ const projectSchema = new Schema<IProject>(
     serviceType: { type: String, required: true, trim: true },
     serviceTypes: [{ type: String, trim: true }],
     serviceTypeCustom: String,
+    deliveryType: { type: String, enum: Object.values(DeliveryType) },
     measurementUnit: String,
     lineItems: { type: [Schema.Types.Mixed], default: [] },
     specifications: { type: Schema.Types.Mixed },
