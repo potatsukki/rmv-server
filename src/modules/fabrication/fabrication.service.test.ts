@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../../utils/appError.js';
 import {
+  DeliveryType,
   FabricationStatus,
   ProjectStatus,
   Role,
@@ -129,6 +130,54 @@ describe('createFabricationUpdate', () => {
 
     expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
     expect(mockAuditLogCreate).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicit shop-fabricated project to finish without installation confirmation', async () => {
+    const save = vi.fn();
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1',
+      customerId: 'customer-1',
+      title: 'Deliverable Project',
+      status: ProjectStatus.FABRICATION,
+      deliveryType: DeliveryType.SHOP_FABRICATED,
+      fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [],
+      engineerIds: [],
+      installationConfirmedAt: null,
+      save,
+    });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Delivered.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockFabricationUpdateCreate).toHaveBeenCalled();
+    expect(save).toHaveBeenCalled();
+  });
+
+  it('requires installation confirmation before an on-site project starts site preparation', async () => {
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1',
+      customerId: 'customer-1',
+      title: 'Installation Project',
+      status: ProjectStatus.FABRICATION,
+      deliveryType: DeliveryType.ON_SITE_INSTALLATION,
+      fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [],
+      engineerIds: [],
+      installationConfirmedAt: null,
+    });
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.SITE_PREPARATION, notes: 'Mobilizing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toThrow('Customer must confirm the installation schedule before starting site preparation');
+
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
   });
 });
 

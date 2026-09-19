@@ -4,9 +4,9 @@ import {
 import { PaymentPlan } from '../../models/Payment.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
-  FabricationStatus, PaymentStageStatus, ProjectStatus, AuditAction, NotificationCategory, Role,
+  DeliveryType, FabricationStatus, PaymentStageStatus, ProjectStatus, AuditAction, NotificationCategory, Role,
 } from '../../utils/constants.js';
-import { fabricationStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
+import { getFabricationStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { createAndSendNotification, getIO } from '../notifications/socket.service.js';
 import { sendFabricationUpdateEmail, sendPaymentHeadsUpEmail, sendPaymentDueEmail, sendReadyForDeliveryEmail, sendProjectCompletedEmail } from '../notifications/email.service.js';
@@ -17,7 +17,7 @@ import type { CreateFabricationUpdateInput, UpdateFabricationUpdateInput } from 
 
 // ── Per-stage payment gating helpers ──
 
-const FABRICATION_STAGE_ORDER = [
+const SHOP_FABRICATION_STAGE_ORDER = [
   FabricationStatus.MATERIAL_PREP,
   FabricationStatus.CUTTING,
   FabricationStatus.WELDING,
@@ -28,18 +28,36 @@ const FABRICATION_STAGE_ORDER = [
   FabricationStatus.DONE,
 ];
 
+const ON_SITE_INSTALLATION_STAGE_ORDER = [
+  FabricationStatus.SITE_PREPARATION,
+  FabricationStatus.MEASUREMENT_LAYOUT,
+  FabricationStatus.MATERIAL_PREP,
+  FabricationStatus.FABRICATION_INSTALLATION,
+  FabricationStatus.WELDING_ASSEMBLY,
+  FabricationStatus.FINISHING,
+  FabricationStatus.QUALITY_CHECK,
+  FabricationStatus.TURNOVER,
+];
+
+function getFabricationStageOrder(deliveryType?: string) {
+  return deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? ON_SITE_INSTALLATION_STAGE_ORDER
+    : SHOP_FABRICATION_STAGE_ORDER;
+}
+
 /**
  * For a given target fabrication status and total number of payment stages,
  * return the minimum number of payment stages that must be verified.
  * Uses proportional distribution across the fabrication pipeline.
  */
-function getRequiredPaidStages(targetStatus: FabricationStatus, totalPaymentStages: number): number {
+function getRequiredPaidStages(targetStatus: FabricationStatus, totalPaymentStages: number, deliveryType?: string): number {
   if (totalPaymentStages <= 0) return 0;
 
-  const targetIdx = FABRICATION_STAGE_ORDER.indexOf(targetStatus);
+  const stageOrder = getFabricationStageOrder(deliveryType);
+  const targetIdx = stageOrder.indexOf(targetStatus);
   if (targetIdx === -1) return 0;
 
-  const totalFabStages = FABRICATION_STAGE_ORDER.length; // 8
+  const totalFabStages = stageOrder.length;
   return Math.min(
     totalPaymentStages,
     Math.ceil(((targetIdx + 1) / totalFabStages) * totalPaymentStages),
@@ -98,14 +116,18 @@ export async function createFabricationUpdate(
   const currentStatus = latestUpdate
     ? latestUpdate.status
     : FabricationStatus.QUEUED;
+  const deliveryType = (project as any).deliveryType as DeliveryType | undefined;
+  const terminalStatus = deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? FabricationStatus.TURNOVER
+    : FabricationStatus.DONE;
 
   // Validate status transition (forward-only)
-  fabricationStateMachine.assertTransition(currentStatus, input.status);
+  getFabricationStateMachine(deliveryType).assertTransition(currentStatus, input.status);
 
   // Per-stage payment gate: require proportional payment stages to be verified
   const plan = await PaymentPlan.findOne(itemScopedQuery(input.projectId, input.projectItemId));
   if (plan && plan.stages.length > 0) {
-    const requiredPaid = getRequiredPaidStages(input.status, plan.stages.length);
+    const requiredPaid = getRequiredPaidStages(input.status, plan.stages.length, deliveryType);
     const actualPaid = plan.stages.filter(s => s.status === PaymentStageStatus.VERIFIED).length;
     if (actualPaid < requiredPaid) {
       const nextUnpaid = plan.stages.find(s => s.status !== PaymentStageStatus.VERIFIED);
@@ -117,9 +139,14 @@ export async function createFabricationUpdate(
     }
   }
 
-  // Prevent a terminal fabrication update from being recorded until the
-  // customer has confirmed the installation schedule for this item.
-  if (input.status === FabricationStatus.DONE) {
+  // On-site work needs the customer's schedule confirmation before the first site stage.
+  // Legacy projects without a delivery type retain the previous confirmation gate at Done.
+  const requiresInstallationConfirmation = (
+    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.SITE_PREPARATION
+  ) || (
+    !deliveryType && input.status === FabricationStatus.DONE
+  );
+  if (requiresInstallationConfirmation) {
     const projectItem = input.projectItemId
       ? await ProjectItem.findOne({ _id: input.projectItemId, projectId: input.projectId })
       : null;
@@ -129,7 +156,9 @@ export async function createFabricationUpdate(
 
     if (!installationConfirmed) {
       throw AppError.badRequest(
-        'Customer must confirm the installation schedule before marking the project as Done',
+        deliveryType === DeliveryType.ON_SITE_INSTALLATION
+          ? 'Customer must confirm the installation schedule before starting site preparation'
+          : 'Customer must confirm the installation schedule before marking the project as Done',
         ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED,
         { helpPath: '/help/projects-fabrication/fabrication-lifecycle#checklist' },
       );
@@ -154,16 +183,16 @@ export async function createFabricationUpdate(
     ipAddress: ip,
     userAgent: ua,
   });
-  let shouldCompleteParentProject = input.status === FabricationStatus.DONE && !input.projectItemId;
+  let shouldCompleteParentProject = input.status === terminalStatus && !input.projectItemId;
   if (input.projectItemId) {
     await ProjectItem.findByIdAndUpdate(input.projectItemId, {
       $set: {
-        status: input.status === FabricationStatus.DONE
+        status: input.status === terminalStatus
           ? ProjectStatus.COMPLETED
           : ProjectStatus.FABRICATION,
       },
     });
-    if (input.status === FabricationStatus.DONE) {
+    if (input.status === terminalStatus) {
       const remainingOpenItems = await ProjectItem.countDocuments({
         projectId: project._id,
         _id: { $ne: input.projectItemId },
@@ -178,15 +207,21 @@ export async function createFabricationUpdate(
   if (customer) {
     const statusLabels: Record<string, string> = {
       [FabricationStatus.MATERIAL_PREP]: 'Material Preparation',
+      [FabricationStatus.SITE_PREPARATION]: 'Site Preparation',
+      [FabricationStatus.MEASUREMENT_LAYOUT]: 'Measurement / Layout',
       [FabricationStatus.CUTTING]: 'Cutting',
       [FabricationStatus.WELDING]: 'Welding',
+      [FabricationStatus.ASSEMBLY]: 'Assembly',
+      [FabricationStatus.FABRICATION_INSTALLATION]: 'Fabrication / Installation',
+      [FabricationStatus.WELDING_ASSEMBLY]: 'Welding / Assembly',
       [FabricationStatus.FINISHING]: 'Finishing',
       [FabricationStatus.QUALITY_CHECK]: 'Quality Check',
       [FabricationStatus.READY_FOR_DELIVERY]: 'Ready for Delivery',
+      [FabricationStatus.TURNOVER]: 'Turnover',
       [FabricationStatus.DONE]: 'Done',
     };
 
-    if (input.status === FabricationStatus.READY_FOR_DELIVERY) {
+    if (input.status === FabricationStatus.READY_FOR_DELIVERY && !deliveryType) {
       // Dedicated high-priority notification + email with CTA
       await createAndSendNotification(
         project.customerId,
@@ -199,13 +234,15 @@ export async function createFabricationUpdate(
         projectTitle: project.title,
         projectId: project._id.toString(),
       });
-    } else if (input.status === FabricationStatus.DONE && shouldCompleteParentProject) {
+    } else if (input.status === terminalStatus && shouldCompleteParentProject) {
       // Completion notification + email
       await createAndSendNotification(
         project.customerId,
         NotificationCategory.PROJECT,
         'Project Complete!',
-        `Your project "${project.title}" has been successfully installed and is now complete.`,
+        deliveryType === DeliveryType.SHOP_FABRICATED
+          ? `Your project "${project.title}" has been successfully delivered and is now complete.`
+          : `Your project "${project.title}" has been successfully installed and turned over.`,
         `/projects/${project._id}`,
       );
       await sendProjectCompletedEmail(customer.email, {
@@ -269,7 +306,10 @@ export async function createFabricationUpdate(
 
         // ── Activation trigger: stage becomes due ──
         const activationTrigger = activationMap[i] ?? null;
-        if (activationTrigger && activationTrigger === input.status) {
+        const normalizedActivationTrigger = deliveryType === DeliveryType.ON_SITE_INSTALLATION && activationTrigger === FabricationStatus.DONE
+          ? FabricationStatus.TURNOVER
+          : activationTrigger;
+        if (normalizedActivationTrigger && normalizedActivationTrigger === input.status) {
           stage.activatedAt = new Date();
           planDirty = true;
 
@@ -296,7 +336,10 @@ export async function createFabricationUpdate(
 
         // ── Heads-up trigger: advance notice (stage stays locked) ──
         const headsUpTrigger = headsUpMap[i] ?? null;
-        if (headsUpTrigger && headsUpTrigger === input.status && !stage.headsUpSentAt) {
+        const normalizedHeadsUpTrigger = deliveryType === DeliveryType.ON_SITE_INSTALLATION && headsUpTrigger === FabricationStatus.READY_FOR_DELIVERY
+          ? FabricationStatus.QUALITY_CHECK
+          : headsUpTrigger;
+        if (normalizedHeadsUpTrigger && normalizedHeadsUpTrigger === input.status && !stage.headsUpSentAt) {
           stage.headsUpSentAt = new Date();
           planDirty = true;
 
@@ -332,8 +375,8 @@ export async function createFabricationUpdate(
     }
   }
 
-  // If fabrication is done, transition project to completed
-  if (input.status === FabricationStatus.DONE && shouldCompleteParentProject) {
+  // The final lifecycle marker transitions the parent project to completed.
+  if (input.status === terminalStatus && shouldCompleteParentProject) {
     projectStateMachine.assertTransition(project.status, ProjectStatus.COMPLETED);
     project.status = ProjectStatus.COMPLETED;
     await project.save();
@@ -549,6 +592,9 @@ export async function getLatestFabricationStatus(
   projectItemId?: string,
 ) {
   await assertFabricationProjectAccess(projectId, actorId, actorRoles);
+  const project = await Project.findById(projectId).select('deliveryType');
+  if (!project) throw AppError.notFound('Project not found');
+  const deliveryType = (project as any).deliveryType as DeliveryType | undefined;
   const latest = await FabricationUpdate.findOne(itemScopedQuery(projectId, projectItemId))
     .sort({ createdAt: -1 })
     .populate('updatedBy', 'firstName lastName');
@@ -561,14 +607,14 @@ export async function getLatestFabricationStatus(
   const unpaidCount = totalStages - paidCount;
 
   // Build per-transition gate requirements
-  const allowedTransitions = fabricationStateMachine.getAllowed(
+  const allowedTransitions = getFabricationStateMachine(deliveryType).getAllowed(
     latest?.status || FabricationStatus.QUEUED,
   );
 
   const stageGates: Record<string, { requiredPaid: number; currentPaid: number; blocked: boolean; nextUnpaidLabel?: string }> = {};
   if (totalStages > 0) {
     for (const transition of allowedTransitions) {
-      const requiredPaid = getRequiredPaidStages(transition as FabricationStatus, totalStages);
+      const requiredPaid = getRequiredPaidStages(transition as FabricationStatus, totalStages, deliveryType);
       const blocked = paidCount < requiredPaid;
       const nextUnpaid = blocked ? plan!.stages.find(s => s.status !== PaymentStageStatus.VERIFIED) : undefined;
       stageGates[transition] = {
@@ -581,6 +627,14 @@ export async function getLatestFabricationStatus(
   }
 
   return {
+    deliveryType: deliveryType || DeliveryType.SHOP_FABRICATED,
+    lifecycleStatuses: getFabricationStageOrder(deliveryType),
+    requiresInstallationConfirmation: deliveryType !== DeliveryType.SHOP_FABRICATED,
+    confirmationGateStatus: deliveryType === DeliveryType.ON_SITE_INSTALLATION
+      ? FabricationStatus.SITE_PREPARATION
+      : !deliveryType
+        ? FabricationStatus.DONE
+        : null,
     currentStatus: latest?.status || FabricationStatus.QUEUED,
     latestUpdate: latest,
     allowedTransitions,

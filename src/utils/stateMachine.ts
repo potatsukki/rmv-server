@@ -4,6 +4,7 @@ import {
   BlueprintStatus,
   PaymentStageStatus,
   FabricationStatus,
+  DeliveryType,
 } from './constants.js';
 import { VisitReportStatus } from '../models/VisitReport.js';
 import { AppError, ErrorCode } from './appError.js';
@@ -122,15 +123,43 @@ export const paymentStateMachine = createStateMachine<PaymentStageStatus>({
 // ── Fabrication State Machine ──
 export const fabricationStateMachine = createStateMachine<FabricationStatus>({
   [FabricationStatus.QUEUED]: [FabricationStatus.MATERIAL_PREP],
+  [FabricationStatus.SITE_PREPARATION]: [],
+  [FabricationStatus.MEASUREMENT_LAYOUT]: [],
   [FabricationStatus.MATERIAL_PREP]: [FabricationStatus.CUTTING],
   [FabricationStatus.CUTTING]: [FabricationStatus.WELDING],
   [FabricationStatus.WELDING]: [FabricationStatus.ASSEMBLY],
   [FabricationStatus.ASSEMBLY]: [FabricationStatus.FINISHING],
+  [FabricationStatus.FABRICATION_INSTALLATION]: [],
+  [FabricationStatus.WELDING_ASSEMBLY]: [],
   [FabricationStatus.FINISHING]: [FabricationStatus.QUALITY_CHECK],
   [FabricationStatus.QUALITY_CHECK]: [FabricationStatus.READY_FOR_DELIVERY],
   [FabricationStatus.READY_FOR_DELIVERY]: [FabricationStatus.DONE],
+  [FabricationStatus.TURNOVER]: [],
   [FabricationStatus.DONE]: [],
 });
+
+export const onSiteInstallationStateMachine = createStateMachine<FabricationStatus>({
+  [FabricationStatus.QUEUED]: [FabricationStatus.SITE_PREPARATION],
+  [FabricationStatus.SITE_PREPARATION]: [FabricationStatus.MEASUREMENT_LAYOUT],
+  [FabricationStatus.MEASUREMENT_LAYOUT]: [FabricationStatus.MATERIAL_PREP],
+  [FabricationStatus.MATERIAL_PREP]: [FabricationStatus.FABRICATION_INSTALLATION],
+  [FabricationStatus.CUTTING]: [],
+  [FabricationStatus.WELDING]: [],
+  [FabricationStatus.ASSEMBLY]: [],
+  [FabricationStatus.FABRICATION_INSTALLATION]: [FabricationStatus.WELDING_ASSEMBLY],
+  [FabricationStatus.WELDING_ASSEMBLY]: [FabricationStatus.FINISHING],
+  [FabricationStatus.FINISHING]: [FabricationStatus.QUALITY_CHECK],
+  [FabricationStatus.QUALITY_CHECK]: [FabricationStatus.TURNOVER],
+  [FabricationStatus.READY_FOR_DELIVERY]: [],
+  [FabricationStatus.TURNOVER]: [],
+  [FabricationStatus.DONE]: [],
+});
+
+export function getFabricationStateMachine(deliveryType?: string) {
+  return deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? onSiteInstallationStateMachine
+    : fabricationStateMachine;
+}
 
 // ── Visit Report State Machine ──
 export const visitReportStateMachine = createStateMachine<VisitReportStatus>({

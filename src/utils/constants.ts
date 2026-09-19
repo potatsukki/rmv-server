@@ -104,14 +104,24 @@ export enum PaymentMethod {
 // ── Fabrication Status ──
 export enum FabricationStatus {
   QUEUED = 'queued',
+  SITE_PREPARATION = 'site_preparation',
+  MEASUREMENT_LAYOUT = 'measurement_layout',
   MATERIAL_PREP = 'material_prep',
   CUTTING = 'cutting',
   WELDING = 'welding',
   ASSEMBLY = 'assembly',
+  FABRICATION_INSTALLATION = 'fabrication_installation',
+  WELDING_ASSEMBLY = 'welding_assembly',
   FINISHING = 'finishing',
   QUALITY_CHECK = 'quality_check',
   READY_FOR_DELIVERY = 'ready_for_delivery',
+  TURNOVER = 'turnover',
   DONE = 'done',
+}
+
+export enum DeliveryType {
+  SHOP_FABRICATED = 'shop_fabricated',
+  ON_SITE_INSTALLATION = 'on_site_installation',
 }
 
 // ── Cash Collection Status ──

@@ -5,7 +5,7 @@ import { PaymentPlan } from '../../models/Payment.js';
 import { Blueprint } from '../../models/Blueprint.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
-  ContractStatus, ProjectStatus, AppointmentStatus, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
+  ContractStatus, DeliveryType, ProjectStatus, AppointmentStatus, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
 } from '../../utils/constants.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
@@ -443,6 +443,7 @@ export async function createProject(
     salesStaffId: appointment?.salesStaffId || actorId,
     title: input.title,
     serviceType: input.serviceType,
+    deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
     description: input.description,
     siteAddress: input.siteAddress,
     measurements: input.measurements,
@@ -486,6 +487,7 @@ export async function createProject(
       customerId,
       appointmentId: input.appointmentId,
       title: input.title,
+      deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
       contractFileKey: input.contractFileKey,
       contractStatus: ContractStatus.UPLOADED,
     },
@@ -506,6 +508,7 @@ export async function updateProject(
   actorId: string,
   ip?: string,
   ua?: string,
+  actorRoles: Role[] = [],
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
@@ -513,6 +516,10 @@ export async function updateProject(
   // Only editable in draft/submitted status
   if (![ProjectStatus.DRAFT, ProjectStatus.SUBMITTED].includes(project.status)) {
     throw AppError.badRequest('Project can only be edited in draft or submitted status');
+  }
+
+  if (input.deliveryType !== undefined && !actorRoles.includes(Role.ADMIN)) {
+    throw AppError.forbidden('Only an admin can change the delivery type');
   }
 
   const changes: Record<string, unknown> = {};

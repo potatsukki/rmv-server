@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { appointmentStateMachine } from './stateMachine.js';
-import { AppointmentStatus } from './constants.js';
+import { appointmentStateMachine, getFabricationStateMachine } from './stateMachine.js';
+import { AppointmentStatus, DeliveryType, FabricationStatus } from './constants.js';
 import { AppError, ErrorCode } from './appError.js';
 
 describe('appointmentStateMachine', () => {
@@ -119,5 +119,23 @@ describe('appointmentStateMachine', () => {
       expect(Array.isArray(appError.details?.allowedNextStatuses)).toBe(true);
       expect(appError.details?.allowedNextStatuses).toContain(AppointmentStatus.CONFIRMED);
     }
+  });
+});
+
+describe('delivery-type fabrication lifecycles', () => {
+  it('uses the shop-fabricated sequence', () => {
+    const machine = getFabricationStateMachine(DeliveryType.SHOP_FABRICATED);
+    expect(machine.getAllowed(FabricationStatus.QUEUED)).toEqual([FabricationStatus.MATERIAL_PREP]);
+    expect(machine.getAllowed(FabricationStatus.QUALITY_CHECK)).toEqual([FabricationStatus.READY_FOR_DELIVERY]);
+    expect(machine.getAllowed(FabricationStatus.READY_FOR_DELIVERY)).toEqual([FabricationStatus.DONE]);
+  });
+
+  it('uses the on-site installation sequence', () => {
+    const machine = getFabricationStateMachine(DeliveryType.ON_SITE_INSTALLATION);
+    expect(machine.getAllowed(FabricationStatus.QUEUED)).toEqual([FabricationStatus.SITE_PREPARATION]);
+    expect(machine.getAllowed(FabricationStatus.MEASUREMENT_LAYOUT)).toEqual([FabricationStatus.MATERIAL_PREP]);
+    expect(machine.getAllowed(FabricationStatus.MATERIAL_PREP)).toEqual([FabricationStatus.FABRICATION_INSTALLATION]);
+    expect(machine.getAllowed(FabricationStatus.QUALITY_CHECK)).toEqual([FabricationStatus.TURNOVER]);
+    expect(machine.getAllowed(FabricationStatus.TURNOVER)).toEqual([]);
   });
 });

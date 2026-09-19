@@ -3,7 +3,7 @@ import {
   FabricationUpdate, User, CashCollection, AuditLog, Blueprint, Config,
 } from '../../models/index.js';
 import {
-  ProjectStatus, PaymentStageStatus, FabricationStatus,
+  DeliveryType, ProjectStatus, PaymentStageStatus, FabricationStatus,
   AppointmentStatus, AppointmentType, Role, AuditAction,
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
@@ -771,7 +771,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
     const conversionRate = totalProjects > 0 ? completedProjects / totalProjects : 0;
 
     // ── Pending installation confirmations (customer-facing) ──
-    // Find projects at ready_for_delivery that the customer hasn't confirmed yet
+    // Legacy projects confirm after fabrication; on-site projects confirm before site preparation.
     let pendingInstallationConfirmations: { _id: string; title: string }[] = [];
     if (isCustomerOnly && userId) {
       const readyProjects = await FabricationUpdate.aggregate([
@@ -780,14 +780,15 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
         { $match: { latestStatus: FabricationStatus.READY_FOR_DELIVERY } },
       ]).exec();
       const readyProjectIds = readyProjects.map(r => r._id);
-      if (readyProjectIds.length > 0) {
-        pendingInstallationConfirmations = await Project.find({
-          _id: { $in: readyProjectIds },
+      pendingInstallationConfirmations = await Project.find({
+          $or: [
+            { _id: { $in: readyProjectIds } },
+            { deliveryType: DeliveryType.ON_SITE_INSTALLATION, status: ProjectStatus.FABRICATION },
+          ],
           customerId: userId,
           installationConfirmedAt: null,
           deletedAt: null,
         }).select('_id title').lean().exec() as unknown as { _id: string; title: string }[];
-      }
     }
 
     return {
