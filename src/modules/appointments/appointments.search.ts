@@ -20,6 +20,7 @@ interface SearchProjectRef {
 }
 
 interface SearchAppointmentInput {
+  appointmentNumber?: string;
   type?: string;
   status?: string;
   consultationReportSubmitted?: boolean;
@@ -33,6 +34,7 @@ interface SearchAppointmentInput {
   serviceTypeCustom?: string;
   customerSiteDetails?: SearchSiteDetails;
   customerName?: string;
+  customerNumber?: string;
   salesStaffName?: string;
   linkedProjects?: SearchProjectRef[];
 }
@@ -118,6 +120,7 @@ export function matchesAppointmentSearch(
 
   const linkedProjects = appointment.linkedProjects || [];
   const searchableParts = [
+    appointment.appointmentNumber,
     ...collectStatusTerms(appointment),
     ...(APPOINTMENT_TYPE_ALIASES[appointment.type || ''] || [labelize(appointment.type)]),
     ...formatDateTokens(appointment.date),
@@ -143,6 +146,7 @@ export function matchesAppointmentSearch(
   if (scope === 'staff') {
     searchableParts.push(
       appointment.customerName,
+      appointment.customerNumber,
       appointment.salesStaffName,
       ...linkedProjects.flatMap((project) => [
         project.projectNumber,

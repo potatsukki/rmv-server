@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { Role, StaffAvailabilityStatus } from '../utils/constants.js';
+import { generateCustomerNumber } from '../utils/publicIdentifiers.js';
 
 export interface IUserAddress {
   id?: string;
@@ -20,6 +21,7 @@ export interface IUserAddress {
 export interface IUser extends Document {
   _id: Types.ObjectId;
   email: string;
+  customerNumber?: string;
   password: string;
   firstName: string;
   lastName: string;
@@ -66,6 +68,7 @@ const userSchema = new Schema<IUser>(
       lowercase: true,
       trim: true,
     },
+    customerNumber: { type: String, trim: true },
     password: { type: String, select: false },
     firstName: { type: String, required: true, trim: true },
     lastName: { type: String, required: true, trim: true },
@@ -159,6 +162,16 @@ const userSchema = new Schema<IUser>(
 userSchema.index({ roles: 1 });
 userSchema.index({ isActive: 1 });
 userSchema.index({ expiresAt: 1 }, { sparse: true });
+userSchema.index(
+  { customerNumber: 1 },
+  { unique: true, partialFilterExpression: { customerNumber: { $gt: '' } } },
+);
+
+userSchema.pre('validate', async function () {
+  if (!this.customerNumber && this.roles.includes(Role.CUSTOMER)) {
+    this.customerNumber = await generateCustomerNumber();
+  }
+});
 
 // Exclude soft-deleted by default
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
