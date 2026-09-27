@@ -5,6 +5,7 @@ const {
   mockAppointmentFindOne,
   mockAppointmentFind,
   mockAppointmentCreate,
+  mockAppointmentCountDocuments,
   mockAuditCreate,
   mockNotifyRole,
   mockAssertTransition,
@@ -14,11 +15,13 @@ const {
   mockAvailabilitySessionFind,
   mockSalesAvailabilityFind,
   mockAutoCreateDraft,
+  mockQueueCounterFindOneAndUpdate,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
   mockAppointmentFind: vi.fn(),
   mockAppointmentCreate: vi.fn(),
+  mockAppointmentCountDocuments: vi.fn(),
   mockAuditCreate: vi.fn(),
   mockNotifyRole: vi.fn(),
   mockAssertTransition: vi.fn(),
@@ -28,6 +31,7 @@ const {
   mockAvailabilitySessionFind: vi.fn(),
   mockSalesAvailabilityFind: vi.fn(),
   mockAutoCreateDraft: vi.fn(),
+  mockQueueCounterFindOneAndUpdate: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -36,6 +40,7 @@ vi.mock('../../models/index.js', () => ({
     findOne: mockAppointmentFindOne,
     find: mockAppointmentFind,
     create: mockAppointmentCreate,
+    countDocuments: mockAppointmentCountDocuments,
   },
   SlotLock: {},
   User: {
@@ -60,6 +65,9 @@ vi.mock('../../models/index.js', () => ({
   VisitReport: {},
   VisitReportStatus: {},
   Project: {},
+  AppointmentQueueCounter: {
+    findOneAndUpdate: mockQueueCounterFindOneAndUpdate,
+  },
 }));
 
 vi.mock('../../utils/stateMachine.js', () => ({
@@ -104,6 +112,7 @@ import {
   requestReschedule,
   submitSiteDetails,
   updateConsultationAttendance,
+  getCustomerQueueStatus,
 } from './appointments.service.js';
 import {
   AppointmentAttendanceStatus,
@@ -269,6 +278,46 @@ describe('getAvailableSlots', () => {
 
     expect(result.slots.every((slot) => slot.remaining === 1)).toBe(true);
     expect(result.slots.every((slot) => slot.available)).toBe(true);
+  });
+});
+
+describe('customer consultation queue', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('returns the customer position, active ticket, and estimated wait', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T03:00:00.000Z'));
+    const appointment = createAppointment({
+      attendanceStatus: AppointmentAttendanceStatus.ON_TIME,
+      queueDate: '2026-09-17',
+      queueSequence: 3,
+      queueNumber: 'Q-003',
+      queueIssuedAt: new Date('2026-09-17T02:50:00.000Z'),
+      attendanceUpdatedAt: new Date('2026-09-17T02:50:00.000Z'),
+    });
+    mockAppointmentFindOne
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue(appointment) })
+      .mockReturnValueOnce({
+        sort: vi.fn().mockReturnValue({
+          select: vi.fn().mockResolvedValue({ queueNumber: 'Q-001' }),
+        }),
+      });
+    mockAppointmentCountDocuments.mockResolvedValueOnce(2);
+
+    await expect(getCustomerQueueStatus('customer-1')).resolves.toEqual(
+      expect.objectContaining({
+        appointmentId: 'appointment-1',
+        queueNumber: 'Q-003',
+        status: 'waiting',
+        position: 3,
+        aheadCount: 2,
+        nowServing: 'Q-001',
+        estimatedWaitMinutes: 60,
+      }),
+    );
   });
 });
 
@@ -480,6 +529,41 @@ describe('updateConsultationAttendance testing bypass', () => {
         attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
       }),
     }));
+
+    vi.useRealTimers();
+  });
+
+  it('issues a daily queue number when an office customer checks in', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T01:50:00.000Z'));
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      date: '2026-09-17',
+      slotCode: '10:00',
+      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockQueueCounterFindOneAndUpdate.mockResolvedValueOnce({ lastSeq: 7 });
+
+    await updateConsultationAttendance(
+      'appointment-1',
+      { action: 'check_in' },
+      'sales-1',
+      [Role.SALES_STAFF],
+    );
+
+    expect(mockQueueCounterFindOneAndUpdate).toHaveBeenCalledWith(
+      { date: '2026-09-17' },
+      { $inc: { lastSeq: 1 } },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+    expect(appointment.queueNumber).toBe('Q-007');
+    expect(appointment.queueSequence).toBe(7);
+    expect(appointment.queueDate).toBe('2026-09-17');
+    expect(appointment.queueIssuedAt).toEqual(new Date('2026-09-17T01:50:00.000Z'));
+    expect(appointment.save).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
   });

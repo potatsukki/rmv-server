@@ -18,7 +18,7 @@ export { AuditLog, type IAuditLog } from './AuditLog.js';
 export { Notification, type INotification } from './Notification.js';
 export { EmailLog, type IEmailLog } from './EmailLog.js';
 export { IdempotencyKey, type IIdempotencyKey } from './IdempotencyKey.js';
-export { Config, type IConfig, Holiday, type IHoliday, SalesAvailability, type ISalesAvailability, ReceiptCounter, type IReceiptCounter, ProjectCounter, type IProjectCounter, BlockedSlot, type IBlockedSlot } from './Config.js';
+export { Config, type IConfig, Holiday, type IHoliday, SalesAvailability, type ISalesAvailability, ReceiptCounter, type IReceiptCounter, ProjectCounter, type IProjectCounter, AppointmentQueueCounter, type IAppointmentQueueCounter, BlockedSlot, type IBlockedSlot } from './Config.js';
 export { RouteCache, type IRouteCache } from './RouteCache.js';
 export { VisitReport, type IVisitReport, VisitReportStatus } from './VisitReport.js';
 export { LoginHistory, type ILoginHistory } from './LoginHistory.js';

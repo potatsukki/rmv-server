@@ -38,6 +38,10 @@ export interface IAppointment extends Document {
   attendanceUpdatedBy?: Types.ObjectId;
   attendanceUpdatedAt?: Date;
   attendanceOverrideReason?: string;
+  queueDate?: string;
+  queueSequence?: number;
+  queueNumber?: string;
+  queueIssuedAt?: Date;
 
   // Ocular-specific
   salesStaffId?: Types.ObjectId;
@@ -150,6 +154,10 @@ const appointmentSchema = new Schema<IAppointment>(
     attendanceUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     attendanceUpdatedAt: { type: Date },
     attendanceOverrideReason: { type: String },
+    queueDate: { type: String },
+    queueSequence: { type: Number },
+    queueNumber: { type: String },
+    queueIssuedAt: { type: Date },
 
     salesStaffId: { type: Schema.Types.ObjectId, ref: 'User' },
     latitude: { type: Number },
@@ -276,5 +284,9 @@ appointmentSchema.index({ salesStaffId: 1, date: 1 });
 appointmentSchema.index({ date: 1, slotCode: 1 });
 appointmentSchema.index({ status: 1 });
 appointmentSchema.index({ sourceConsultationAppointmentId: 1, type: 1 });
+appointmentSchema.index(
+  { queueDate: 1, queueSequence: 1 },
+  { unique: true, partialFilterExpression: { queueSequence: { $exists: true } } },
+);
 
 export const Appointment = mongoose.model<IAppointment>('Appointment', appointmentSchema);

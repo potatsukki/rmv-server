@@ -276,6 +276,13 @@ router.get(
 );
 
 router.get(
+  '/customer-queue',
+  authenticate,
+  authorize(Role.CUSTOMER),
+  ctrl.getCustomerQueueStatus,
+);
+
+router.get(
   '/queue',
   authenticate,
   authorize(Role.APPOINTMENT_AGENT, Role.SALES_STAFF, Role.ADMIN),

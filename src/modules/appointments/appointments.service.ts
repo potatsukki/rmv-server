@@ -2,7 +2,7 @@ import { format, parse, isAfter, isBefore, startOfDay, addMinutes, addDays } fro
 import { toZonedTime } from 'date-fns-tz';
 import {
   Appointment, SlotLock, User, AuditLog, Holiday, SalesAvailability, Config, BlockedSlot,
-  VisitReport, VisitReportStatus, Project,
+  VisitReport, VisitReportStatus, Project, AppointmentQueueCounter,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
@@ -46,6 +46,41 @@ import type {
 import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
+const ESTIMATED_CONSULTATION_MINUTES = 30;
+
+function formatQueueNumber(sequence: number) {
+  return `Q-${String(sequence).padStart(3, '0')}`;
+}
+
+async function nextDailyQueueSequence(date: string) {
+  try {
+    const counter = await AppointmentQueueCounter.findOneAndUpdate(
+      { date },
+      { $inc: { lastSeq: 1 } },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+    return counter.lastSeq;
+  } catch (error: any) {
+    if (error?.code !== 11000) throw error;
+    const counter = await AppointmentQueueCounter.findOneAndUpdate(
+      { date },
+      { $inc: { lastSeq: 1 } },
+      { new: true },
+    );
+    if (!counter) throw error;
+    return counter.lastSeq;
+  }
+}
+
+async function issueQueueNumber(appointment: any, issuedAt: Date) {
+  if (appointment.queueNumber) return;
+  const queueDate = format(toZonedTime(issuedAt, TZ), 'yyyy-MM-dd');
+  const sequence = await nextDailyQueueSequence(queueDate);
+  appointment.queueDate = queueDate;
+  appointment.queueSequence = sequence;
+  appointment.queueNumber = formatQueueNumber(sequence);
+  appointment.queueIssuedAt = issuedAt;
+}
 
 const APPOINTMENT_QUEUE_RECENT_DAYS = 14;
 const APPOINTMENT_QUEUE_ACTIONABLE_STATUSES: AppointmentStatus[] = [
@@ -2019,6 +2054,11 @@ export async function updateConsultationAttendance(
 
   assertAttendanceTransition(currentStatus, nextStatus, isOverride);
 
+  if (input.action === 'check_in') {
+    await issueQueueNumber(appointment, appointment.actualArrivalAt || now);
+    changes.queueNumber = appointment.queueNumber;
+  }
+
   appointment.attendanceStatus = nextStatus;
   if (input.notes?.trim()) appointment.attendanceNotes = input.notes.trim();
   if (input.overrideReason?.trim()) appointment.attendanceOverrideReason = input.overrideReason.trim();
@@ -2041,7 +2081,67 @@ export async function updateConsultationAttendance(
     userAgent: ua,
   });
 
+  if (input.action === 'check_in' && appointment.queueNumber) {
+    await createAndSendNotification(
+      appointment.customerId,
+      NotificationCategory.APPOINTMENT,
+      `Queue Number ${appointment.queueNumber}`,
+      `You are checked in for today's consultation. Your queue number is ${appointment.queueNumber}.`,
+      `/appointments/${appointment._id}`,
+    );
+  }
+
   return appointment;
+}
+
+export async function getCustomerQueueStatus(customerId: string) {
+  const today = format(toZonedTime(new Date(), TZ), 'yyyy-MM-dd');
+  const waitingStatuses = [
+    AppointmentAttendanceStatus.ON_TIME,
+    AppointmentAttendanceStatus.LATE_ARRIVAL,
+  ];
+  const activeStatuses = [...waitingStatuses, AppointmentAttendanceStatus.IN_PROGRESS];
+
+  const appointment = await Appointment.findOne({
+    customerId,
+    type: AppointmentType.OFFICE,
+    queueDate: today,
+    queueNumber: { $exists: true },
+    attendanceStatus: { $in: activeStatuses },
+  }).sort({ queueSequence: 1 });
+
+  if (!appointment?.queueNumber || !appointment.queueSequence) return null;
+
+  const isServing = appointment.attendanceStatus === AppointmentAttendanceStatus.IN_PROGRESS;
+  const [aheadCount, nowServing] = await Promise.all([
+    isServing
+      ? Promise.resolve(0)
+      : Appointment.countDocuments({
+        type: AppointmentType.OFFICE,
+        queueDate: today,
+        queueSequence: { $lt: appointment.queueSequence },
+        attendanceStatus: { $in: activeStatuses },
+      }),
+    Appointment.findOne({
+      type: AppointmentType.OFFICE,
+      queueDate: today,
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      queueNumber: { $exists: true },
+    }).sort({ queueSequence: 1 }).select('queueNumber'),
+  ]);
+
+  return {
+    appointmentId: appointment._id.toString(),
+    queueNumber: appointment.queueNumber,
+    queueDate: appointment.queueDate,
+    status: isServing ? 'serving' : 'waiting',
+    position: isServing ? 0 : aheadCount + 1,
+    aheadCount,
+    nowServing: nowServing?.queueNumber || null,
+    estimatedWaitMinutes: isServing ? 0 : aheadCount * ESTIMATED_CONSULTATION_MINUTES,
+    issuedAt: appointment.queueIssuedAt,
+    updatedAt: appointment.attendanceUpdatedAt || appointment.updatedAt,
+  };
 }
 
 // ── Customer: Request Reschedule ──

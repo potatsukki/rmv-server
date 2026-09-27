@@ -108,6 +108,23 @@ const projectCounterSchema = new Schema<IProjectCounter>({
 
 export const ProjectCounter = mongoose.model<IProjectCounter>('ProjectCounter', projectCounterSchema);
 
+// ── Daily appointment queue counter (for Q-NNN) ──
+export interface IAppointmentQueueCounter extends Document {
+  _id: Types.ObjectId;
+  date: string; // YYYY-MM-DD Asia/Manila
+  lastSeq: number;
+}
+
+const appointmentQueueCounterSchema = new Schema<IAppointmentQueueCounter>({
+  date: { type: String, required: true, unique: true },
+  lastSeq: { type: Number, default: 0 },
+});
+
+export const AppointmentQueueCounter = mongoose.model<IAppointmentQueueCounter>(
+  'AppointmentQueueCounter',
+  appointmentQueueCounterSchema,
+);
+
 // ── Blocked Slot Model ──
 export interface IBlockedSlot extends Document {
   _id: Types.ObjectId;
