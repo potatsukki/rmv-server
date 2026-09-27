@@ -25,6 +25,15 @@ const selectedDesignImageUrlSchema = z.string()
     'Selected design image must use a local catalog path',
   );
 
+const selectedDesignTemplateSchema = z.object({
+  id: z.string().min(1).max(100).trim(),
+  name: z.string().min(1).max(200).trim(),
+  imageUrl: selectedDesignImageUrlSchema,
+  serviceId: z.string().min(1).max(100).trim(),
+  serviceLabel: z.string().min(1).max(100).trim(),
+  serviceType: z.nativeEnum(ServiceType),
+});
+
 const appointmentRequestBaseSchema = z.object({
   type: z.nativeEnum(AppointmentType),
   date: z.string().regex(dateRegex, 'Date must be YYYY-MM-DD'),
@@ -42,6 +51,7 @@ export const requestAppointmentSchema = appointmentRequestBaseSchema.extend({
   selectedDesignTemplateId: z.string().max(100).trim().optional(),
   selectedDesignTemplateName: z.string().max(200).trim().optional(),
   selectedDesignTemplateImageUrl: selectedDesignImageUrlSchema.optional(),
+  selectedDesignTemplates: z.array(selectedDesignTemplateSchema).max(20).optional(),
 });
 
 export const agentCreateAppointmentSchema = appointmentRequestBaseSchema.extend({

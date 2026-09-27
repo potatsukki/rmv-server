@@ -724,6 +724,8 @@ export async function requestAppointment(
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
 
+  const primarySelectedDesign = input.selectedDesignTemplates?.[0];
+
   // Office-only: no ocular visit data needed
   const appointment = await Appointment.create({
     customerId,
@@ -734,9 +736,10 @@ export async function requestAppointment(
     customerNotes: input.purpose,
     serviceTypes: input.serviceTypes,
     serviceTypeCustom: input.serviceTypeCustom,
-    selectedDesignTemplateId: input.selectedDesignTemplateId,
-    selectedDesignTemplateName: input.selectedDesignTemplateName,
-    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl,
+    selectedDesignTemplateId: input.selectedDesignTemplateId || primarySelectedDesign?.id,
+    selectedDesignTemplateName: input.selectedDesignTemplateName || primarySelectedDesign?.name,
+    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl || primarySelectedDesign?.imageUrl,
+    selectedDesignTemplates: input.selectedDesignTemplates,
     bookedBy: customerId,
   });
 

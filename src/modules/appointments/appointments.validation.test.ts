@@ -28,6 +28,48 @@ describe('requestAppointmentSchema selected design', () => {
     });
   });
 
+  it('accepts multiple selected designs from different service categories', () => {
+    const selectedDesignTemplates = [
+      {
+        id: 'railings-commercial-guardrail',
+        name: 'Commercial Stainless Guardrail',
+        imageUrl: '/landing/services/railings/sample.png',
+        serviceId: 'railings',
+        serviceLabel: 'Railings',
+        serviceType: 'railings',
+      },
+      {
+        id: 'gates-double-swing',
+        name: 'Double Swing Gate',
+        imageUrl: '/landing/services/gates/sample.png',
+        serviceId: 'gates',
+        serviceLabel: 'Gates',
+        serviceType: 'gates',
+      },
+    ];
+
+    const parsed = requestAppointmentSchema.parse({
+      ...validAppointmentRequest,
+      selectedDesignTemplates,
+    });
+
+    expect(parsed.selectedDesignTemplates).toEqual(selectedDesignTemplates);
+  });
+
+  it('rejects unsafe image references inside a multi-design selection', () => {
+    expect(() => requestAppointmentSchema.parse({
+      ...validAppointmentRequest,
+      selectedDesignTemplates: [{
+        id: 'gate-1',
+        name: 'Gate',
+        imageUrl: 'https://example.com/gate.png',
+        serviceId: 'gates',
+        serviceLabel: 'Gates',
+        serviceType: 'gates',
+      }],
+    })).toThrow('Selected design image must use a local catalog path');
+  });
+
   it.each([
     '//cdn.example.com/design.png',
     '/landing\\services\\design.png',
