@@ -24,6 +24,15 @@ export interface ICustomerSiteDetails {
   referenceImageKeys?: string[];
 }
 
+export interface ISelectedDesignTemplate {
+  id: string;
+  name: string;
+  imageUrl: string;
+  serviceId: string;
+  serviceLabel: string;
+  serviceType: ServiceType;
+}
+
 export interface IAppointment extends Document {
   _id: Types.ObjectId;
   customerId: Types.ObjectId;
@@ -98,6 +107,7 @@ export interface IAppointment extends Document {
   selectedDesignTemplateId?: string;
   selectedDesignTemplateName?: string;
   selectedDesignTemplateImageUrl?: string;
+  selectedDesignTemplates?: ISelectedDesignTemplate[];
 
   // Cancellation
   cancellationReason?: string;
@@ -211,6 +221,20 @@ const appointmentSchema = new Schema<IAppointment>(
     selectedDesignTemplateId: { type: String, trim: true, maxlength: 100 },
     selectedDesignTemplateName: { type: String, trim: true, maxlength: 200 },
     selectedDesignTemplateImageUrl: { type: String, trim: true, maxlength: 1000 },
+    selectedDesignTemplates: {
+      type: [new Schema(
+        {
+          id: { type: String, required: true, trim: true, maxlength: 100 },
+          name: { type: String, required: true, trim: true, maxlength: 200 },
+          imageUrl: { type: String, required: true, trim: true, maxlength: 1000 },
+          serviceId: { type: String, required: true, trim: true, maxlength: 100 },
+          serviceLabel: { type: String, required: true, trim: true, maxlength: 100 },
+          serviceType: { type: String, required: true, enum: Object.values(ServiceType) },
+        },
+        { _id: false },
+      )],
+      default: undefined,
+    },
 
     cancellationReason: { type: String },
     cancelledBy: { type: Schema.Types.ObjectId, ref: 'User' },

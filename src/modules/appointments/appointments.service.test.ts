@@ -327,7 +327,7 @@ describe('requestAppointment', () => {
     vi.clearAllMocks();
   });
 
-  it('persists the selected design snapshot on the appointment', async () => {
+  it('persists multiple selected designs and keeps the first as the legacy snapshot', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
 
@@ -361,10 +361,25 @@ describe('requestAppointment', () => {
         type: AppointmentType.OFFICE,
         date: '2026-09-01',
         slotCode: '09:00',
-        serviceTypes: [ServiceType.RAILINGS],
-        selectedDesignTemplateId: 'railings-commercial-guardrail',
-        selectedDesignTemplateName: 'Commercial Stainless Guardrail',
-        selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+        serviceTypes: [ServiceType.RAILINGS, ServiceType.GATES],
+        selectedDesignTemplates: [
+          {
+            id: 'railings-commercial-guardrail',
+            name: 'Commercial Stainless Guardrail',
+            imageUrl: '/landing/services/railings/guardrail.png',
+            serviceId: 'railings',
+            serviceLabel: 'Railings',
+            serviceType: ServiceType.RAILINGS,
+          },
+          {
+            id: 'gates-double-swing',
+            name: 'Double Swing Gate',
+            imageUrl: '/landing/services/gates/double-swing.png',
+            serviceId: 'gates',
+            serviceLabel: 'Gates',
+            serviceType: ServiceType.GATES,
+          },
+        ],
       },
       'customer-1',
       [Role.CUSTOMER],
@@ -375,6 +390,10 @@ describe('requestAppointment', () => {
       selectedDesignTemplateId: 'railings-commercial-guardrail',
       selectedDesignTemplateName: 'Commercial Stainless Guardrail',
       selectedDesignTemplateImageUrl: '/landing/services/railings/guardrail.png',
+      selectedDesignTemplates: expect.arrayContaining([
+        expect.objectContaining({ id: 'railings-commercial-guardrail' }),
+        expect.objectContaining({ id: 'gates-double-swing' }),
+      ]),
     }));
   });
 });
