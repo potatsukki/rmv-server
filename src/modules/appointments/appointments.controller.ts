@@ -367,6 +367,12 @@ export const listAppointments = asyncHandler(async (req: Request, res: Response)
   });
 });
 
+export const getCustomerQueueStatus = asyncHandler(async (req: Request, res: Response) => {
+  const status = await appointmentsService.getCustomerQueueStatus(req.userId!);
+  res.set('Cache-Control', 'no-store');
+  res.json({ success: true, data: status });
+});
+
 // ── Appointment Queue ──
 export const listAppointmentQueue = asyncHandler(async (req: Request, res: Response) => {
   const result = await appointmentsService.listAppointmentQueue(
