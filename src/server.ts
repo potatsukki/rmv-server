@@ -9,6 +9,7 @@ import { processContractExpiries } from './jobs/contractExpiry.js';
 import { processAvailabilityShiftReminders } from './jobs/availabilityShiftReminders.js';
 import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
 import { seedDefaultConfigs } from './modules/config/config.service.js';
+import { backfillPublicIdentifiers } from './services/publicIdentifierBackfill.js';
 import { logger } from './utils/logger.js';
 
 const server = http.createServer(app);
@@ -35,6 +36,14 @@ async function startServer(): Promise<void> {
     // Seed default configs
     await seedDefaultConfigs();
     logger.info('Default configs seeded');
+
+    // Assign public IDs to legacy records before the API starts accepting requests.
+    const publicIdBackfill = await backfillPublicIdentifiers();
+    if (publicIdBackfill.customers > 0 || publicIdBackfill.appointments > 0) {
+      logger.info(
+        `Public IDs assigned: ${publicIdBackfill.customers} customers, ${publicIdBackfill.appointments} appointments`,
+      );
+    }
 
     // Start email retry processor
     emailRetryInterval = setInterval(async () => {
