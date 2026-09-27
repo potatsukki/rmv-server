@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, SlotCode, PaymentMethod, OcularFeePaymentChoice, ServiceType, MeasurementUnit, Environment } from '../utils/constants.js';
 import type { ILineItem, ISiteConditions } from './VisitReport.js';
+import { generateAppointmentNumber } from '../utils/publicIdentifiers.js';
 
 // ── Customer Site Details (pre-visit info from customer) ──
 export type SiteDetailsStatus = 'pending' | 'submitted' | 'skipped';
@@ -26,6 +27,7 @@ export interface ICustomerSiteDetails {
 export interface IAppointment extends Document {
   _id: Types.ObjectId;
   customerId: Types.ObjectId;
+  appointmentNumber?: string;
   type: AppointmentType;
   date: string; // YYYY-MM-DD Asia/Manila
   slotCode: SlotCode;
@@ -134,6 +136,7 @@ export interface IAppointment extends Document {
 const appointmentSchema = new Schema<IAppointment>(
   {
     customerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    appointmentNumber: { type: String, trim: true },
     type: { type: String, enum: Object.values(AppointmentType), required: true },
     date: { type: String, required: true }, // YYYY-MM-DD
     slotCode: { type: String, required: true },
@@ -280,6 +283,10 @@ const appointmentSchema = new Schema<IAppointment>(
 );
 
 appointmentSchema.index({ customerId: 1, status: 1 });
+appointmentSchema.index(
+  { appointmentNumber: 1 },
+  { unique: true, partialFilterExpression: { appointmentNumber: { $gt: '' } } },
+);
 appointmentSchema.index({ salesStaffId: 1, date: 1 });
 appointmentSchema.index({ date: 1, slotCode: 1 });
 appointmentSchema.index({ status: 1 });
@@ -288,5 +295,11 @@ appointmentSchema.index(
   { queueDate: 1, queueSequence: 1 },
   { unique: true, partialFilterExpression: { queueSequence: { $exists: true } } },
 );
+
+appointmentSchema.pre('validate', async function () {
+  if (!this.appointmentNumber && this.date) {
+    this.appointmentNumber = await generateAppointmentNumber(this.date);
+  }
+});
 
 export const Appointment = mongoose.model<IAppointment>('Appointment', appointmentSchema);

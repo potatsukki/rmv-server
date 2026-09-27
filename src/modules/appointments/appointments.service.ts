@@ -2590,7 +2590,7 @@ export async function simulateOcularFeePayment(appointmentId: string, customerId
 
 export async function verifyOcularFeeCheckout(appointmentId: string, customerId: string) {
   const appointment = await Appointment.findById(appointmentId)
-    .populate('customerId', 'firstName lastName email');
+    .populate('customerId', 'customerNumber firstName lastName email');
   if (!appointment) throw AppError.notFound('Appointment not found');
   if (appointment.customerId._id?.toString() !== customerId && appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only verify your own appointments');
@@ -2664,7 +2664,7 @@ export async function verifyOcularFeeCheckout(appointmentId: string, customerId:
 export async function handlePaymongoPayment(checkoutSessionId: string) {
   const appointment = await Appointment.findOne({
     paymongoCheckoutSessionId: checkoutSessionId,
-  }).populate('customerId', 'firstName lastName email');
+  }).populate('customerId', 'customerNumber firstName lastName email');
 
   if (!appointment) {
     // Not an appointment payment — ignore
@@ -2783,7 +2783,7 @@ export async function verifyOcularFee(
   ua?: string,
 ) {
   const appointment = await Appointment.findById(appointmentId)
-    .populate('customerId', 'firstName lastName email');
+    .populate('customerId', 'customerNumber firstName lastName email');
   if (!appointment) throw AppError.notFound('Appointment not found');
 
   if (appointment.ocularFeeStatus !== 'proof_submitted') {
@@ -2881,7 +2881,7 @@ export async function listPendingOcularFees() {
     ocularFeeStatus: { $in: ['proof_submitted', 'pending', 'declined'] },
     status: { $ne: AppointmentStatus.CANCELLED },
   })
-    .populate('customerId', 'firstName lastName email phone')
+    .populate('customerId', 'customerNumber firstName lastName email phone')
     .sort({ date: 1, slotCode: 1 });
 
   return appointments;
@@ -2962,7 +2962,7 @@ export async function setOcularFee(
 
 export async function getAppointmentById(appointmentId: string, actorId: string, actorRoles: Role[]) {
   const appointment = await Appointment.findById(appointmentId)
-    .populate('customerId', 'firstName lastName email phone')
+    .populate('customerId', 'customerNumber firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName email phone')
     .populate('bookedBy', 'firstName lastName')
     .populate('confirmedBy', 'firstName lastName');
@@ -3231,7 +3231,7 @@ export async function listAppointmentQueue(
   const fetchLimit = normalizedSearch ? 1000 : Math.min(Math.max(limit * 3, 180), 600);
 
   const appointments = await Appointment.find(queueFilter)
-    .populate('customerId', 'firstName lastName email phone')
+    .populate('customerId', 'customerNumber firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName availabilityStatus availabilityNote')
     .sort({ date: 1, slotCode: 1, createdAt: 1 })
     .limit(fetchLimit);
@@ -3339,6 +3339,7 @@ export async function listAppointmentQueue(
       return matchesAppointmentSearch(
         {
           type: appointment.type,
+          appointmentNumber: appointment.appointmentNumber,
           status: appointment.status,
           consultationReportSubmitted: appointment.consultationReportSubmitted,
           date: appointment.date,
@@ -3351,6 +3352,7 @@ export async function listAppointmentQueue(
           serviceTypeCustom: appointment.serviceTypeCustom,
           customerSiteDetails: appointment.customerSiteDetails,
           customerName: fullName(appointment.customerId),
+          customerNumber: appointment.customerId?.customerNumber,
           salesStaffName: fullName(appointment.salesStaffId),
           linkedProjects: linkedProjects.map((project: any) => ({
             projectNumber: project.projectNumber,
@@ -3535,7 +3537,7 @@ export async function listAppointments(query: {
   if (!normalizedSearch) {
     const [appointments, total] = await Promise.all([
       Appointment.find(filter)
-        .populate('customerId', 'firstName lastName email phone')
+        .populate('customerId', 'customerNumber firstName lastName email phone')
         .populate('salesStaffId', 'firstName lastName')
         .sort(sortSpec)
         .skip((page - 1) * limit)
@@ -3551,7 +3553,7 @@ export async function listAppointments(query: {
   }
 
   const appointments = await Appointment.find(filter)
-    .populate('customerId', 'firstName lastName email phone')
+    .populate('customerId', 'customerNumber firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName')
     .sort(sortSpec);
 
@@ -3585,6 +3587,7 @@ export async function listAppointments(query: {
     return matchesAppointmentSearch(
       {
         type: appointment.type,
+        appointmentNumber: appointment.appointmentNumber,
         status: appointment.status,
         consultationReportSubmitted: appointment.consultationReportSubmitted,
         date: appointment.date,
@@ -3597,6 +3600,7 @@ export async function listAppointments(query: {
         serviceTypeCustom: appointment.serviceTypeCustom,
         customerSiteDetails: appointment.customerSiteDetails,
         customerName: fullName(appointment.customerId),
+        customerNumber: appointment.customerId?.customerNumber,
         salesStaffName: fullName(appointment.salesStaffId),
         linkedProjects: linkedProjects.map((project: any) => ({
           projectNumber: project.projectNumber,

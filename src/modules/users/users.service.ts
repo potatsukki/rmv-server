@@ -84,6 +84,7 @@ function buildUserSearchFilter(search: string, includePhone = false) {
     .map((token) => token.trim())
     .filter(Boolean);
   const baseFields = [
+    { customerNumber: { $regex: escaped, $options: 'i' } },
     { firstName: { $regex: escaped, $options: 'i' } },
     { lastName: { $regex: escaped, $options: 'i' } },
     { email: { $regex: escaped, $options: 'i' } },
@@ -525,7 +526,7 @@ export async function listByRole(
   }
 
   const users = await User.find(filter)
-    .select('firstName lastName email phone roles isActive availabilityStatus availabilityNote availabilityUpdatedAt addressData savedAddresses')
+    .select('customerNumber firstName lastName email phone roles isActive availabilityStatus availabilityNote availabilityUpdatedAt addressData savedAddresses')
     .sort({ firstName: 1 })
     .limit(50);
 
@@ -573,7 +574,7 @@ export async function listByRole(
 
 export async function getCustomerById(userId: string) {
   const user = await User.findOne({ _id: userId, roles: 'customer', isActive: true })
-    .select('firstName lastName email phone addressData savedAddresses')
+    .select('customerNumber firstName lastName email phone addressData savedAddresses')
     .lean();
   if (!user) throw AppError.notFound('Customer not found');
   const savedAddresses = normalizeSavedAddresses((user as any).savedAddresses, (user as any).addressData);
@@ -658,4 +659,3 @@ export async function deleteAccount(userId: string, input: DeleteAccountInput, i
 
   return { message: 'Account deleted successfully.' };
 }
-

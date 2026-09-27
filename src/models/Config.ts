@@ -125,6 +125,40 @@ export const AppointmentQueueCounter = mongoose.model<IAppointmentQueueCounter>(
   appointmentQueueCounterSchema,
 );
 
+// ── Public customer identifier counter (for CUS-YYYY-NNNNNN) ──
+export interface ICustomerNumberCounter extends Document {
+  _id: Types.ObjectId;
+  year: number;
+  lastSeq: number;
+}
+
+const customerNumberCounterSchema = new Schema<ICustomerNumberCounter>({
+  year: { type: Number, required: true, unique: true },
+  lastSeq: { type: Number, default: 0 },
+});
+
+export const CustomerNumberCounter = mongoose.model<ICustomerNumberCounter>(
+  'CustomerNumberCounter',
+  customerNumberCounterSchema,
+);
+
+// ── Public appointment identifier counter (for APT-YYYYMMDD-NNNN) ──
+export interface IAppointmentNumberCounter extends Document {
+  _id: Types.ObjectId;
+  date: string;
+  lastSeq: number;
+}
+
+const appointmentNumberCounterSchema = new Schema<IAppointmentNumberCounter>({
+  date: { type: String, required: true, unique: true },
+  lastSeq: { type: Number, default: 0 },
+});
+
+export const AppointmentNumberCounter = mongoose.model<IAppointmentNumberCounter>(
+  'AppointmentNumberCounter',
+  appointmentNumberCounterSchema,
+);
+
 // ── Blocked Slot Model ──
 export interface IBlockedSlot extends Document {
   _id: Types.ObjectId;

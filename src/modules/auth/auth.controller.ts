@@ -178,6 +178,7 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
       _id: user._id,
       id: user._id,
       email: user.email,
+      customerNumber: user.customerNumber,
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,

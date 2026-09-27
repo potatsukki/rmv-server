@@ -25,6 +25,18 @@ describe('appointments.search', () => {
     expect(matched).toBe(true);
   });
 
+  it('matches the permanent appointment number for customer scope', () => {
+    expect(matchesAppointmentSearch(
+      {
+        appointmentNumber: 'APT-20260927-0042',
+        type: 'office',
+        status: 'confirmed',
+      },
+      'apt 20260927 0042',
+      'customer',
+    )).toBe(true);
+  });
+
   it('matches staff-only fields like customer name, sales staff, and project number', () => {
     const matched = matchesAppointmentSearch(
       {
@@ -43,6 +55,17 @@ describe('appointments.search', () => {
     );
 
     expect(matched).toBe(true);
+  });
+
+  it('matches the permanent customer number for staff scope', () => {
+    expect(matchesAppointmentSearch(
+      {
+        appointmentNumber: 'APT-20260927-0042',
+        customerNumber: 'CUS-2026-000125',
+      },
+      'cus 2026 000125',
+      'staff',
+    )).toBe(true);
   });
 
   it('treats completed consultation with submitted report as ready for ocular in search', () => {
