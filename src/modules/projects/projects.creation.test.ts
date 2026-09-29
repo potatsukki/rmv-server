@@ -10,12 +10,16 @@ const mocks = vi.hoisted(() => ({
   reportFindOne: vi.fn(),
   reportFind: vi.fn(),
   projectItemCreate: vi.fn(),
+  projectItemFindOneAndUpdate: vi.fn(),
   generateProjectNumber: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
   Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, create: mocks.projectCreate },
-  ProjectItem: { create: mocks.projectItemCreate },
+  ProjectItem: {
+    create: mocks.projectItemCreate,
+    findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
+  },
   Appointment: { findById: mocks.appointmentFindById },
   User: { findOne: mocks.userFindOne },
   AuditLog: { create: mocks.auditCreate },
@@ -77,6 +81,11 @@ describe('createProject', () => {
     mocks.userFindOne.mockResolvedValue({ _id: customerId, roles: [Role.CUSTOMER], isActive: true });
     mocks.generateProjectNumber.mockResolvedValue('RMV-2026-0001');
     mocks.projectCreate.mockImplementation(async (payload) => ({ _id: 'project-1', ...payload }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
+      _id: `item-${update.$set.serviceType}`,
+      ...update.$set,
+    }));
     mocks.auditCreate.mockResolvedValue({});
     vi.mocked(verifyFileExists).mockResolvedValue(true);
   });
@@ -105,14 +114,92 @@ describe('createProject', () => {
     }));
   });
 
-  it('links a completed appointment without importing its information or visit-report specifications', async () => {
+  it('imports every appointment service as a separate project item with its own visit details', async () => {
+    const canopyReport = {
+      _id: 'report-canopy',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'canopy',
+      measurementUnit: 'mm',
+      lineItems: [{ label: 'Main roof', length: 3200, width: 1800, quantity: 1 }],
+      specifications: { measurements: { projectionLength: 1800, totalWidth: 3200 } },
+      customerRequirements: 'Include a gutter',
+      discussionNotes: 'Consultation note for canopy',
+      notes: 'Ocular note for canopy',
+      photoKeys: ['visit-photos/canopy.jpg'],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const railingsReport = {
+      _id: 'report-railings',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'railings',
+      measurementUnit: 'mm',
+      lineItems: [{ label: 'Stair rail', length: 4100, height: 950, quantity: 2 }],
+      specifications: { measurements: { totalRunLength: 4100, railHeight: 950 } },
+      customerRequirements: 'Child-safe spacing',
+      discussionNotes: 'Consultation note for railings',
+      notes: 'Ocular note for railings',
+      photoKeys: [],
+      videoKeys: ['visit-videos/railings.mp4'],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['canopy', 'railings'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([canopyReport, railingsReport]) });
+
     const project = await createProject({ ...input, appointmentId }, actorId, undefined, undefined, [Role.SALES_STAFF]);
 
-    expect(project).toMatchObject({ ...input, appointmentId, salesStaffId: actorId });
-    expect(project.consultationVisitReportId).toBeUndefined();
-    expect(project.ocularVisitReportId).toBeUndefined();
+    expect(project).toMatchObject({
+      ...input,
+      appointmentId,
+      salesStaffId: actorId,
+      serviceTypes: ['canopy', 'railings'],
+      visitReportId: 'report-canopy',
+      lineItems: canopyReport.lineItems,
+      specifications: canopyReport.specifications,
+    });
     expect(mocks.reportFindOne).not.toHaveBeenCalled();
-    expect(mocks.reportFind).not.toHaveBeenCalled();
+    expect(mocks.reportFind).toHaveBeenCalledWith({ appointmentId });
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledTimes(2);
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
+      { projectId: 'project-1', serviceType: 'canopy' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          serviceType: 'canopy',
+          lineItems: canopyReport.lineItems,
+          specifications: canopyReport.specifications,
+          customerRequirements: 'Include a gutter',
+          notes: 'Consultation note for canopy\n\nOcular note for canopy',
+          mediaKeys: ['visit-photos/canopy.jpg'],
+          ocularVisitReportId: 'report-canopy',
+        }),
+      }),
+      { upsert: true, new: true },
+    );
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
+      { projectId: 'project-1', serviceType: 'railings' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          serviceType: 'railings',
+          lineItems: railingsReport.lineItems,
+          specifications: railingsReport.specifications,
+          customerRequirements: 'Child-safe spacing',
+          notes: 'Consultation note for railings\n\nOcular note for railings',
+          mediaKeys: ['visit-videos/railings.mp4'],
+          ocularVisitReportId: 'report-railings',
+        }),
+      }),
+      { upsert: true, new: true },
+    );
+    expect(canopyReport).toMatchObject({ linkedProjectId: 'project-1', projectItemId: 'item-canopy' });
+    expect(railingsReport).toMatchObject({ linkedProjectId: 'project-1', projectItemId: 'item-railings' });
+    expect(canopyReport.save).toHaveBeenCalled();
+    expect(railingsReport.save).toHaveBeenCalled();
     expect(mocks.projectItemCreate).not.toHaveBeenCalled();
   });
 
