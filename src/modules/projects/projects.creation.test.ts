@@ -84,7 +84,9 @@ describe('createProject', () => {
     mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
     mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
       _id: `item-${update.$set.serviceType}`,
+      ...update.$setOnInsert,
       ...update.$set,
+      save: vi.fn().mockResolvedValue(undefined),
     }));
     mocks.auditCreate.mockResolvedValue({});
     vi.mocked(verifyFileExists).mockResolvedValue(true);
@@ -201,6 +203,134 @@ describe('createProject', () => {
     expect(canopyReport.save).toHaveBeenCalled();
     expect(railingsReport.save).toHaveBeenCalled();
     expect(mocks.projectItemCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates a blank separate item instead of copying the primary item when a service has no report', async () => {
+    const canopyReport = {
+      _id: 'report-canopy',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'canopy',
+      measurementUnit: 'mm',
+      lineItems: [{ label: 'Main roof', length: 3200, width: 1800, quantity: 1 }],
+      specifications: { measurements: { projectionLength: 1800, totalWidth: 3200 } },
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['canopy', 'railings'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([canopyReport]) });
+
+    await createProject({ ...input, appointmentId, serviceType: 'canopy' }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemCreate).toHaveBeenCalledTimes(1);
+    const fallbackItem = mocks.projectItemCreate.mock.calls[0]![0];
+    expect(fallbackItem).toMatchObject({
+      projectId: 'project-1',
+      appointmentId,
+      serviceType: 'railings',
+      title: 'Railings',
+      lineItems: [],
+      initialDesignKeys: [],
+      mediaKeys: [],
+      designReviewStatus: 'not_required',
+    });
+    expect(fallbackItem).not.toHaveProperty('measurements');
+    expect(fallbackItem).not.toHaveProperty('specifications');
+    expect(fallbackItem).not.toHaveProperty('customerRequirements');
+    expect(fallbackItem).not.toHaveProperty('notes');
+  });
+
+  it('attaches a form-uploaded initial design only to the matching primary item', async () => {
+    const canopyReport = {
+      _id: 'report-canopy',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'canopy',
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const railingsReport = {
+      _id: 'report-railings',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'railings',
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['canopy', 'railings'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([canopyReport, railingsReport]) });
+
+    await createProject({
+      ...input,
+      appointmentId,
+      serviceType: 'canopy',
+      initialDesignKeys: ['projects/initial-design/canopy.pdf'],
+      initialDesignNotes: 'Canopy concept',
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    const canopyUpdate = mocks.projectItemFindOneAndUpdate.mock.calls.find(
+      ([filter]) => filter.serviceType === 'canopy',
+    )?.[1];
+    const railingsUpdate = mocks.projectItemFindOneAndUpdate.mock.calls.find(
+      ([filter]) => filter.serviceType === 'railings',
+    )?.[1];
+    expect(canopyUpdate?.$setOnInsert).toMatchObject({
+      initialDesignKeys: ['projects/initial-design/canopy.pdf'],
+      initialDesignNotes: 'Canopy concept',
+      designReviewStatus: 'pending',
+    });
+    expect(railingsUpdate?.$setOnInsert).toMatchObject({
+      initialDesignKeys: [],
+      designReviewStatus: 'not_required',
+    });
+  });
+
+  it('repairs an older primary item that is missing its project-level initial design', async () => {
+    const existingItem = {
+      _id: 'item-canopy',
+      initialDesignKeys: [],
+      initialDesignNotes: undefined,
+      designReviewStatus: 'not_required',
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const canopyReport = {
+      _id: 'report-canopy',
+      appointmentId,
+      visitType: 'ocular',
+      serviceType: 'canopy',
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['canopy'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([canopyReport]) });
+    mocks.projectItemFindOneAndUpdate.mockResolvedValue(existingItem);
+
+    await createProject({
+      ...input,
+      appointmentId,
+      serviceType: 'canopy',
+      initialDesignKeys: ['projects/initial-design/canopy.pdf'],
+      initialDesignNotes: 'Canopy concept',
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(existingItem).toMatchObject({
+      initialDesignKeys: ['projects/initial-design/canopy.pdf'],
+      initialDesignNotes: 'Canopy concept',
+      designReviewStatus: 'pending',
+    });
+    expect(existingItem.save).toHaveBeenCalled();
   });
 
   it('saves moved specifications, design and attachment data on an independent project', async () => {

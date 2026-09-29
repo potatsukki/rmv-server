@@ -283,7 +283,6 @@ function combinedReportNotes(...reports: any[]): string | undefined {
 async function syncProjectItemFromReport(project: any, report: any, relatedReports: any[] = [report]) {
   const serviceType = report.serviceType || 'custom';
   const title = readableServiceTitle(serviceType, report.serviceTypeCustom);
-  const hasInitialDesign = Boolean(report.initialDesignKeys?.length || report.initialDesignNotes?.trim());
   const sameServiceReports = relatedReports.filter((candidate) => (
     (candidate.serviceType || 'custom') === serviceType
   ));
@@ -295,6 +294,13 @@ async function syncProjectItemFromReport(project: any, report: any, relatedRepor
   ]))];
   const isPrimaryService = report._id?.toString() === project.visitReportId?.toString()
     || serviceType === project.serviceType;
+  const initialDesignKeys = report.initialDesignKeys?.length
+    ? report.initialDesignKeys
+    : isPrimaryService ? project.initialDesignKeys || [] : [];
+  const initialDesignNotes = report.initialDesignNotes?.trim()
+    ? report.initialDesignNotes
+    : isPrimaryService ? project.initialDesignNotes : undefined;
+  const hasInitialDesign = Boolean(initialDesignKeys.length || initialDesignNotes?.trim());
   const reportNotes = combinedReportNotes(...sameServiceReports);
   const importedFields: Record<string, unknown> = {
     measurements: report.measurements || (isPrimaryService ? project.measurements : undefined),
@@ -337,13 +343,22 @@ async function syncProjectItemFromReport(project: any, report: any, relatedRepor
       },
       $setOnInsert: {
         status: project.status || ProjectStatus.DRAFT,
-        initialDesignKeys: report.initialDesignKeys || [],
-        initialDesignNotes: report.initialDesignNotes,
+        initialDesignKeys,
+        initialDesignNotes,
         designReviewStatus: hasInitialDesign ? 'pending' : 'not_required',
       },
     },
     { upsert: true, new: true },
   );
+
+  // Repair older project items created before project-level designs were scoped
+  // to their matching primary item. Never copy the design to a different item.
+  if (!hasInitialDesignSubmission(item) && hasInitialDesign) {
+    item.initialDesignKeys = initialDesignKeys;
+    item.initialDesignNotes = initialDesignNotes;
+    item.designReviewStatus = 'pending';
+    await item.save();
+  }
 
   const needsProjectItemLink = !report.projectItemId || report.projectItemId.toString() !== item._id.toString();
   const needsProjectLink = !report.linkedProjectId || report.linkedProjectId.toString() !== project._id.toString();
@@ -354,6 +369,37 @@ async function syncProjectItemFromReport(project: any, report: any, relatedRepor
   }
 
   return item;
+}
+
+function buildFallbackProjectItem(project: any, serviceType: string) {
+  const isPrimaryService = serviceType === project.serviceType;
+
+  return {
+    projectId: project._id,
+    appointmentId: project.appointmentId,
+    serviceType,
+    title: readableServiceTitle(serviceType, isPrimaryService ? project.serviceTypeCustom : undefined),
+    status: project.status || ProjectStatus.DRAFT,
+    lineItems: isPrimaryService ? project.lineItems || [] : [],
+    initialDesignKeys: isPrimaryService ? project.initialDesignKeys || [] : [],
+    designReviewStatus: isPrimaryService && hasInitialDesignSubmission(project) ? 'pending' : 'not_required',
+    mediaKeys: isPrimaryService ? project.mediaKeys || [] : [],
+    ...(isPrimaryService && {
+      measurements: project.measurements,
+      serviceTypeCustom: project.serviceTypeCustom,
+      measurementUnit: project.measurementUnit,
+      specifications: project.specifications,
+      preferredDesign: project.preferredDesign,
+      customerRequirements: project.customerRequirements,
+      selectedDesignTemplateId: project.selectedDesignTemplateId,
+      selectedDesignTemplateName: project.selectedDesignTemplateName,
+      selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
+      materials: project.materialType,
+      finishes: project.finishColor,
+      notes: project.notes,
+      initialDesignNotes: project.initialDesignNotes,
+    }),
+  };
 }
 
 async function ensureProjectItems(project: any) {
@@ -377,30 +423,7 @@ async function ensureProjectItems(project: any) {
 
   for (const serviceType of serviceTypes) {
     if (existingTypes.has(serviceType)) continue;
-    await ProjectItem.create({
-      projectId: project._id,
-      appointmentId: project.appointmentId,
-      serviceType,
-      title: readableServiceTitle(serviceType),
-      status: project.status || ProjectStatus.DRAFT,
-      measurements: project.measurements,
-      serviceTypeCustom: project.serviceTypeCustom,
-      measurementUnit: project.measurementUnit,
-      lineItems: project.lineItems,
-      specifications: project.specifications,
-      preferredDesign: project.preferredDesign,
-      customerRequirements: project.customerRequirements,
-      selectedDesignTemplateId: project.selectedDesignTemplateId,
-      selectedDesignTemplateName: project.selectedDesignTemplateName,
-      selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
-      materials: project.materialType,
-      finishes: project.finishColor,
-      notes: project.notes,
-      initialDesignKeys: project.initialDesignKeys || [],
-      initialDesignNotes: project.initialDesignNotes,
-      designReviewStatus: hasInitialDesignSubmission(project) ? 'pending' : 'not_required',
-      mediaKeys: project.mediaKeys || [],
-    });
+    await ProjectItem.create(buildFallbackProjectItem(project, serviceType));
   }
 
   return ProjectItem.find({ projectId: project._id })
@@ -546,6 +569,15 @@ export async function createProject(
 
   for (const report of appointmentReports) {
     if (report.serviceType) await syncProjectItemFromReport(project, report, appointmentReports);
+  }
+
+  if (appointment) {
+    const reportServiceTypes = new Set(appointmentReports.map((report) => report.serviceType).filter(Boolean));
+    for (const serviceType of serviceTypes) {
+      if (!reportServiceTypes.has(serviceType)) {
+        await ProjectItem.create(buildFallbackProjectItem(project, serviceType));
+      }
+    }
   }
 
   await AuditLog.create({
@@ -874,6 +906,17 @@ export async function reviewInitialDesign(
 
   if (input.projectItemId && !projectItem) {
     throw AppError.notFound('Project item not found');
+  }
+
+  if (
+    projectItem
+    && !hasInitialDesignSubmission(projectItem)
+    && projectItem.serviceType === project.serviceType
+    && hasInitialDesignSubmission(project)
+  ) {
+    projectItem.initialDesignKeys = project.initialDesignKeys || [];
+    projectItem.initialDesignNotes = project.initialDesignNotes;
+    projectItem.designReviewStatus = 'pending';
   }
 
   const reviewTarget = projectItem || project;
