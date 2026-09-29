@@ -352,7 +352,13 @@ async function ensureAppointmentServiceTypeReports(
     );
   }
 
-  const existingReports = await VisitReport.find({ appointmentId }).sort({ createdAt: 1 });
+  let existingReports = await VisitReport.find({ appointmentId }).sort({ createdAt: 1 });
+  existingReports = await collapseDuplicateAppointmentReports(
+    appointmentId,
+    salesStaffId,
+    existingReports,
+    preferredReportId,
+  );
   if (requestedServiceTypes.length > 0 && !requestedServiceTypes.includes(ServiceType.CUSTOM)) {
     const placeholderReport = existingReports.find((report) => report.serviceType === ServiceType.CUSTOM);
     if (placeholderReport && !existingReports.some((report) => report.serviceType === requestedServiceTypes[0])) {
@@ -601,6 +607,74 @@ function pickCanonicalLifecycleReport(reports: any[]) {
   if (sourceEmpty) return sourceEmpty;
 
   return reports.sort((a, b) => reportCreatedTime(a) - reportCreatedTime(b))[0];
+}
+
+function reportItemIdentity(report: any) {
+  const serviceType = String(report.serviceType || '').trim();
+  if (!serviceType) return `report:${report._id.toString()}`;
+  if (serviceType !== ServiceType.CUSTOM) return serviceType;
+
+  const customLabel = String(report.serviceTypeCustom || '').trim().toLowerCase();
+  return `${serviceType}:${customLabel}`;
+}
+
+async function collapseDuplicateAppointmentReports(
+  appointmentId: Types.ObjectId | string,
+  salesStaffId: Types.ObjectId | string,
+  reports: any[],
+  preferredReportId?: Types.ObjectId | string,
+) {
+  const groups = new Map<string, any[]>();
+  for (const report of reports) {
+    const key = reportItemIdentity(report);
+    groups.set(key, [...(groups.get(key) || []), report]);
+  }
+
+  const canonicalReports: any[] = [];
+  for (const candidates of groups.values()) {
+    if (candidates.length === 1) {
+      canonicalReports.push(candidates[0]);
+      continue;
+    }
+
+    const canonical = preferredReportId
+      ? candidates.find((report) => report._id.toString() === preferredReportId.toString())
+        || pickCanonicalLifecycleReport(candidates)
+      : pickCanonicalLifecycleReport(candidates);
+    const duplicates = candidates.filter((report) => report._id.toString() !== canonical._id.toString());
+    const conflictFields = new Set<string>();
+
+    for (const duplicate of duplicates) {
+      for (const field of getMergeConflictFields(canonical, duplicate)) {
+        conflictFields.add(field);
+      }
+      mergeReportContent(canonical, duplicate);
+      if (!canonical.linkedProjectId && duplicate.linkedProjectId) {
+        canonical.linkedProjectId = duplicate.linkedProjectId;
+      }
+      if (!canonical.projectItemId && duplicate.projectItemId) {
+        canonical.projectItemId = duplicate.projectItemId;
+      }
+      await VisitReport.deleteOne({ _id: duplicate._id });
+    }
+
+    await canonical.save();
+    canonicalReports.push(canonical);
+    await AuditLog.create({
+      action: AuditAction.VISIT_REPORT_UPDATED,
+      actorId: salesStaffId.toString(),
+      targetType: 'visit_report',
+      targetId: canonical._id,
+      details: {
+        appointmentId: appointmentId.toString(),
+        deduplicatedWithinAppointment: true,
+        duplicateIdsRemoved: duplicates.map((duplicate) => duplicate._id.toString()),
+        ...(conflictFields.size > 0 && { mergeConflictFields: [...conflictFields] }),
+      },
+    });
+  }
+
+  return canonicalReports.sort((a, b) => reportCreatedTime(a) - reportCreatedTime(b));
 }
 
 async function transitionConsultationReportsToOcularAppointment(

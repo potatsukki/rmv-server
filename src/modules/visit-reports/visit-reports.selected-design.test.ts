@@ -4,11 +4,13 @@ const {
   mockAppointmentFindById,
   mockVisitReportFind,
   mockVisitReportCreate,
+  mockVisitReportDeleteOne,
   mockAuditCreate,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
   mockVisitReportFind: vi.fn(),
   mockVisitReportCreate: vi.fn(),
+  mockVisitReportDeleteOne: vi.fn(),
   mockAuditCreate: vi.fn(),
 }));
 
@@ -19,6 +21,7 @@ vi.mock('../../models/index.js', () => ({
   VisitReport: {
     find: mockVisitReportFind,
     create: mockVisitReportCreate,
+    deleteOne: mockVisitReportDeleteOne,
   },
   Project: {},
   ProjectItem: {},
@@ -194,5 +197,57 @@ describe('autoCreateDraft selected design', () => {
 
     expect(untouchedDraft.measurementUnit).toBe('mm');
     expect(untouchedDraft.save).toHaveBeenCalledOnce();
+  });
+
+  it('collapses duplicate drafts for the same booked service into one item', async () => {
+    const emptyDuplicate = {
+      _id: 'report-empty',
+      status: 'draft',
+      visitType: 'consultation',
+      serviceType: ServiceType.KITCHEN_COUNTER,
+      lineItems: [],
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      createdAt: new Date('2026-09-29T10:00:00Z'),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const filledDraft = {
+      _id: 'report-filled',
+      status: 'draft',
+      visitType: 'consultation',
+      serviceType: ServiceType.KITCHEN_COUNTER,
+      notes: 'Keep the customer measurements on this item.',
+      lineItems: [],
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      createdAt: new Date('2026-09-29T10:01:00Z'),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mockAppointmentFindById.mockReturnValueOnce(selectLeanResult({
+      serviceTypes: [ServiceType.KITCHEN_COUNTER],
+    }));
+    mockVisitReportFind.mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([emptyDuplicate, filledDraft]),
+    });
+    mockVisitReportDeleteOne.mockResolvedValueOnce({ deletedCount: 1 });
+    mockAuditCreate.mockResolvedValueOnce({});
+
+    await autoCreateDraft(
+      'appointment-1',
+      'customer-1',
+      'sales-1',
+      'consultation',
+      undefined,
+      [ServiceType.KITCHEN_COUNTER],
+    );
+
+    expect(mockVisitReportDeleteOne).toHaveBeenCalledWith({ _id: 'report-empty' });
+    expect(filledDraft.save).toHaveBeenCalledOnce();
+    expect(mockVisitReportCreate).not.toHaveBeenCalled();
   });
 });
