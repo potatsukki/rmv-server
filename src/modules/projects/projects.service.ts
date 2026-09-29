@@ -261,15 +261,65 @@ function generatedContractFlowDisabled(): void {
   );
 }
 
-async function syncProjectItemFromReport(project: any, report: any) {
+function hasImportValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+function preferProjectInput<T>(inputValue: T | undefined, reportValue: T | undefined): T | undefined {
+  return hasImportValue(inputValue) ? inputValue : reportValue;
+}
+
+function combinedReportNotes(...reports: any[]): string | undefined {
+  const notes = [...new Set(reports.flatMap((report) => [report?.discussionNotes, report?.notes])
+    .filter((value): value is string => Boolean(value?.trim())))]
+    .join('\n\n');
+  return notes || undefined;
+}
+
+async function syncProjectItemFromReport(project: any, report: any, relatedReports: any[] = [report]) {
   const serviceType = report.serviceType || 'custom';
   const title = readableServiceTitle(serviceType, report.serviceTypeCustom);
   const hasInitialDesign = Boolean(report.initialDesignKeys?.length || report.initialDesignNotes?.trim());
-  const mediaKeys = [
-    ...(report.photoKeys || []),
-    ...(report.sketchKeys || []),
-    ...(report.referenceImageKeys || []),
-  ];
+  const sameServiceReports = relatedReports.filter((candidate) => (
+    (candidate.serviceType || 'custom') === serviceType
+  ));
+  const mediaKeys = [...new Set(sameServiceReports.flatMap((candidate) => [
+    ...(candidate.photoKeys || []),
+    ...(candidate.videoKeys || []),
+    ...(candidate.sketchKeys || []),
+    ...(candidate.referenceImageKeys || []),
+  ]))];
+  const isPrimaryService = report._id?.toString() === project.visitReportId?.toString()
+    || serviceType === project.serviceType;
+  const reportNotes = combinedReportNotes(...sameServiceReports);
+  const importedFields: Record<string, unknown> = {
+    measurements: report.measurements || (isPrimaryService ? project.measurements : undefined),
+    measurementUnit: report.measurementUnit || (isPrimaryService ? project.measurementUnit : undefined),
+    lineItems: report.lineItems?.length ? report.lineItems : (isPrimaryService ? project.lineItems : undefined),
+    materials: report.materials || (isPrimaryService ? project.materialType : undefined),
+    finishes: report.finishes || (isPrimaryService ? project.finishColor : undefined),
+    preferredDesign: report.preferredDesign || (isPrimaryService ? project.preferredDesign : undefined),
+    customerRequirements: report.customerRequirements || (isPrimaryService ? project.customerRequirements : undefined),
+    notes: reportNotes || (isPrimaryService ? project.notes : undefined),
+    specifications: hasImportValue(report.specifications)
+      ? report.specifications
+      : (isPrimaryService ? project.specifications : undefined),
+    selectedDesignTemplateId: report.selectedDesignTemplateId
+      || (isPrimaryService ? project.selectedDesignTemplateId : undefined),
+    selectedDesignTemplateName: report.selectedDesignTemplateName
+      || (isPrimaryService ? project.selectedDesignTemplateName : undefined),
+    selectedDesignTemplateImageUrl: report.selectedDesignTemplateImageUrl
+      || (isPrimaryService ? project.selectedDesignTemplateImageUrl : undefined),
+    mediaKeys: mediaKeys.length ? mediaKeys : (isPrimaryService ? project.mediaKeys : undefined),
+  };
+
+  const meaningfulImportedFields = Object.fromEntries(
+    Object.entries(importedFields).filter(([, value]) => hasImportValue(value)),
+  );
 
   const item = await ProjectItem.findOneAndUpdate(
     { projectId: project._id, serviceType },
@@ -280,18 +330,7 @@ async function syncProjectItemFromReport(project: any, report: any) {
         title,
         serviceType,
         serviceTypeCustom: report.serviceTypeCustom,
-        measurements: report.measurements || project.measurements,
-        measurementUnit: report.measurementUnit,
-        lineItems: report.lineItems || [],
-        materials: report.materials,
-        finishes: report.finishes,
-        preferredDesign: report.preferredDesign,
-        customerRequirements: report.customerRequirements,
-        notes: report.notes,
-        selectedDesignTemplateId: report.selectedDesignTemplateId,
-        selectedDesignTemplateName: report.selectedDesignTemplateName,
-        selectedDesignTemplateImageUrl: report.selectedDesignTemplateImageUrl,
-        mediaKeys,
+        ...meaningfulImportedFields,
         ...(report.visitType === 'ocular'
           ? { ocularVisitReportId: report._id }
           : { consultationVisitReportId: report._id }),
@@ -306,9 +345,11 @@ async function syncProjectItemFromReport(project: any, report: any) {
     { upsert: true, new: true },
   );
 
-  if (!report.projectItemId || report.projectItemId.toString() !== item._id.toString()) {
+  const needsProjectItemLink = !report.projectItemId || report.projectItemId.toString() !== item._id.toString();
+  const needsProjectLink = !report.linkedProjectId || report.linkedProjectId.toString() !== project._id.toString();
+  if (needsProjectItemLink || needsProjectLink) {
     report.projectItemId = item._id;
-    if (!report.linkedProjectId) report.linkedProjectId = project._id;
+    report.linkedProjectId = project._id;
     await report.save();
   }
 
@@ -325,7 +366,7 @@ async function ensureProjectItems(project: any) {
 
   for (const report of reports) {
     if (report.serviceType) {
-      await syncProjectItemFromReport(project, report);
+      await syncProjectItemFromReport(project, report, reports);
     }
   }
 
@@ -407,6 +448,7 @@ export async function createProject(
   actorRoles: Role[] = [],
 ) {
   const appointment = input.appointmentId ? await Appointment.findById(input.appointmentId) : null;
+  let appointmentReports: any[] = [];
   if (input.appointmentId && !appointment) throw AppError.notFound('Appointment not found');
   if (appointment) {
     if (!actorRoles.includes(Role.ADMIN) && appointment.salesStaffId?.toString() !== actorId) {
@@ -420,6 +462,7 @@ export async function createProject(
     }
     const existing = await Project.findOne({ appointmentId: input.appointmentId });
     if (existing) throw AppError.conflict('A project already exists for this appointment', ErrorCode.DUPLICATE_ENTRY);
+    appointmentReports = await VisitReport.find({ appointmentId: input.appointmentId }).sort({ createdAt: 1 });
   }
 
   const customerId = input.customerId || appointment?.customerId.toString();
@@ -435,39 +478,62 @@ export async function createProject(
 
   const projectNumber = await generateProjectNumber();
   const contractUploadedAt = new Date();
+  const primaryReport = appointmentReports.find((report) => (
+    report.serviceType === input.serviceType && report.visitType === 'ocular'
+  ))
+    || appointmentReports.find((report) => report.serviceType === input.serviceType)
+    || appointmentReports.find((report) => report.visitType === 'ocular')
+    || appointmentReports[0];
+  const appointmentServiceTypes = [
+    ...(appointment?.serviceTypes || []),
+    ...(appointment?.customerSiteDetails?.serviceTypes || []),
+  ].filter((serviceType): serviceType is string => Boolean(serviceType?.trim()));
+  const linkedServiceTypes = [...new Set([
+    ...appointmentServiceTypes,
+    ...appointmentReports.map((report) => report.serviceType).filter(Boolean),
+  ])];
+  const serviceTypes = linkedServiceTypes.length ? linkedServiceTypes : [input.serviceType];
+  const photoKeys = preferProjectInput(input.photoKeys, primaryReport?.photoKeys) || [];
+  const videoKeys = preferProjectInput(input.videoKeys, primaryReport?.videoKeys) || [];
+  const sketchKeys = preferProjectInput(input.sketchKeys, primaryReport?.sketchKeys) || [];
+  const referenceImageKeys = preferProjectInput(input.referenceImageKeys, primaryReport?.referenceImageKeys) || [];
+  const initialDesignKeys = preferProjectInput(input.initialDesignKeys, primaryReport?.initialDesignKeys) || [];
+  const initialDesignNotes = preferProjectInput(input.initialDesignNotes, primaryReport?.initialDesignNotes);
 
   const project = await Project.create({
     appointmentId: input.appointmentId,
+    visitReportId: primaryReport?._id,
     projectNumber,
     customerId,
     salesStaffId: appointment?.salesStaffId || actorId,
     title: input.title,
     serviceType: input.serviceType,
+    serviceTypes,
     deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
     description: input.description,
     siteAddress: input.siteAddress,
-    measurements: input.measurements,
-    materialType: input.materialType,
-    finishColor: input.finishColor,
+    measurements: preferProjectInput(input.measurements, primaryReport?.measurements),
+    materialType: preferProjectInput(input.materialType, primaryReport?.materials),
+    finishColor: preferProjectInput(input.finishColor, primaryReport?.finishes),
     quantity: input.quantity,
-    notes: input.notes,
-    serviceTypeCustom: input.serviceTypeCustom,
-    measurementUnit: input.measurementUnit,
-    lineItems: input.lineItems,
-    specifications: input.specifications,
-    preferredDesign: input.preferredDesign,
-    customerRequirements: input.customerRequirements,
-    selectedDesignTemplateId: input.selectedDesignTemplateId,
-    selectedDesignTemplateName: input.selectedDesignTemplateName,
-    selectedDesignTemplateImageUrl: input.selectedDesignTemplateImageUrl,
-    initialDesignKeys: input.initialDesignKeys,
-    initialDesignNotes: input.initialDesignNotes,
-    photoKeys: input.photoKeys,
-    videoKeys: input.videoKeys,
-    sketchKeys: input.sketchKeys,
-    referenceImageKeys: input.referenceImageKeys,
-    mediaKeys: [...new Set([...(input.photoKeys || []), ...(input.videoKeys || []), ...(input.sketchKeys || []), ...(input.referenceImageKeys || [])])],
-    designReviewStatus: input.initialDesignKeys?.length || input.initialDesignNotes?.trim() ? 'pending' : 'not_required',
+    notes: preferProjectInput(input.notes, combinedReportNotes(primaryReport)),
+    serviceTypeCustom: preferProjectInput(input.serviceTypeCustom, primaryReport?.serviceTypeCustom),
+    measurementUnit: preferProjectInput(input.measurementUnit, primaryReport?.measurementUnit),
+    lineItems: preferProjectInput(input.lineItems, primaryReport?.lineItems),
+    specifications: preferProjectInput(input.specifications, primaryReport?.specifications),
+    preferredDesign: preferProjectInput(input.preferredDesign, primaryReport?.preferredDesign),
+    customerRequirements: preferProjectInput(input.customerRequirements, primaryReport?.customerRequirements),
+    selectedDesignTemplateId: preferProjectInput(input.selectedDesignTemplateId, primaryReport?.selectedDesignTemplateId),
+    selectedDesignTemplateName: preferProjectInput(input.selectedDesignTemplateName, primaryReport?.selectedDesignTemplateName),
+    selectedDesignTemplateImageUrl: preferProjectInput(input.selectedDesignTemplateImageUrl, primaryReport?.selectedDesignTemplateImageUrl),
+    initialDesignKeys,
+    initialDesignNotes,
+    photoKeys,
+    videoKeys,
+    sketchKeys,
+    referenceImageKeys,
+    mediaKeys: [...new Set([...photoKeys, ...videoKeys, ...sketchKeys, ...referenceImageKeys])],
+    designReviewStatus: initialDesignKeys.length || initialDesignNotes?.trim() ? 'pending' : 'not_required',
     status: ProjectStatus.SUBMITTED,
     contractStatus: ContractStatus.UPLOADED,
     contractFileKey: input.contractFileKey,
@@ -477,6 +543,10 @@ export async function createProject(
     contractUploadedAt,
     contractUploadedBy: actorId,
   });
+
+  for (const report of appointmentReports) {
+    if (report.serviceType) await syncProjectItemFromReport(project, report, appointmentReports);
+  }
 
   await AuditLog.create({
     action: AuditAction.PROJECT_CREATED,
@@ -1502,7 +1572,7 @@ export async function getProjectById(
 
   if (!project) throw AppError.notFound('Project not found');
 
-  // Recover only an explicit report link; an appointment reference does not copy project details.
+  // Recover the explicit report link for projects created before automatic report linking.
   if (!project.visitReportId) {
     const fallbackReport = await VisitReport.findOne({
       linkedProjectId: project._id,
