@@ -402,6 +402,42 @@ function buildFallbackProjectItem(project: any, serviceType: string) {
   };
 }
 
+const orphanSiblingDetailFields = [
+  'measurements',
+  'measurementUnit',
+  'lineItems',
+  'materials',
+  'finishes',
+  'preferredDesign',
+  'customerRequirements',
+  'notes',
+  'specifications',
+  'selectedDesignTemplateId',
+  'selectedDesignTemplateName',
+  'selectedDesignTemplateImageUrl',
+  'mediaKeys',
+] as const;
+
+async function repairUnscopedSiblingDetails(project: any, items: any[]) {
+  const contaminatedItemIds = items
+    .filter((item) => (
+      item.serviceType !== project.serviceType
+      && !item.consultationVisitReportId
+      && !item.ocularVisitReportId
+      && orphanSiblingDetailFields.some((field) => hasImportValue(item[field]))
+    ))
+    .map((item) => item._id);
+
+  if (contaminatedItemIds.length === 0) return;
+
+  await ProjectItem.updateMany(
+    { _id: { $in: contaminatedItemIds }, projectId: project._id },
+    {
+      $unset: Object.fromEntries(orphanSiblingDetailFields.map((field) => [field, 1])),
+    },
+  );
+}
+
 async function ensureProjectItems(project: any) {
   const reports = await VisitReport.find({
     $or: [
@@ -417,6 +453,7 @@ async function ensureProjectItems(project: any) {
   }
 
   const existingItems = await ProjectItem.find({ projectId: project._id }).sort({ createdAt: 1 });
+  await repairUnscopedSiblingDetails(project, existingItems);
   const existingTypes = new Set(existingItems.map((item) => item.serviceType));
   const serviceTypes = (project.serviceTypes?.length ? project.serviceTypes : [project.serviceType])
     .filter((serviceType: string | undefined): serviceType is string => Boolean(serviceType?.trim()));
@@ -1893,28 +1930,7 @@ async function enrichProjectsForList(projects: any[]) {
           filter: { projectId: project._id, serviceType, deletedAt: null },
           update: {
             $setOnInsert: {
-              projectId: project._id,
-              appointmentId: project.appointmentId,
-              serviceType,
-              title: readableServiceTitle(serviceType),
-              status: project.status || ProjectStatus.DRAFT,
-              measurements: project.measurements,
-              serviceTypeCustom: project.serviceTypeCustom,
-              measurementUnit: project.measurementUnit,
-              lineItems: project.lineItems,
-              specifications: project.specifications,
-              preferredDesign: project.preferredDesign,
-              customerRequirements: project.customerRequirements,
-              selectedDesignTemplateId: project.selectedDesignTemplateId,
-              selectedDesignTemplateName: project.selectedDesignTemplateName,
-              selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
-              materials: project.materialType,
-              finishes: project.finishColor,
-              notes: project.notes,
-              initialDesignKeys: project.initialDesignKeys || [],
-              initialDesignNotes: project.initialDesignNotes,
-              designReviewStatus: hasInitialDesignSubmission(project) ? 'pending' : 'not_required',
-              mediaKeys: project.mediaKeys || [],
+              ...buildFallbackProjectItem(project, serviceType),
               deletedAt: null,
             },
           },
