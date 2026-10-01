@@ -4,13 +4,14 @@ const mocks = vi.hoisted(() => ({
   reportFindById: vi.fn(), reportFind: vi.fn(), appointmentFindById: vi.fn(),
   appointmentFindOne: vi.fn(), appointmentCreate: vi.fn(),
   projectCreate: vi.fn(), projectFindOne: vi.fn(), projectFindById: vi.fn(),
+  projectItemFindOneAndUpdate: vi.fn(),
   auditCreate: vi.fn(), releaseSlot: vi.fn(),
 }));
 vi.mock('../../models/index.js', () => ({
   VisitReport: { findById: mocks.reportFindById, find: mocks.reportFind },
   Appointment: { findById: mocks.appointmentFindById, findOne: mocks.appointmentFindOne, create: mocks.appointmentCreate },
   Project: { create: mocks.projectCreate, findOne: mocks.projectFindOne, findById: mocks.projectFindById },
-  ProjectItem: {}, User: {}, AuditLog: { create: mocks.auditCreate },
+  ProjectItem: { findOneAndUpdate: mocks.projectItemFindOneAndUpdate }, User: {}, AuditLog: { create: mocks.auditCreate },
   SlotLock: { deleteOne: mocks.releaseSlot },
 }));
 vi.mock('../notifications/socket.service.js', () => ({
@@ -93,6 +94,44 @@ describe('appointment report submission without project creation', () => {
     expect(report.status).toBe('submitted');
     expect(appointment.status).toBe('completed');
     expect(mocks.projectCreate).not.toHaveBeenCalled();
+  });
+
+  it('submits the linked draft project after its ocular report is finalized', async () => {
+    const { report } = setupReport({
+      visitType: 'ocular',
+      linkedProjectId: 'project-1',
+      serviceType: 'gates',
+      actualVisitDateTime: new Date('2026-09-17T01:00:00Z'),
+      specifications: {
+        measurements: { height: 180, width: 300, quantity: 1 },
+        siteConditions: { environment: 'outdoor', access: 'Street access' },
+      },
+      photoKeys: ['site/photo.jpg'],
+      sketchKeys: [],
+      referenceImageKeys: [],
+    }, { status: 'in_progress', ocularFee: 0 });
+    const project = {
+      _id: 'project-1',
+      title: 'Gate project',
+      serviceType: 'gates',
+      status: 'draft',
+      contractStatus: 'uploaded',
+      customerId: 'customer-1',
+      salesStaffId: 'sales-1',
+      mediaKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const item = { status: 'draft', save: vi.fn().mockResolvedValue(undefined) };
+    mocks.projectFindById.mockResolvedValue(project);
+    mocks.projectItemFindOneAndUpdate.mockResolvedValue(item);
+
+    await submitReport('report-1', 'sales-1');
+
+    expect(report.status).toBe('submitted');
+    expect(project.status).toBe('submitted');
+    expect(project.save).toHaveBeenCalled();
+    expect(item.status).toBe('submitted');
+    expect(item.save).toHaveBeenCalled();
   });
 
   it('schedules the follow-up ocular appointment without a project', async () => {

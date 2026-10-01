@@ -1952,7 +1952,7 @@ export async function submitReport(
         report.customerId,
         NotificationCategory.APPOINTMENT,
         'Consultation Complete',
-        `Your consultation has been completed for "${serviceLabel}". No ocular visit is needed.`,
+        `Your consultation has been completed for "${serviceLabel}". The project will be created next, where any required ocular visit will be scheduled.`,
         `/appointments/${appt._id}`,
       );
 
@@ -1999,9 +1999,17 @@ export async function submitReport(
 
       linkedProject.contractStatus = linkedProject.contractStatus || ContractStatus.MISSING;
 
+      const submitProjectAfterOcular = Boolean(
+        linkedProject.status === ProjectStatus.DRAFT
+        && linkedProject.contractStatus === ContractStatus.UPLOADED,
+      );
+      if (submitProjectAfterOcular) {
+        linkedProject.status = ProjectStatus.SUBMITTED;
+      }
+
       await linkedProject.save();
       const item = await upsertProjectItemFromVisitReport(linkedProject, report);
-      item.status = linkedProject.status === ProjectStatus.DRAFT ? ProjectStatus.DRAFT : linkedProject.status;
+      item.status = linkedProject.status;
       await item.save();
 
       await AuditLog.create({
@@ -2014,11 +2022,28 @@ export async function submitReport(
         userAgent: ua,
       });
 
-      await notifySalesContractUploadRequired(
-        linkedProject,
-        linkedProject.serviceType || linkedProject.title,
-        'Ocular measurements have been submitted.',
-      );
+      if (submitProjectAfterOcular) {
+        await createAndSendNotification(
+          linkedProject.customerId,
+          NotificationCategory.PROJECT,
+          'Ocular Visit Complete',
+          `The ocular visit for "${linkedProject.title}" is complete. Your project is now submitted for engineering.`,
+          `/projects/${linkedProject._id}`,
+        );
+        await notifyRole(
+          Role.ENGINEER,
+          NotificationCategory.PROJECT,
+          'New Project Submitted',
+          `Project "${linkedProject.title}" completed its ocular visit and is ready for blueprint work.`,
+          `/projects/${linkedProject._id}`,
+        );
+      } else {
+        await notifySalesContractUploadRequired(
+          linkedProject,
+          linkedProject.serviceType || linkedProject.title,
+          'Ocular measurements have been submitted.',
+        );
+      }
     }
   }
 

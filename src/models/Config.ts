@@ -94,7 +94,7 @@ const receiptCounterSchema = new Schema<IReceiptCounter>({
 
 export const ReceiptCounter = mongoose.model<IReceiptCounter>('ReceiptCounter', receiptCounterSchema);
 
-// ── Project Counter (for RMV-YYYY-#####) ──
+// ── Project Counter (for PRJ-YYYY-#####) ──
 export interface IProjectCounter extends Document {
   _id: Types.ObjectId;
   year: number;

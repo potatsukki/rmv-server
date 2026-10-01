@@ -14,6 +14,7 @@
     "smoke:phase3": "node scripts/smoke-phase3.mjs",
     "smoke:pipeline": "node test-pipeline.mjs",
     "repair:ocular-reports": "tsx src/scripts/repairOcularReportContamination.ts",
+    "migrate:project-ids": "tsx src/scripts/backfillProjectNumbers.ts",
     "backfill:public-ids": "tsx src/scripts/backfillPublicIdentifiers.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest"

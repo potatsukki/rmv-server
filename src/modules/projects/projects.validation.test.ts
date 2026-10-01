@@ -33,6 +33,19 @@ describe('createProjectSchema', () => {
     expect(createProjectSchema.safeParse({ ...details, appointmentId }).success).toBe(true);
   });
 
+  it('accepts an ocular visit schedule only when the project is linked to an appointment', () => {
+    const ocularVisit = { date: '2026-10-08', slotCode: '09:00' };
+
+    expect(createProjectSchema.safeParse({ ...details, customerId, appointmentId, ocularVisit }).success).toBe(true);
+    expect(createProjectSchema.safeParse({ ...details, customerId, ocularVisit }).success).toBe(false);
+    expect(createProjectSchema.safeParse({
+      ...details,
+      customerId,
+      appointmentId,
+      ocularVisit: { ...ocularVisit, slotCode: '12:30' },
+    }).success).toBe(false);
+  });
+
   it('preserves every moved project field through validation and model serialization', () => {
     const movedFields = {
       serviceTypeCustom: 'Custom fabrication',

@@ -5,7 +5,7 @@ import type { IProjectItem } from './ProjectItem.js';
 export interface IProject extends Document {
   _id: Types.ObjectId;
   appointmentId?: Types.ObjectId;
-  projectNumber: string; // RMV-YYYY-#####
+  projectNumber: string; // PRJ-YYYY-#####
   visitReportId?: Types.ObjectId; // link back to the specific visit report
   customerId: Types.ObjectId;
   salesStaffId: Types.ObjectId;

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   appointmentFindById: vi.fn(),
+  appointmentCreate: vi.fn(),
   projectFindOne: vi.fn(),
   projectFindById: vi.fn(),
   projectCreate: vi.fn(),
@@ -20,7 +21,7 @@ vi.mock('../../models/index.js', () => ({
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
   },
-  Appointment: { findById: mocks.appointmentFindById },
+  Appointment: { findById: mocks.appointmentFindById, create: mocks.appointmentCreate },
   User: { findOne: mocks.userFindOne },
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
@@ -81,6 +82,7 @@ describe('createProject', () => {
     mocks.userFindOne.mockResolvedValue({ _id: customerId, roles: [Role.CUSTOMER], isActive: true });
     mocks.generateProjectNumber.mockResolvedValue('RMV-2026-0001');
     mocks.projectCreate.mockImplementation(async (payload) => ({ _id: 'project-1', ...payload }));
+    mocks.appointmentCreate.mockImplementation(async (payload) => ({ _id: 'ocular-appointment-1', ...payload }));
     mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
     mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
       _id: `item-${update.$set.serviceType}`,
@@ -203,6 +205,55 @@ describe('createProject', () => {
     expect(canopyReport.save).toHaveBeenCalled();
     expect(railingsReport.save).toHaveBeenCalled();
     expect(mocks.projectItemCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates the project first and schedules the ocular visit from project creation', async () => {
+    const consultationReport = {
+      _id: 'report-gates',
+      appointmentId,
+      visitType: 'consultation',
+      status: 'submitted',
+      serviceType: 'gates',
+      measurementUnit: 'cm',
+      lineItems: [],
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([consultationReport]) });
+
+    const project = await createProject({
+      ...input,
+      appointmentId,
+      serviceType: 'gates',
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(project.status).toBe(ProjectStatus.DRAFT);
+    expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      customerId,
+      type: 'ocular',
+      date: '2026-10-08',
+      slotCode: '09:00',
+      sourceConsultationAppointmentId: appointmentId,
+      sourceConsultationReportId: 'report-gates',
+    }));
+    expect(consultationReport).toMatchObject({
+      appointmentId: 'ocular-appointment-1',
+      visitType: 'ocular',
+      status: 'draft',
+      linkedProjectId: 'project-1',
+    });
+    expect(consultationReport.save).toHaveBeenCalled();
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenLastCalledWith(
+      { projectId: 'project-1', serviceType: 'gates' },
+      expect.objectContaining({
+        $set: expect.objectContaining({ ocularVisitReportId: 'report-gates' }),
+      }),
+      { upsert: true, new: true },
+    );
   });
 
   it('creates a blank separate item instead of copying the primary item when a service has no report', async () => {
