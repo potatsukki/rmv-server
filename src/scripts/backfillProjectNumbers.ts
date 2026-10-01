@@ -11,21 +11,40 @@ async function backfill() {
     await mongoose.connect(MONGO_URI);
     console.log('Connected to MongoDB');
 
+    const legacyProjects = await Project.find({
+      projectNumber: /^RMV-\d{4}-\d{5}$/,
+    }).sort({ createdAt: 1 });
+
+    for (const project of legacyProjects) {
+      const projectNumber = project.projectNumber.replace(/^RMV-/, 'PRJ-');
+      const duplicate = await Project.exists({
+        _id: { $ne: project._id },
+        projectNumber,
+      });
+      if (duplicate) {
+        throw new Error(`Cannot migrate ${project.projectNumber}: ${projectNumber} already exists`);
+      }
+
+      project.projectNumber = projectNumber;
+      await project.save();
+      console.log(`Migrated ${project._id}: ${projectNumber}`);
+    }
+
     // Find projects without project numbers
     const projects = await Project.find({
       $or: [
         { projectNumber: { $exists: false } },
         { projectNumber: '' },
-        { projectNumber: null }
-      ]
+        { projectNumber: null },
+      ],
     }).sort({ createdAt: 1 });
 
-    if (projects.length === 0) {
-      console.log('No projects need backfilling.');
+    if (legacyProjects.length === 0 && projects.length === 0) {
+      console.log('No project IDs need migration or backfilling.');
       process.exit(0);
     }
 
-    console.log(`Found ${projects.length} projects to backfill.`);
+    console.log(`Migrated ${legacyProjects.length} legacy project IDs; found ${projects.length} missing project IDs to backfill.`);
 
     // Group projects by year of creation
     const projectsByYear: Record<number, typeof projects> = {};
@@ -52,7 +71,7 @@ async function backfill() {
       for (const project of yearProjects) {
         counter.lastSeq += 1;
         const seqStr = String(counter.lastSeq).padStart(5, '0');
-        const projectNumber = `RMV-${year}-${seqStr}`;
+        const projectNumber = `PRJ-${year}-${seqStr}`;
         
         project.projectNumber = projectNumber;
         await project.save();

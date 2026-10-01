@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DeliveryType, ProjectStatus } from '../../utils/constants.js';
+import { DeliveryType, ProjectStatus, SLOT_CODES } from '../../utils/constants.js';
 import { updateVisitReportSchema } from '../visit-reports/visit-reports.validation.js';
 
 const projectDetailsSchema = updateVisitReportSchema.pick({
@@ -53,9 +53,16 @@ export const createProjectSchema = z.object({
   contractFileName: z.string().max(255).trim().optional(),
   contractContentType: z.string().max(100).trim().optional(),
   contractFileSize: z.number().int().positive().optional(),
+  ocularVisit: z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid ocular visit date'),
+    slotCode: z.enum(SLOT_CODES),
+  }).optional(),
 }).refine((input) => Boolean(input.customerId || input.appointmentId), {
   message: 'Select a customer for the project',
   path: ['customerId'],
+}).refine((input) => !input.ocularVisit || Boolean(input.appointmentId), {
+  message: 'An ocular visit requires a completed appointment',
+  path: ['ocularVisit'],
 });
 
 export const updateProjectSchema = z.object({

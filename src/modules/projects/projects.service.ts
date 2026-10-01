@@ -5,7 +5,7 @@ import { PaymentPlan } from '../../models/Payment.js';
 import { Blueprint } from '../../models/Blueprint.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
-  ContractStatus, DeliveryType, ProjectStatus, AppointmentStatus, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
+  ContractStatus, DeliveryType, ProjectStatus, AppointmentStatus, AppointmentType, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
 } from '../../utils/constants.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
@@ -486,6 +486,9 @@ export async function createProject(
     const existing = await Project.findOne({ appointmentId: input.appointmentId });
     if (existing) throw AppError.conflict('A project already exists for this appointment', ErrorCode.DUPLICATE_ENTRY);
     appointmentReports = await VisitReport.find({ appointmentId: input.appointmentId }).sort({ createdAt: 1 });
+    if (input.ocularVisit && appointmentReports.length === 0) {
+      throw AppError.badRequest('Complete the consultation report before scheduling an ocular visit');
+    }
   }
 
   const customerId = input.customerId || appointment?.customerId.toString();
@@ -557,7 +560,7 @@ export async function createProject(
     referenceImageKeys,
     mediaKeys: [...new Set([...photoKeys, ...videoKeys, ...sketchKeys, ...referenceImageKeys])],
     designReviewStatus: initialDesignKeys.length || initialDesignNotes?.trim() ? 'pending' : 'not_required',
-    status: ProjectStatus.SUBMITTED,
+    status: input.ocularVisit ? ProjectStatus.DRAFT : ProjectStatus.SUBMITTED,
     contractStatus: ContractStatus.UPLOADED,
     contractFileKey: input.contractFileKey,
     contractFileName: input.contractFileName || getObjectFileName(input.contractFileKey),
@@ -580,6 +583,75 @@ export async function createProject(
     }
   }
 
+  if (input.ocularVisit && appointment) {
+    const ocularAppointment = await Appointment.create({
+      customerId,
+      type: AppointmentType.OCULAR,
+      date: input.ocularVisit.date,
+      slotCode: input.ocularVisit.slotCode,
+      status: AppointmentStatus.REQUESTED,
+      salesStaffId: appointment.salesStaffId || actorId,
+      bookedBy: actorId,
+      sourceConsultationAppointmentId: appointment._id,
+      sourceConsultationReportId: primaryReport?._id,
+      serviceTypes,
+      serviceTypeCustom: input.serviceTypeCustom || appointment.serviceTypeCustom,
+      selectedDesignTemplateId: project.selectedDesignTemplateId,
+      selectedDesignTemplateName: project.selectedDesignTemplateName,
+      selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
+      customerSiteDetails: {
+        serviceTypes,
+        serviceTypeCustom: input.serviceTypeCustom || appointment.serviceTypeCustom,
+      },
+      customerNotes: `Ocular visit scheduled while creating project ${project.projectNumber}`,
+    });
+
+    for (const report of appointmentReports) {
+      report.appointmentId = ocularAppointment._id;
+      report.visitType = 'ocular';
+      report.status = VisitReportStatus.DRAFT;
+      report.consultationOutcome = undefined;
+      report.noOcularReason = undefined;
+      report.recommendedOcularDate = undefined;
+      report.recommendedOcularSlot = undefined;
+      report.recommendedOcularAddressId = undefined;
+      report.recommendedOcularAddress = undefined;
+      report.actualVisitDateTime = undefined;
+      report.linkedProjectId = project._id;
+      await report.save();
+
+      const item = await syncProjectItemFromReport(project, report, appointmentReports);
+      if (item.consultationVisitReportId?.toString() === report._id.toString()) {
+        item.consultationVisitReportId = undefined;
+        await item.save();
+      }
+    }
+
+    await AuditLog.create({
+      action: AuditAction.APPOINTMENT_CREATED,
+      actorId,
+      targetType: 'appointment',
+      targetId: ocularAppointment._id,
+      details: {
+        triggeredBy: 'project_creation',
+        projectId: project._id,
+        sourceConsultationAppointmentId: appointment._id,
+      },
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    const readableDate = input.ocularVisit.date;
+    const readableSlot = input.ocularVisit.slotCode;
+    await createAndSendNotification(
+      customerId,
+      NotificationCategory.APPOINTMENT,
+      'Ocular Visit Scheduled',
+      `Your ocular visit for project "${project.title}" is scheduled for ${readableDate} at ${readableSlot}. Open the appointment to submit the project site pin and address.`,
+      `/appointments/${ocularAppointment._id}`,
+    );
+  }
+
   await AuditLog.create({
     action: AuditAction.PROJECT_CREATED,
     actorId,
@@ -597,7 +669,9 @@ export async function createProject(
     userAgent: ua,
   });
 
-  await notifyProjectSubmittedAfterContract(project);
+  if (!input.ocularVisit) {
+    await notifyProjectSubmittedAfterContract(project);
+  }
 
   return project;
 }
