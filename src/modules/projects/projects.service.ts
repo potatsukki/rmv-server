@@ -1557,9 +1557,6 @@ export async function assignFabricationStaff(
   }
 
   const initialPaymentVerified = await hasRequiredInitialFabricationPayment(projectId);
-  if (!initialPaymentVerified) {
-    throw AppError.badRequest('Fabrication team can only be assigned after the first payment has been cashier-verified');
-  }
 
   // Verify lead is fabrication staff
   const lead = await User.findOne({
@@ -1590,16 +1587,21 @@ export async function assignFabricationStaff(
   }
 
   if (project.status === ProjectStatus.PAYMENT_PENDING) {
-    projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
-    project.status = ProjectStatus.FABRICATION;
+    if (initialPaymentVerified) {
+      projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
+      project.status = ProjectStatus.FABRICATION;
+    }
   }
 
   await project.save();
 
-  await ProjectItem.updateMany(
-    { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
-    { $set: { status: ProjectStatus.FABRICATION } },
-  );
+  const fabricationUpdatesUnlocked = project.status === ProjectStatus.FABRICATION;
+  if (fabricationUpdatesUnlocked) {
+    await ProjectItem.updateMany(
+      { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
+      { $set: { status: ProjectStatus.FABRICATION } },
+    );
+  }
 
   try {
     await seedFabricationItems(project._id.toString());
@@ -1612,7 +1614,11 @@ export async function assignFabricationStaff(
     actorId,
     targetType: 'project',
     targetId: project._id,
-    details: { fabricationLeadId: input.fabricationLeadId, assistantIds: input.fabricationAssistantIds },
+    details: {
+      fabricationLeadId: input.fabricationLeadId,
+      assistantIds: input.fabricationAssistantIds,
+      fabricationUpdatesUnlocked,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1622,15 +1628,19 @@ export async function assignFabricationStaff(
     input.fabricationLeadId,
     NotificationCategory.FABRICATION,
     'Fabrication Assignment',
-    `You have been assigned as lead for project "${project.title}".`,
+    fabricationUpdatesUnlocked
+      ? `You have been assigned as lead for project "${project.title}". Fabrication updates are now available.`
+      : `You have been assigned as lead for project "${project.title}". Fabrication updates will unlock after the required customer downpayment or full payment is verified.`,
     `/projects/${project._id}`,
   );
 
   await createAndSendNotification(
     project.customerId.toString(),
     NotificationCategory.FABRICATION,
-    'Fabrication Started',
-    `The fabrication team has been assigned for "${project.title}". Fabrication can now begin.`,
+    fabricationUpdatesUnlocked ? 'Fabrication Started' : 'Fabrication Team Assigned',
+    fabricationUpdatesUnlocked
+      ? `The fabrication team has been assigned for "${project.title}". Fabrication can now begin.`
+      : `The fabrication team has been assigned for "${project.title}". Work updates will begin after your required downpayment or full payment is verified.`,
     `/projects/${project._id}`,
   );
 

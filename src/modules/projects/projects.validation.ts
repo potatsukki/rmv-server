@@ -35,7 +35,7 @@ export const createProjectSchema = z.object({
   title: z.string().trim().min(1).max(100),
   serviceType: z.string().trim().min(1).max(100),
   deliveryType: z.nativeEnum(DeliveryType).optional(),
-  description: z.string().trim().min(1).max(2000),
+  description: z.string().trim().max(2000).optional(),
   siteAddress: z.string().trim().min(1).max(500),
   measurements: z.object({
     length: z.number().positive().optional(),

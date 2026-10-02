@@ -101,6 +101,79 @@ async function isPaidScopeReadyForFabricationAssignment(project: any, projectIte
     : true;
 }
 
+export async function activateAssignedFabricationAfterInitialPayment(project: any, projectItemId?: string) {
+  const parentReady = await isPaidScopeReadyForFabricationAssignment(project, projectItemId);
+  const hasAssignedTeam = Boolean(project.fabricationLeadId);
+
+  if (!parentReady || !hasAssignedTeam || project.status !== ProjectStatus.PAYMENT_PENDING) {
+    return { parentReady, activated: false };
+  }
+
+  projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
+  project.status = ProjectStatus.FABRICATION;
+  await project.save();
+  await ProjectItem.updateMany(
+    { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
+    { $set: { status: ProjectStatus.FABRICATION } },
+  );
+
+  return { parentReady, activated: true };
+}
+
+async function handleInitialFabricationPaymentVerified(project: any, plan: any, projectItemId?: string) {
+  if (
+    plan.stages[0]?.status !== PaymentStageStatus.VERIFIED
+    || project.status !== ProjectStatus.PAYMENT_PENDING
+  ) return;
+
+  const { parentReady, activated } = await activateAssignedFabricationAfterInitialPayment(
+    project,
+    projectItemId,
+  );
+  const allVerified = plan.stages.every((stage: any) => stage.status === PaymentStageStatus.VERIFIED);
+
+  await createAndSendNotification(
+    project.customerId,
+    NotificationCategory.SYSTEM,
+    parentReady
+      ? (activated ? 'Fabrication Updates Unlocked' : (allVerified ? 'All Payments Verified' : 'Fabrication Team Assignment Pending'))
+      : 'Item Payment Verified',
+    parentReady
+      ? (activated
+        ? `The required payment for "${project.title}" is verified. The assigned fabrication team can now post work updates.`
+        : (allVerified
+          ? `All payments for "${project.title}" are verified. The engineer will now assign the fabrication team.`
+          : `The required first payments for "${project.title}" are verified. The engineer will now assign the fabrication team before fabrication starts.`))
+      : `Payment for one item in "${project.title}" has been verified. Other items still need their required first payment before the full project enters fabrication.`,
+    `/projects/${project._id}`,
+  );
+
+  if (!parentReady) return;
+
+  if (activated) {
+    const fabricationTeamIds = [
+      project.fabricationLeadId,
+      ...(project.fabricationAssistantIds || []),
+    ].filter(Boolean);
+    await Promise.all(fabricationTeamIds.map((staffId: any) => createAndSendNotification(
+      staffId,
+      NotificationCategory.FABRICATION,
+      'Fabrication Updates Unlocked',
+      `The required customer payment for "${project.title}" has been verified. You can now post fabrication updates.`,
+      `/projects/${project._id}`,
+    )));
+    return;
+  }
+
+  await Promise.all((project.engineerIds || []).map((engineerId: any) => createAndSendNotification(
+    engineerId,
+    NotificationCategory.FABRICATION,
+    'Assign Fabrication Team',
+    `The required first payment for "${project.title}" has been verified. Assign the fabrication team to start fabrication.`,
+    `/projects/${project._id}`,
+  )));
+}
+
 // ── Cashier: Create Payment Plan ──
 
 export async function createPaymentPlan(
@@ -399,37 +472,11 @@ export async function verifyPayment(
     }, receipt.buffer.length > 0 ? receipt.buffer : undefined);
   }
 
-  // Check if the first required payment is verified. Fabrication itself starts only
-  // after the assigned engineer chooses the fabrication team.
-  const firstStageVerified = plan.stages[0]?.status === PaymentStageStatus.VERIFIED;
-  if (firstStageVerified && project.status === ProjectStatus.PAYMENT_PENDING) {
-    const parentReady = await isPaidScopeReadyForFabricationAssignment(project, payment.projectItemId?.toString());
-
-    const allVerified = plan.stages.every(s => s.status === PaymentStageStatus.VERIFIED);
-    await createAndSendNotification(
-      project.customerId,
-      NotificationCategory.SYSTEM,
-      parentReady
-        ? (allVerified ? 'All Payments Verified' : 'Fabrication Team Assignment Pending')
-        : 'Item Payment Verified',
-      parentReady
-        ? (allVerified
-          ? `All payments for "${project.title}" are verified. The engineer will now assign the fabrication team.`
-          : `The required first payments for "${project.title}" are verified. The engineer will now assign the fabrication team before fabrication starts.`)
-        : `Payment for one item in "${project.title}" has been verified. Other items still need their required first payment before the full project enters fabrication.`,
-      `/projects/${project._id}`,
-    );
-
-    if (parentReady) {
-      await Promise.all((project.engineerIds || []).map((engineerId: any) => createAndSendNotification(
-        engineerId,
-        NotificationCategory.FABRICATION,
-        'Assign Fabrication Team',
-        `The required first payment for "${project.title}" has been verified. Assign the fabrication team to start fabrication.`,
-        `/projects/${project._id}`,
-      )));
-    }
-  }
+  await handleInitialFabricationPaymentVerified(
+    project,
+    plan,
+    payment.projectItemId?.toString(),
+  );
 
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
     type: 'payment_verified',
@@ -1217,37 +1264,11 @@ export async function recordCashPayment(
     }, cashReceipt.buffer.length > 0 ? cashReceipt.buffer : undefined);
   }
 
-  // Check if the first required payment is verified. Fabrication itself starts only
-  // after the assigned engineer chooses the fabrication team.
-  const firstStageVerified = plan.stages[0]?.status === PaymentStageStatus.VERIFIED;
-  if (firstStageVerified && project.status === ProjectStatus.PAYMENT_PENDING) {
-    const parentReady = await isPaidScopeReadyForFabricationAssignment(project, plan.projectItemId?.toString());
-
-    const allVerified = plan.stages.every(s => s.status === PaymentStageStatus.VERIFIED);
-    await createAndSendNotification(
-      project.customerId,
-      NotificationCategory.SYSTEM,
-      parentReady
-        ? (allVerified ? 'All Payments Verified' : 'Fabrication Team Assignment Pending')
-        : 'Item Payment Verified',
-      parentReady
-        ? (allVerified
-          ? `All payments for "${project.title}" are verified. The engineer will now assign the fabrication team.`
-          : `The required first payments for "${project.title}" are verified. The engineer will now assign the fabrication team before fabrication starts.`)
-        : `Payment for one item in "${project.title}" has been verified. Other items still need their required first payment before the full project enters fabrication.`,
-      `/projects/${project._id}`,
-    );
-
-    if (parentReady) {
-      await Promise.all((project.engineerIds || []).map((engineerId: any) => createAndSendNotification(
-        engineerId,
-        NotificationCategory.FABRICATION,
-        'Assign Fabrication Team',
-        `The required first payment for "${project.title}" has been verified. Assign the fabrication team to start fabrication.`,
-        `/projects/${project._id}`,
-      )));
-    }
-  }
+  await handleInitialFabricationPaymentVerified(
+    project,
+    plan,
+    plan.projectItemId?.toString(),
+  );
 
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
     type: 'cash_payment_recorded',

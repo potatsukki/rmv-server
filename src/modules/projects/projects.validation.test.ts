@@ -22,6 +22,13 @@ describe('createProjectSchema', () => {
     expect(result.quantity).toBe(1);
   });
 
+  it('accepts a project without a description', () => {
+    const { description: _description, ...withoutDescription } = details;
+    const result = createProjectSchema.parse({ ...withoutDescription, customerId });
+
+    expect(result.description).toBeUndefined();
+  });
+
   it('accepts only supported delivery types', () => {
     expect(createProjectSchema.safeParse({ ...details, customerId, deliveryType: DeliveryType.SHOP_FABRICATED }).success).toBe(true);
     expect(createProjectSchema.safeParse({ ...details, customerId, deliveryType: DeliveryType.ON_SITE_INSTALLATION }).success).toBe(true);
@@ -81,7 +88,7 @@ describe('createProjectSchema', () => {
     expect(createProjectSchema.safeParse({ ...details, customerId, [field]: 'invalid-id' }).success).toBe(false);
   });
 
-  it.each(['title', 'serviceType', 'description', 'siteAddress'])('rejects a blank project %s', (field) => {
+  it.each(['title', 'serviceType', 'siteAddress'])('rejects a blank project %s', (field) => {
     expect(createProjectSchema.safeParse({ ...details, customerId, [field]: '   ' }).success).toBe(false);
   });
 });
