@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const {
   mockPaymentFindById,
   mockProjectFindById,
+  mockProjectItemUpdateMany,
 } = vi.hoisted(() => ({
   mockPaymentFindById: vi.fn(),
   mockProjectFindById: vi.fn(),
+  mockProjectItemUpdateMany: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -15,6 +17,9 @@ vi.mock('../../models/index.js', () => ({
   },
   Project: {
     findById: mockProjectFindById,
+  },
+  ProjectItem: {
+    updateMany: mockProjectItemUpdateMany,
   },
   User: {},
   AuditLog: {},
@@ -65,8 +70,11 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { getPaymentEvidenceTrail } from './payments.service.js';
-import { PaymentMethod, PaymentStageStatus, Role } from '../../utils/constants.js';
+import {
+  activateAssignedFabricationAfterInitialPayment,
+  getPaymentEvidenceTrail,
+} from './payments.service.js';
+import { PaymentMethod, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
 function mockPopulateValue<T>(value: T) {
   return {
@@ -118,5 +126,47 @@ describe('payments.service evidence trail access', () => {
       amountPaid: 1234,
     });
     expect(result.evidenceTrail).toHaveLength(1);
+  });
+});
+
+describe('fabrication activation after initial payment', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('unlocks fabrication updates when payment is ready and a team is already assigned', async () => {
+    const project = {
+      _id: 'project-1',
+      status: ProjectStatus.PAYMENT_PENDING,
+      fabricationLeadId: 'fabricator-1',
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mockProjectItemUpdateMany.mockResolvedValue({ modifiedCount: 2 });
+
+    const result = await activateAssignedFabricationAfterInitialPayment(project);
+
+    expect(result).toEqual({ parentReady: true, activated: true });
+    expect(project.status).toBe(ProjectStatus.FABRICATION);
+    expect(project.save).toHaveBeenCalledOnce();
+    expect(mockProjectItemUpdateMany).toHaveBeenCalledWith(
+      { projectId: 'project-1', status: ProjectStatus.PAYMENT_PENDING },
+      { $set: { status: ProjectStatus.FABRICATION } },
+    );
+  });
+
+  it('keeps updates locked when payment is ready but no team is assigned', async () => {
+    const project = {
+      _id: 'project-1',
+      status: ProjectStatus.PAYMENT_PENDING,
+      fabricationLeadId: null,
+      save: vi.fn(),
+    };
+
+    const result = await activateAssignedFabricationAfterInitialPayment(project);
+
+    expect(result).toEqual({ parentReady: true, activated: false });
+    expect(project.status).toBe(ProjectStatus.PAYMENT_PENDING);
+    expect(project.save).not.toHaveBeenCalled();
+    expect(mockProjectItemUpdateMany).not.toHaveBeenCalled();
   });
 });

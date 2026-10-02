@@ -31,7 +31,7 @@ export interface IProject extends Document {
   videoKeys?: string[];
   sketchKeys?: string[];
   referenceImageKeys?: string[];
-  description: string;
+  description?: string;
   siteAddress: string;
   siteAddressStructured?: {
     street: string;
@@ -131,7 +131,7 @@ const projectSchema = new Schema<IProject>(
     videoKeys: [String],
     sketchKeys: [String],
     referenceImageKeys: [String],
-    description: { type: String, required: true },
+    description: { type: String },
     siteAddress: { type: String, required: true },
     siteAddressStructured: {
       street: { type: String, trim: true },

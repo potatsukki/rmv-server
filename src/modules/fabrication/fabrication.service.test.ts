@@ -132,6 +132,30 @@ describe('createFabricationUpdate', () => {
     expect(mockAuditLogCreate).not.toHaveBeenCalled();
   });
 
+  it('keeps assigned fabricators from posting before the required payment is verified', async () => {
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1',
+      customerId: 'customer-1',
+      title: 'Awaiting Payment Project',
+      status: ProjectStatus.PAYMENT_PENDING,
+      fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [],
+      engineerIds: [],
+    });
+
+    await expect(createFabricationUpdate(
+      {
+        projectId: 'project-1',
+        status: FabricationStatus.MATERIAL_PREP,
+        notes: 'Trying to start early.',
+      },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toThrow('Project is not in fabrication phase');
+
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+  });
+
   it('allows an explicit shop-fabricated project to finish without installation confirmation', async () => {
     const save = vi.fn();
     mockProjectFindById.mockResolvedValue({

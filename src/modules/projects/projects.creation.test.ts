@@ -12,6 +12,10 @@ const mocks = vi.hoisted(() => ({
   reportFind: vi.fn(),
   projectItemCreate: vi.fn(),
   projectItemFindOneAndUpdate: vi.fn(),
+  projectItemFind: vi.fn(),
+  projectItemUpdateMany: vi.fn(),
+  blueprintFindOne: vi.fn(),
+  paymentPlanFindOne: vi.fn(),
   generateProjectNumber: vi.fn(),
 }));
 
@@ -20,14 +24,16 @@ vi.mock('../../models/index.js', () => ({
   ProjectItem: {
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
+    find: mocks.projectItemFind,
+    updateMany: mocks.projectItemUpdateMany,
   },
   Appointment: { findById: mocks.appointmentFindById, create: mocks.appointmentCreate },
   User: { findOne: mocks.userFindOne },
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
 }));
-vi.mock('../../models/Payment.js', () => ({ PaymentPlan: {} }));
-vi.mock('../../models/Blueprint.js', () => ({ Blueprint: {} }));
+vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymentPlanFindOne } }));
+vi.mock('../../models/Blueprint.js', () => ({ Blueprint: { findOne: mocks.blueprintFindOne } }));
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(), notifyRole: vi.fn(),
 }));
@@ -40,7 +46,7 @@ vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() })
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 
-import { createProject, updateProject } from './projects.service.js';
+import { assignFabricationStaff, createProject, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -467,6 +473,49 @@ describe('createProject', () => {
     vi.mocked(verifyFileExists).mockResolvedValue(false);
     await expect(createProject(input, actorId)).rejects.toThrow('Uploaded contract file could not be verified');
     expect(mocks.projectCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('assignFabricationStaff', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.projectItemFind.mockReturnValue({ select: vi.fn().mockResolvedValue([]) });
+    mocks.paymentPlanFindOne.mockResolvedValue(null);
+    mocks.blueprintFindOne.mockReturnValue({
+      sort: vi.fn().mockReturnValue({
+        select: vi.fn().mockResolvedValue({ status: 'approved' }),
+      }),
+    });
+    mocks.userFindOne.mockResolvedValue({ _id: 'fabricator-1' });
+    mocks.auditCreate.mockResolvedValue({});
+  });
+
+  it('assigns the fabrication team before payment while keeping updates locked', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const project = {
+      _id: { toString: () => 'project-1' },
+      customerId: { toString: () => 'customer-1' },
+      title: 'Kitchen Counter',
+      status: ProjectStatus.PAYMENT_PENDING,
+      fabricationAssistantIds: [],
+      save,
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+
+    const result = await assignFabricationStaff(
+      'project-1',
+      { fabricationLeadId: 'fabricator-1', fabricationAssistantIds: [] },
+      actorId,
+    );
+
+    expect(result).toBe(project);
+    expect(project).toMatchObject({
+      status: ProjectStatus.PAYMENT_PENDING,
+      fabricationLeadId: 'fabricator-1',
+      fabricationAssistantIds: [],
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
   });
 });
 
