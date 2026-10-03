@@ -382,6 +382,14 @@ async function ensureAppointmentServiceTypeReports(
 
     let changed = false;
 
+    // The appointment is the source of truth for the current assignee. Repair
+    // older drafts that were created before an appointment reassignment so the
+    // newly assigned sales staff can save and submit them.
+    if (report.salesStaffId?.toString() !== salesStaffId.toString()) {
+      report.salesStaffId = salesStaffId as Types.ObjectId;
+      changed = true;
+    }
+
     if (linkedProjectId && !report.linkedProjectId) {
       report.linkedProjectId = linkedProjectId as Types.ObjectId;
       changed = true;
