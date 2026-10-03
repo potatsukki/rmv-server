@@ -92,6 +92,8 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 import { createFabricationUpdate, getLatestFabricationStatus, seedFabricationItems } from './fabrication.service.js';
+import { createAndSendNotification } from '../notifications/socket.service.js';
+import { sendFabricationUpdateEmail, sendProjectCompletedEmail, sendReadyForDeliveryEmail } from '../notifications/email.service.js';
 
 describe('createFabricationUpdate', () => {
   beforeEach(() => {
@@ -225,6 +227,7 @@ describe('createFabricationUpdate', () => {
     [FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK],
   ])('lets a fully paid on-site project advance from %s to %s before confirmation', async (currentStatus, targetStatus) => {
     setUpOnSiteProject(currentStatus);
+    mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
     await createFabricationUpdate(
       { projectId: 'project-1', status: targetStatus!, notes: 'Work progressing.' },
@@ -236,6 +239,13 @@ describe('createFabricationUpdate', () => {
       status: targetStatus,
       updatedBy: 'lead-1',
     }));
+    expect(sendReadyForDeliveryEmail).not.toHaveBeenCalled();
+    expect(sendFabricationUpdateEmail).toHaveBeenCalledWith('customer@example.com', expect.objectContaining({
+      projectTitle: 'Installation Project',
+    }));
+    const notification = vi.mocked(createAndSendNotification).mock.calls[0];
+    expect(notification[2]).toBe('Fabrication Update');
+    expect(notification[3]).not.toMatch(/deliver/i);
   });
 
   it('lets the fabricator start a fully paid item without schedule confirmation', async () => {
@@ -302,6 +312,7 @@ describe('createFabricationUpdate', () => {
 
   it('lets a fully paid on-site project finish once installation is confirmed', async () => {
     setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+    mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
     await createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.TURNOVER, notes: 'Installation complete.' },
@@ -315,6 +326,14 @@ describe('createFabricationUpdate', () => {
     const project = await mockProjectFindById.mock.results[0].value;
     expect(project.status).toBe(ProjectStatus.COMPLETED);
     expect(project.save).toHaveBeenCalled();
+    expect(sendReadyForDeliveryEmail).not.toHaveBeenCalled();
+    expect(sendProjectCompletedEmail).toHaveBeenCalledWith('customer@example.com', expect.objectContaining({
+      projectTitle: 'Installation Project',
+    }));
+    const notification = vi.mocked(createAndSendNotification).mock.calls[0];
+    expect(notification[2]).toBe('Project Complete!');
+    expect(notification[3]).toContain('installed and turned over');
+    expect(notification[3]).not.toMatch(/deliver/i);
   });
 
   it('advertises Done as the confirmation gate while leaving the paid first stage available', async () => {
