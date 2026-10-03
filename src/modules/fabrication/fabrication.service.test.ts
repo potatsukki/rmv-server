@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AppError } from '../../utils/appError.js';
+import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   DeliveryType,
   FabricationStatus,
+  PaymentStageStatus,
   ProjectStatus,
   Role,
 } from '../../utils/constants.js';
@@ -14,6 +15,9 @@ const {
   mockPaymentPlanFindOne,
   mockAuditLogCreate,
   mockUserFindById,
+  mockProjectItemFindOne,
+  mockProjectItemUpdate,
+  mockProjectItemCount,
   mockItemCount, mockItemInsert, mockReportFindOne,
 } = vi.hoisted(() => ({
   mockProjectFindById: vi.fn(),
@@ -22,6 +26,9 @@ const {
   mockPaymentPlanFindOne: vi.fn(),
   mockAuditLogCreate: vi.fn(),
   mockUserFindById: vi.fn(),
+  mockProjectItemFindOne: vi.fn(),
+  mockProjectItemUpdate: vi.fn(),
+  mockProjectItemCount: vi.fn(),
   mockItemCount: vi.fn(), mockItemInsert: vi.fn(), mockReportFindOne: vi.fn(),
 }));
 
@@ -30,6 +37,11 @@ vi.mock('../../models/index.js', () => ({
   VisitReport: { findOne: mockReportFindOne },
   Project: {
     findById: mockProjectFindById,
+  },
+  ProjectItem: {
+    findOne: mockProjectItemFindOne,
+    findByIdAndUpdate: mockProjectItemUpdate,
+    countDocuments: mockProjectItemCount,
   },
   FabricationUpdate: {
     findOne: mockFabricationUpdateFindOne,
@@ -79,7 +91,7 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { createFabricationUpdate, seedFabricationItems } from './fabrication.service.js';
+import { createFabricationUpdate, getLatestFabricationStatus, seedFabricationItems } from './fabrication.service.js';
 
 describe('createFabricationUpdate', () => {
   beforeEach(() => {
@@ -105,6 +117,7 @@ describe('createFabricationUpdate', () => {
     mockFabricationUpdateCreate.mockResolvedValue({ _id: 'update-1' });
     mockAuditLogCreate.mockResolvedValue({});
     mockUserFindById.mockResolvedValue(null);
+    mockProjectItemCount.mockResolvedValue(0);
   });
 
   it('rejects done before installation confirmation without persisting an update', async () => {
@@ -181,7 +194,7 @@ describe('createFabricationUpdate', () => {
     expect(save).toHaveBeenCalled();
   });
 
-  it('requires installation confirmation before an on-site project starts site preparation', async () => {
+  function setUpOnSiteProject(currentStatus: FabricationStatus | null = null, confirmed = false) {
     mockProjectFindById.mockResolvedValue({
       _id: 'project-1',
       customerId: 'customer-1',
@@ -191,17 +204,137 @@ describe('createFabricationUpdate', () => {
       fabricationLeadId: { toString: () => 'lead-1' },
       fabricationAssistantIds: [],
       engineerIds: [],
-      installationConfirmedAt: null,
+      installationConfirmedAt: confirmed ? new Date() : null,
+      save: vi.fn(),
     });
-    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
+    mockFabricationUpdateFindOne.mockReturnValue({
+      sort: vi.fn().mockResolvedValue(currentStatus ? { status: currentStatus } : null),
+    });
+    mockPaymentPlanFindOne.mockResolvedValue({
+      stages: [{ label: 'Full Payment', status: PaymentStageStatus.VERIFIED }],
+    });
+  }
+
+  it.each([
+    [null, FabricationStatus.SITE_PREPARATION],
+    [FabricationStatus.SITE_PREPARATION, FabricationStatus.MEASUREMENT_LAYOUT],
+    [FabricationStatus.MEASUREMENT_LAYOUT, FabricationStatus.MATERIAL_PREP],
+    [FabricationStatus.MATERIAL_PREP, FabricationStatus.FABRICATION_INSTALLATION],
+    [FabricationStatus.FABRICATION_INSTALLATION, FabricationStatus.WELDING_ASSEMBLY],
+    [FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.FINISHING],
+    [FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK],
+  ])('lets a fully paid on-site project advance from %s to %s before confirmation', async (currentStatus, targetStatus) => {
+    setUpOnSiteProject(currentStatus);
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: targetStatus!, notes: 'Work progressing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockFabricationUpdateCreate).toHaveBeenCalledWith(expect.objectContaining({
+      status: targetStatus,
+      updatedBy: 'lead-1',
+    }));
+  });
+
+  it('lets the fabricator start a fully paid item without schedule confirmation', async () => {
+    setUpOnSiteProject();
+    mockProjectItemFindOne.mockResolvedValue({
+      _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
+    });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.SITE_PREPARATION, notes: 'Mobilizing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockPaymentPlanFindOne).toHaveBeenCalledWith({ projectId: 'project-1', projectItemId: 'item-1' });
+    expect(mockFabricationUpdateCreate).toHaveBeenCalledWith(expect.objectContaining({
+      projectItemId: 'item-1', status: FabricationStatus.SITE_PREPARATION,
+    }));
+  });
+
+  it('requires the selected item to be confirmed at Done even if its parent is confirmed', async () => {
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+    mockProjectItemFindOne.mockResolvedValue({
+      _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
+    });
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.TURNOVER, notes: 'Installation complete.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED });
+
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+    expect(mockProjectItemUpdate).not.toHaveBeenCalled();
+  });
+
+  it('still blocks site preparation when full payment is not cashier-verified', async () => {
+    setUpOnSiteProject();
+    mockPaymentPlanFindOne.mockResolvedValue({
+      stages: [{ label: 'Full Payment', status: PaymentStageStatus.PROOF_SUBMITTED }],
+    });
 
     await expect(createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.SITE_PREPARATION, notes: 'Mobilizing.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
-    )).rejects.toThrow('Customer must confirm the installation schedule before starting site preparation');
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_PAYMENT_GATE });
 
     expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+  });
+
+  it('requires installation confirmation at Done even when the on-site project is fully paid', async () => {
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.TURNOVER, notes: 'Installation complete.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED });
+
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+    expect(mockAuditLogCreate).not.toHaveBeenCalled();
+  });
+
+  it('lets a fully paid on-site project finish once installation is confirmed', async () => {
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.TURNOVER, notes: 'Installation complete.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockFabricationUpdateCreate).toHaveBeenCalledWith(expect.objectContaining({
+      status: FabricationStatus.TURNOVER,
+    }));
+    const project = await mockProjectFindById.mock.results[0].value;
+    expect(project.status).toBe(ProjectStatus.COMPLETED);
+    expect(project.save).toHaveBeenCalled();
+  });
+
+  it('advertises Done as the confirmation gate while leaving the paid first stage available', async () => {
+    mockProjectFindById.mockReturnValue({
+      select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.ON_SITE_INSTALLATION }),
+    });
+    mockFabricationUpdateFindOne.mockReturnValue({
+      sort: vi.fn().mockReturnValue({ populate: vi.fn().mockResolvedValue(null) }),
+    });
+    mockPaymentPlanFindOne.mockResolvedValue({
+      stages: [{ label: 'Full Payment', status: PaymentStageStatus.VERIFIED }],
+    });
+
+    const result = await getLatestFabricationStatus('project-1', 'admin-1', [Role.ADMIN]);
+
+    expect(result.confirmationGateStatus).toBe(FabricationStatus.TURNOVER);
+    expect(result.currentStatus).toBe(FabricationStatus.QUEUED);
+    expect(result.allowedTransitions).toEqual([FabricationStatus.SITE_PREPARATION]);
+    expect(result.paymentGate.allPaid).toBe(true);
+    expect(result.paymentGate.stageGates[FabricationStatus.SITE_PREPARATION].blocked).toBe(false);
   });
 });
 

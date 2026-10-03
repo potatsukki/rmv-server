@@ -139,10 +139,10 @@ export async function createFabricationUpdate(
     }
   }
 
-  // On-site work needs the customer's schedule confirmation before the first site stage.
+  // Schedule confirmation gates completion, allowing paid on-site work to progress first.
   // Legacy projects without a delivery type retain the previous confirmation gate at Done.
   const requiresInstallationConfirmation = (
-    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.SITE_PREPARATION
+    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.TURNOVER
   ) || (
     !deliveryType && input.status === FabricationStatus.DONE
   );
@@ -156,9 +156,7 @@ export async function createFabricationUpdate(
 
     if (!installationConfirmed) {
       throw AppError.badRequest(
-        deliveryType === DeliveryType.ON_SITE_INSTALLATION
-          ? 'Customer must confirm the installation schedule before starting site preparation'
-          : 'Customer must confirm the installation schedule before marking the project as Done',
+        'Customer must confirm the installation schedule before marking the project as Done',
         ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED,
         { helpPath: '/help/projects-fabrication/fabrication-lifecycle#checklist' },
       );
@@ -631,7 +629,7 @@ export async function getLatestFabricationStatus(
     lifecycleStatuses: getFabricationStageOrder(deliveryType),
     requiresInstallationConfirmation: deliveryType !== DeliveryType.SHOP_FABRICATED,
     confirmationGateStatus: deliveryType === DeliveryType.ON_SITE_INSTALLATION
-      ? FabricationStatus.SITE_PREPARATION
+      ? FabricationStatus.TURNOVER
       : !deliveryType
         ? FabricationStatus.DONE
         : null,
