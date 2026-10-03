@@ -199,12 +199,47 @@ describe('autoCreateDraft selected design', () => {
     expect(untouchedDraft.save).toHaveBeenCalledOnce();
   });
 
+  it('repairs stale draft ownership from the current appointment assignee', async () => {
+    const existingDraft = {
+      status: 'draft',
+      serviceType: ServiceType.RAILINGS,
+      salesStaffId: 'sales-old',
+      lineItems: [],
+      photoKeys: [],
+      videoKeys: [],
+      sketchKeys: [],
+      referenceImageKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mockAppointmentFindById.mockReturnValueOnce(selectLeanResult({
+      serviceTypes: [ServiceType.RAILINGS],
+    }));
+    mockVisitReportFind.mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([existingDraft]),
+    });
+
+    await autoCreateDraft(
+      'appointment-1',
+      'customer-1',
+      'sales-current',
+      'consultation',
+      undefined,
+      [ServiceType.RAILINGS],
+    );
+
+    expect(existingDraft.salesStaffId).toBe('sales-current');
+    expect(existingDraft.save).toHaveBeenCalledOnce();
+    expect(mockVisitReportCreate).not.toHaveBeenCalled();
+  });
+
   it('collapses duplicate drafts for the same booked service into one item', async () => {
     const emptyDuplicate = {
       _id: 'report-empty',
       status: 'draft',
       visitType: 'consultation',
       serviceType: ServiceType.KITCHEN_COUNTER,
+      salesStaffId: 'sales-1',
       lineItems: [],
       photoKeys: [],
       videoKeys: [],
@@ -218,6 +253,7 @@ describe('autoCreateDraft selected design', () => {
       status: 'draft',
       visitType: 'consultation',
       serviceType: ServiceType.KITCHEN_COUNTER,
+      salesStaffId: 'sales-1',
       notes: 'Keep the customer measurements on this item.',
       lineItems: [],
       photoKeys: [],
