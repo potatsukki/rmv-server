@@ -84,6 +84,14 @@ export async function verifyFileExists(key: string): Promise<boolean> {
   }
 }
 
+export async function validatePaymentImage(key: string): Promise<boolean> {
+  try {
+    const metadata = await r2Client.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+    return ['image/png', 'image/jpeg', 'image/webp'].includes(metadata.ContentType || '')
+      && (metadata.ContentLength || 0) > 0 && (metadata.ContentLength || 0) <= 5 * 1024 * 1024;
+  } catch { return false; }
+}
+
 // ── Delete File ──
 
 export async function deleteFile(key: string): Promise<void> {

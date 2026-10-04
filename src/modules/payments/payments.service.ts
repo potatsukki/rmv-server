@@ -121,7 +121,7 @@ export async function activateAssignedFabricationAfterInitialPayment(project: an
   return { parentReady, activated: true };
 }
 
-async function handleInitialFabricationPaymentVerified(project: any, plan: any, projectItemId?: string) {
+export async function handleInitialFabricationPaymentVerified(project: any, plan: any, projectItemId?: string) {
   if (
     plan.stages[0]?.status !== PaymentStageStatus.VERIFIED
     || project.status !== ProjectStatus.PAYMENT_PENDING
@@ -332,7 +332,10 @@ export async function submitPaymentProof(
   ip?: string,
   ua?: string,
 ) {
-  throw AppError.badRequest('Manual proof upload is no longer supported. Please pay via QR.');
+  if (input.method !== PaymentMethod.GCASH) throw AppError.badRequest('Use GCash for manual payment submission');
+  const { submitGcash } = await import('./gcash.service.js');
+  const { submitGcashSchema } = await import('./gcash.validation.js');
+  return submitGcash(submitGcashSchema.parse(input), customerId);
 }
 
 // ── Cashier: Verify Payment ──
@@ -618,7 +621,8 @@ export async function listPaymentsByProject(
   const payments = await Payment.find(itemScopedQuery(projectId, projectItemId))
     .populate('verifiedBy', 'firstName lastName')
     .sort({ createdAt: -1 });
-  return payments;
+  return payments.filter((payment) => payment.method !== PaymentMethod.GCASH || actorRoles.includes(Role.CASHIER)
+    || (actorRoles.includes(Role.CUSTOMER) && payment.customerId?.toString() === actorId));
 }
 
 // ── List Payments for Cashier (pending verification) ──
@@ -626,18 +630,22 @@ export async function listPaymentsByProject(
 export async function listPendingPayments(query: {
   page?: string;
   limit?: string;
-}) {
+}, flaggedOnly = false) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
 
   const [payments] = await Promise.all([
-    Payment.find({ status: PaymentStageStatus.PROOF_SUBMITTED })
+    Payment.find(flaggedOnly ? { method: PaymentMethod.GCASH, duplicateReference: true, paymentStatus: 'rejected' }
+      : { status: PaymentStageStatus.PROOF_SUBMITTED })
+      .populate('customerId', 'firstName lastName email phone')
+      .populate('bookingId', 'appointmentNumber serviceTypes customerAddress date slotCode')
+      .populate('rejectedBy', 'firstName lastName')
       .populate({
         path: 'projectId',
-        select: 'title customerId',
+        select: 'title projectNumber customerId',
         populate: { path: 'customerId', select: 'firstName lastName' },
       })
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: flaggedOnly ? -1 : 1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
@@ -670,15 +678,18 @@ export async function listPendingPayments(query: {
         ? populatedProject.customerId
         : null;
 
-    const customerName = customer
+    const gcashCustomer = payment.customerId && typeof payment.customerId === 'object' ? payment.customerId : null;
+    const customerName = gcashCustomer ? `${gcashCustomer.firstName} ${gcashCustomer.lastName}` : customer
       ? `${String(customer.firstName || '').trim()} ${String(customer.lastName || '').trim()}`.trim()
       : 'Unknown Customer';
-    const projectTitle = populatedProject?.title || 'Unknown Project';
+    const projectTitle = payment.bookingId ? 'Ocular Visit Fee' : populatedProject?.title || 'Unknown Project';
 
     return {
       ...payment,
       customerName,
       projectTitle,
+      bookingReference: payment.bookingId?.appointmentNumber || populatedProject?.projectNumber || String(populatedProject?._id || ''),
+      service: payment.bookingId?.serviceTypes?.join(', ') || projectTitle,
     };
   });
 }
@@ -693,6 +704,12 @@ export async function getPaymentById(
   const payment = await Payment.findById(paymentId)
     .populate('verifiedBy', 'firstName lastName');
   if (!payment) throw AppError.notFound('Payment not found');
+  if (payment.method === PaymentMethod.GCASH || payment.bookingId) {
+    if (!actorRoles.includes(Role.CASHIER) && !(actorRoles.includes(Role.CUSTOMER) && payment.customerId?.toString() === actorId)) {
+      throw AppError.forbidden('Only the customer or a cashier can view GCash payment details');
+    }
+    return payment;
+  }
   await assertPaymentProjectAccess(payment.projectId.toString(), actorId, actorRoles);
   return payment;
 }
@@ -712,6 +729,30 @@ export async function getPaymentEvidenceTrail(
   };
 }
 
+export async function issueGcashReceipt(payment: import('../../models/Payment.js').IPayment) {
+  const customer = await User.findById(payment.customerId);
+  const verifier = await User.findById(payment.verifiedBy);
+  const project = payment.projectId ? await Project.findById(payment.projectId) : null;
+  const booking = payment.bookingId ? await Appointment.findById(payment.bookingId) : null;
+  const plan = payment.projectId ? await PaymentPlan.findOne({ 'stages.stageId': payment.stageId }) : null;
+  const totalPaid = plan ? plan.stages.reduce((sum, stage) => sum + stage.amountPaid + stage.creditApplied, 0) : payment.amountPaid;
+  const receiptNumber = await generateNextReceiptNumber();
+  const receipt = await generateAndUploadReceipt({
+    receiptNumber, customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
+    customerEmail: customer?.email || '', customerAddress: '',
+    projectTitle: project?.title || `Booking ${booking?.appointmentNumber || payment.bookingId}`,
+    stageName: booking ? 'Ocular Visit Fee' : plan?.stages.find((stage) => stage.stageId === payment.stageId)?.label || 'Payment', amountPaid: payment.amountPaid,
+    paymentMethod: payment.method, referenceNumber: payment.referenceNumber, creditApplied: 0, excessCredit: 0,
+    verifiedByName: verifier ? `${verifier.firstName} ${verifier.lastName}` : 'Cashier', verifiedAt: payment.verifiedAt!,
+    totalProjectCost: plan?.totalAmount || payment.amountRequired || payment.amountPaid, totalPaid,
+    totalOutstanding: plan ? Math.max(0, plan.totalAmount - totalPaid) : 0,
+    cashierSignatureUrl: payment.cashierSignatureKey ? await generateDownloadUrl(payment.cashierSignatureKey) : undefined,
+  });
+  payment.receiptNumber = receiptNumber;
+  if (receipt.key) payment.receiptKey = receipt.key;
+  await payment.save();
+}
+
 // ── Customer: Payment History (all payments) ──
 
 export async function getMyPaymentHistory(customerId: string) {
@@ -724,6 +765,8 @@ export async function getMyPaymentHistory(customerId: string) {
   const projectPayments = await Payment.find({ projectId: { $in: projectIds } })
     .sort({ createdAt: -1 })
     .lean();
+  const bookingPayments = await Payment.find({ customerId, bookingId: { $exists: true } })
+    .populate('verifiedBy', 'firstName lastName').populate('rejectedBy', 'firstName lastName').sort({ createdAt: -1 }).lean();
 
   // Get all ocular fee appointments (paid or pending)
   const ocularAppointments = await Appointment.find({
@@ -731,6 +774,7 @@ export async function getMyPaymentHistory(customerId: string) {
     type: 'ocular',
     ocularFee: { $gt: 0 },
     ocularFeeStatus: { $in: ['verified', 'pending', 'proof_submitted', 'declined'] },
+    _id: { $nin: bookingPayments.flatMap((payment) => payment.bookingId ? [payment.bookingId.toString()] : []) },
   })
     .select('date ocularFee ocularFeePaid ocularFeeStatus ocularFeePaymentMethod formattedAddress createdAt')
     .sort({ createdAt: -1 })
@@ -748,6 +792,13 @@ export async function getMyPaymentHistory(customerId: string) {
     description: string;
     date: string;
     declineReason?: string;
+    rejectionReason?: string;
+    duplicateReference?: boolean;
+    rejectionSource?: 'system' | 'cashier';
+    verifiedAt?: Date;
+    rejectedAt?: Date;
+    verifiedBy?: unknown;
+    rejectedBy?: unknown;
   }> = [];
 
   for (const p of projectPayments) {
@@ -755,13 +806,15 @@ export async function getMyPaymentHistory(customerId: string) {
       _id: p._id.toString(),
       type: 'project_payment',
       amount: p.amountPaid,
-      status: p.status,
+      status: p.paymentStatus || p.status,
       method: p.method,
       referenceNumber: p.referenceNumber,
       receiptNumber: p.receiptNumber,
       description: projectMap.get(p.projectId.toString()) || 'Project Payment',
       date: (p.createdAt as Date).toISOString(),
       declineReason: p.declineReason,
+      rejectionReason: p.rejectionReason, duplicateReference: p.duplicateReference, rejectionSource: p.rejectionSource,
+      rejectedAt: p.rejectedAt, rejectedBy: p.rejectedBy,
     });
   }
 
@@ -775,6 +828,14 @@ export async function getMyPaymentHistory(customerId: string) {
       description: `Ocular Fee — ${a.formattedAddress || a.date}`,
       date: (a.createdAt as Date).toISOString(),
     });
+  }
+  for (const payment of bookingPayments) {
+    history.push({ _id: payment._id.toString(), type: 'ocular_fee', amount: payment.amountPaid,
+      status: payment.paymentStatus || payment.status, method: payment.method, referenceNumber: payment.referenceNumber,
+      receiptNumber: payment.receiptNumber, description: 'Booking Payment', date: payment.createdAt.toISOString(),
+      declineReason: payment.declineReason, verifiedAt: payment.verifiedAt, rejectedAt: payment.rejectedAt,
+      rejectionReason: payment.rejectionReason, duplicateReference: payment.duplicateReference, rejectionSource: payment.rejectionSource,
+      verifiedBy: payment.verifiedBy, rejectedBy: payment.rejectedBy });
   }
 
   // Sort by date descending
@@ -1066,6 +1127,7 @@ export async function simulateStagePayment(
   ip?: string,
   ua?: string,
 ) {
+  if (env.NODE_ENV !== 'development') throw AppError.forbidden('Payment simulation is only available in development');
   const plan = await PaymentPlan.findOne({ 'stages.stageId': stageId });
   if (!plan) throw AppError.notFound('Payment stage not found');
 
@@ -1181,6 +1243,10 @@ export async function recordCashPayment(
     projectItemId: plan.projectItemId,
     stageId: stage.stageId,
     method: PaymentMethod.CASH,
+    customerId: project.customerId,
+    amountRequired: outstandingCents / 100,
+    paymentStatus: 'paid',
+    paymentDate: new Date(),
     amountPaid,
     status: PaymentStageStatus.VERIFIED,
     verifiedBy: actorId as unknown as Types.ObjectId,

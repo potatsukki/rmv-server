@@ -48,6 +48,16 @@ import type { Types } from 'mongoose';
 const TZ = 'Asia/Manila';
 const ESTIMATED_CONSULTATION_MINUTES = 30;
 
+export async function assertBookingReadyForGcashApproval(appointment: import('../../models/Appointment.js').IAppointment) {
+  if (appointment.status === AppointmentStatus.CONFIRMED) return;
+  if (appointment.status !== AppointmentStatus.REQUESTED) throw AppError.badRequest('Booking schedule must be resolved before payment approval');
+  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+  if (!appointment.salesStaffId) throw AppError.badRequest('Booking has no assigned sales staff');
+  if (appointment.date < format(toZonedTime(new Date(), TZ), 'yyyy-MM-dd')) throw AppError.badRequest('Booking date has passed. Resolve the schedule before approval.');
+  await assertSlotAvailable(appointment.date, appointment.slotCode, appointment.type, appointment._id.toString());
+  await assertSalesAvailable(appointment.salesStaffId.toString(), appointment.date, appointment.slotCode, appointment.type, appointment._id.toString());
+}
+
 function formatQueueNumber(sequence: number) {
   return `Q-${String(sequence).padStart(3, '0')}`;
 }
@@ -1436,6 +1446,8 @@ export async function customerSubmitOcularLocation(
     throw AppError.badRequest('This is not an ocular appointment');
   }
 
+  if (appointment.ocularFeeStatus === 'proof_submitted' || appointment.ocularFeePaid) throw AppError.conflict('Location cannot change while payment is being verified or already paid');
+
   const latestRecommendedSchedule = await getRecommendedOcularScheduleForAppointment(appointment);
   if (latestRecommendedSchedule?.recommendedOcularDate && latestRecommendedSchedule.recommendedOcularSlot) {
     const recommendedOcularDate = latestRecommendedSchedule.recommendedOcularDate.toISOString().split('T')[0];
@@ -1488,6 +1500,8 @@ export async function customerSubmitOcularLocation(
   const isWithinNCR = ocularVisitData.ocularFeeBreakdown.isWithinNCR;
   if (!isWithinNCR && ocularVisitData.ocularFee > 0) {
     appointment.ocularFeeStatus = 'pending';
+    appointment.paymentStatus = 'unpaid';
+    appointment.bookingStatus = 'pending_payment';
   }
 
   await appointment.save();
@@ -1613,6 +1627,11 @@ export async function agentFinalizeOcular(
     userAgent: ua,
   });
 
+  await completePaidOcularBooking(appointment);
+  return appointment;
+}
+
+export async function completePaidOcularBooking(appointment: import('../../models/Appointment.js').IAppointment) {
   // Notify customer
   const customerUser = await User.findById(appointment.customerId);
   if (customerUser) {
@@ -1633,7 +1652,7 @@ export async function agentFinalizeOcular(
 
   // Notify sales staff
   await createAndSendNotification(
-    resolvedSalesStaffId,
+    appointment.salesStaffId!,
     NotificationCategory.APPOINTMENT,
     'Ocular Visit Assigned',
     `You have been assigned an ocular visit on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
@@ -1684,7 +1703,7 @@ export async function agentFinalizeOcular(
   await autoCreateVisitReport(
     appointment._id,
     appointment.customerId,
-    salesStaff._id,
+    appointment.salesStaffId!,
     'ocular',
     consultationSiteDetails,
     consultationSiteDetails?.serviceTypes || appointment.serviceTypes,
@@ -1693,7 +1712,6 @@ export async function agentFinalizeOcular(
     consultationProject?._id,
   );
 
-  return appointment;
 }
 
 // ── Complete Appointment ──
@@ -2442,6 +2460,8 @@ export async function createOcularFeeCheckout(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeeStatus === 'proof_submitted') throw AppError.conflict('A payment is awaiting verification');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only pay for your own appointments');
@@ -2508,6 +2528,8 @@ export async function requestOcularCashPayment(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeeStatus === 'proof_submitted') throw AppError.conflict('A payment is awaiting verification');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only pay for your own appointments');
@@ -2566,8 +2588,10 @@ export async function requestOcularCashPayment(
 
 // ⚠️ TESTING ONLY: Simulate payment without PayMongo. Remove for production.
 export async function simulateOcularFeePayment(appointmentId: string, customerId: string) {
+  if (process.env.NODE_ENV !== 'development') throw AppError.forbidden('Payment simulation is only available in development');
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only pay for your own appointments');
   }
@@ -2588,6 +2612,7 @@ export async function verifyOcularFeeCheckout(appointmentId: string, customerId:
   const appointment = await Appointment.findById(appointmentId)
     .populate('customerId', 'customerNumber firstName lastName email');
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
   if (appointment.customerId._id?.toString() !== customerId && appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only verify your own appointments');
   }
@@ -2667,6 +2692,7 @@ export async function handlePaymongoPayment(checkoutSessionId: string) {
     return null;
   }
 
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) return appointment;
   if (appointment.ocularFeePaid) {
     // Already verified — idempotent
     return appointment;
@@ -2725,6 +2751,7 @@ export async function submitOcularFeeProof(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only submit proof for your own appointments');
@@ -2781,6 +2808,7 @@ export async function verifyOcularFee(
   const appointment = await Appointment.findById(appointmentId)
     .populate('customerId', 'customerNumber firstName lastName email');
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.ocularFeeStatus !== 'proof_submitted') {
     throw AppError.badRequest('No proof submitted to verify');
@@ -2835,6 +2863,7 @@ export async function declineOcularFee(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.ocularFeeStatus !== 'proof_submitted') {
     throw AppError.badRequest('No proof submitted to decline');
@@ -2872,9 +2901,10 @@ export async function declineOcularFee(
 
 export async function listPendingOcularFees() {
   const appointments = await Appointment.find({
+    ocularFeePaymentMethod: { $ne: PaymentMethod.GCASH },
     type: AppointmentType.OCULAR,
     'ocularFeeBreakdown.isWithinNCR': false,
-    ocularFeeStatus: { $in: ['proof_submitted', 'pending', 'declined'] },
+    ocularFeeStatus: { $in: ['proof_submitted', 'pending', 'declined', 'cash_pending'] },
     status: { $ne: AppointmentStatus.CANCELLED },
   })
     .populate('customerId', 'customerNumber firstName lastName email phone')
@@ -2895,8 +2925,16 @@ export async function recordOcularFee(
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
-  const isAgent = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT].includes(role));
+  if (input.paymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments require customer submission and cashier verification');
+  if (appointment.paymentStatus && !actorRoles.includes(Role.CASHIER)) throw AppError.forbidden('Only a cashier can record this cash payment');
+  if (appointment.paymentStatus && input.paymentMethod === PaymentMethod.CASH) {
+    const { recordBookingCash } = await import('../payments/gcash.service.js');
+    await recordBookingCash(appointmentId, actorId, actorRoles);
+    return Appointment.findById(appointmentId);
+  }
+  const isAgent = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT, Role.CASHIER].includes(role));
   if (!isAgent && appointment.salesStaffId?.toString() !== actorId) {
     throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
   }
@@ -2912,6 +2950,7 @@ export async function recordOcularFee(
   appointment.ocularFeePaymentMethod = input.paymentMethod;
   appointment.ocularFeePaid = true;
   appointment.ocularFeeStatus = 'verified';
+  if (appointment.paymentStatus) appointment.paymentStatus = 'paid';
   appointment.ocularFeeVerifiedBy = actorId as unknown as Types.ObjectId;
   await appointment.save();
 

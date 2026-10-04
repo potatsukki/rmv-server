@@ -2,6 +2,7 @@ import { Config, Holiday, AuditLog, BlockedSlot, User } from '../../models/index
 import { notifyAllUsers } from '../notifications/socket.service.js';
 import { NotificationCategory } from '../../utils/constants.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
+import { gcashSettingsSchema } from '../payments/gcash.validation.js';
 import { AuditAction } from '../../utils/constants.js';
 import type {
   UpdateConfigInput,
@@ -107,6 +108,11 @@ export async function upsertConfig(
   ua?: string,
 ) {
   const existing = await Config.findOne({ key });
+  if (key === 'gcash_payment') {
+    const parsed = gcashSettingsSchema.safeParse(input.value);
+    if (!parsed.success) throw AppError.badRequest('Invalid GCash account information');
+    input.value = parsed.data;
+  }
   const hasPrevious = !!existing;
   const changed = !existing || !valuesEqual(existing.value, input.value) || existing.description !== input.description;
 

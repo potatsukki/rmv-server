@@ -157,6 +157,10 @@ export async function notifyRole(
   }
 }
 
+export function emitUserEvent(userId: string, event: string, payload: Record<string, unknown>): void {
+  if (io) io.to(`user:${userId}`).emit(event, payload);
+}
+
 export function emitRoleEvent(
   role: Role,
   event: string,

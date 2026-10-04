@@ -81,6 +81,18 @@ export const PaymentPlan = mongoose.model<IPaymentPlan>('PaymentPlan', paymentPl
 export interface IPayment extends Document {
   _id: Types.ObjectId;
   projectId: Types.ObjectId;
+  bookingId?: Types.ObjectId;
+  customerId?: Types.ObjectId;
+  amountRequired?: number;
+  paymentDate?: Date;
+  paymentStatus?: 'unpaid' | 'pending_verification' | 'paid' | 'rejected';
+  gcashReferenceNumber?: string;
+  activeSubmissionKey?: string;
+  rejectionReason?: string;
+  duplicateReference?: boolean;
+  rejectionSource?: 'system' | 'cashier';
+  rejectedBy?: Types.ObjectId | null;
+  rejectedAt?: Date;
   projectItemId?: Types.ObjectId;
   stageId: string;
   method: PaymentMethod;
@@ -143,7 +155,19 @@ const paymentEvidenceSchema = new Schema(
 
 const paymentSchema = new Schema<IPayment>(
   {
-    projectId: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+    projectId: { type: Schema.Types.ObjectId, ref: 'Project', required: function () { return !this.bookingId; } },
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
+    customerId: { type: Schema.Types.ObjectId, ref: 'User' },
+    amountRequired: { type: Number, min: 0 },
+    paymentDate: { type: Date },
+    paymentStatus: { type: String, enum: ['unpaid', 'pending_verification', 'paid', 'rejected'] },
+    gcashReferenceNumber: { type: String },
+    activeSubmissionKey: { type: String },
+    rejectionReason: { type: String },
+    duplicateReference: { type: Boolean },
+    rejectionSource: { type: String, enum: ['system', 'cashier'] },
+    rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    rejectedAt: { type: Date },
     projectItemId: { type: Schema.Types.ObjectId, ref: 'ProjectItem' },
     stageId: { type: String, required: true },
     method: { type: String, enum: Object.values(PaymentMethod), required: true },
@@ -174,5 +198,9 @@ paymentPlanSchema.index({ projectItemId: 1 }, { unique: true, sparse: true });
 paymentSchema.index({ projectId: 1, stageId: 1 });
 paymentSchema.index({ projectItemId: 1, stageId: 1 });
 paymentSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
+paymentSchema.index({ gcashReferenceNumber: 1 }, { unique: true, sparse: true });
+paymentSchema.index({ method: 1, referenceNumber: 1 });
+paymentSchema.index({ activeSubmissionKey: 1 }, { unique: true, sparse: true });
+paymentSchema.index({ bookingId: 1, createdAt: -1 });
 
 export const Payment = mongoose.model<IPayment>('Payment', paymentSchema);
