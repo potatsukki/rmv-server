@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Project } from '../../models/Project.js';
 import { ProjectItem } from '../../models/ProjectItem.js';
-import { createProjectSchema } from './projects.validation.js';
+import { createProjectSchema, updateProjectSiteAddressSchema } from './projects.validation.js';
 import { DeliveryType } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -15,6 +15,14 @@ const details = {
 };
 
 describe('createProjectSchema', () => {
+  it('allows sales to create a project before the fabricator supplies its site address', () => {
+    const { siteAddress: _siteAddress, ...withoutAddress } = details;
+    const parsed = createProjectSchema.parse({ ...withoutAddress, customerId });
+    expect(parsed.siteAddress).toBeUndefined();
+    const project = new Project({ ...parsed, projectNumber: 'RMV-2026-0002', salesStaffId: 'cccccccccccccccccccccccc' });
+    expect(project.validateSync()).toBeUndefined();
+  });
+
   it('accepts an independent project without an appointment', () => {
     const result = createProjectSchema.parse({ ...details, customerId });
     expect(result.customerId).toBe(customerId);
@@ -90,6 +98,17 @@ describe('createProjectSchema', () => {
 
   it.each(['title', 'serviceType', 'siteAddress'])('rejects a blank project %s', (field) => {
     expect(createProjectSchema.safeParse({ ...details, customerId, [field]: '   ' }).success).toBe(false);
+  });
+});
+
+describe('updateProjectSiteAddressSchema', () => {
+  it('trims and accepts only the site address', () => {
+    expect(updateProjectSiteAddressSchema.parse({ siteAddress: '  123 Site Street  ' })).toEqual({ siteAddress: '123 Site Street' });
+    expect(updateProjectSiteAddressSchema.safeParse({ siteAddress: '123 Site Street', title: 'Changed title' }).success).toBe(false);
+  });
+
+  it.each(['', '   ', 'x'.repeat(501)])('rejects an empty or oversized site address', (siteAddress) => {
+    expect(updateProjectSiteAddressSchema.safeParse({ siteAddress }).success).toBe(false);
   });
 });
 

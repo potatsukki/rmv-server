@@ -7,6 +7,7 @@ import { Role } from '../../utils/constants.js';
 import {
   createProjectSchema,
   updateProjectSchema,
+  updateProjectSiteAddressSchema,
   assignEngineersSchema,
   reassignProjectSalesSchema,
   assignFabricationSchema,
@@ -37,6 +38,14 @@ router.patch(
   authorize(Role.SALES_STAFF, Role.ENGINEER, Role.ADMIN),
   validate(updateProjectSchema),
   ctrl.updateProject,
+);
+
+router.patch(
+  '/:id/site-address',
+  authenticate,
+  authorize(Role.FABRICATION_STAFF, Role.ADMIN),
+  validate(updateProjectSiteAddressSchema),
+  ctrl.updateProjectSiteAddress,
 );
 
 // ── Assignments ──
