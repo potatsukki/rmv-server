@@ -1,4 +1,17 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const dashboardMocks = vi.hoisted(() => ({
+  projectCount: vi.fn(),
+  projectFind: vi.fn(),
+  paymentCount: vi.fn(),
+  paymentAggregate: vi.fn(),
+  planFind: vi.fn(),
+  appointmentCount: vi.fn(),
+  userCount: vi.fn(),
+  blueprintCount: vi.fn(),
+  fabricationCount: vi.fn(),
+  fabricationAggregate: vi.fn(),
+}));
 
 const { mockAuditAggregate, mockAuditCountDocuments } = vi.hoisted(() => ({
   mockAuditAggregate: vi.fn(),
@@ -20,15 +33,15 @@ vi.mock('../visit-reports/visit-reports.service.js', () => ({
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: {},
-  Payment: {},
-  PaymentPlan: {},
-  Appointment: {},
-  FabricationUpdate: {},
-  User: {},
+  Project: { countDocuments: dashboardMocks.projectCount, find: dashboardMocks.projectFind },
+  Payment: { countDocuments: dashboardMocks.paymentCount, aggregate: dashboardMocks.paymentAggregate },
+  PaymentPlan: { find: dashboardMocks.planFind },
+  Appointment: { countDocuments: dashboardMocks.appointmentCount },
+  FabricationUpdate: { countDocuments: dashboardMocks.fabricationCount, aggregate: dashboardMocks.fabricationAggregate },
+  User: { countDocuments: dashboardMocks.userCount },
   CashCollection: {},
   VisitReport: {},
-  Blueprint: {},
+  Blueprint: { countDocuments: dashboardMocks.blueprintCount },
   AuditLog: {
     aggregate: mockAuditAggregate,
     countDocuments: mockAuditCountDocuments,
@@ -43,6 +56,7 @@ vi.mock('../../models/index.js', () => ({
 import {
   acknowledgeLifecycleMismatchHotspot,
   getLifecycleMismatchHotspots,
+  getDashboardSummary,
 } from './reports.service.js';
 
 function mockExecValue<T>(value: T) {
@@ -54,6 +68,91 @@ function mockLeanExecValue<T>(value: T) {
     lean: vi.fn().mockReturnValue({ exec: vi.fn().mockResolvedValue(value) }),
   };
 }
+
+describe('dashboard pending payment projects', () => {
+  function plan(projectId: string, stages: object[], status = 'payment_pending', deletedAt: Date | null = null) {
+    return { projectId: { _id: projectId, status, deletedAt }, stages };
+  }
+
+  const pending = { status: 'pending', amount: 3000, amountPaid: 0 };
+
+  function plansQuery(plans: object[]) {
+    const query = {
+      select: vi.fn().mockReturnThis(),
+      populate: vi.fn().mockReturnThis(),
+      lean: vi.fn().mockReturnThis(),
+      exec: vi.fn().mockResolvedValue(plans),
+    };
+    dashboardMocks.planFind.mockReturnValue(query);
+    return query;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    for (const count of [dashboardMocks.projectCount, dashboardMocks.paymentCount,
+      dashboardMocks.appointmentCount, dashboardMocks.userCount, dashboardMocks.blueprintCount,
+      dashboardMocks.fabricationCount]) {
+      count.mockReturnValue(mockExecValue(0));
+    }
+    dashboardMocks.paymentAggregate.mockReturnValue(mockExecValue([]));
+    dashboardMocks.fabricationAggregate.mockReturnValue(mockExecValue([]));
+    plansQuery([]);
+  });
+
+  it('counts an unpaid project even when no payment has been submitted for verification', async () => {
+    plansQuery([plan('railings', [pending])]);
+    const summary = await getDashboardSummary('cashier-1', ['cashier']);
+    expect(summary).toMatchObject({ unpaidProjects: 1, pendingPayments: 0 });
+  });
+
+  it('counts each project once across items and stages and keeps the verification queue separate', async () => {
+    plansQuery([
+      plan('railings', [pending, pending]),
+      plan('railings', [pending]),
+      plan('canopy', [{ status: 'proof_submitted', amount: 1000, amountPaid: 0 }]),
+      plan('grills', [{ status: 'declined', amount: 1000, amountPaid: 250 }]),
+    ]);
+    dashboardMocks.paymentCount.mockReturnValue(mockExecValue(1));
+    expect(await getDashboardSummary('cashier-1', ['cashier']))
+      .toMatchObject({ unpaidProjects: 3, pendingPayments: 1 });
+  });
+
+  it('excludes settled, empty, cancelled, deleted and orphaned plans', async () => {
+    plansQuery([
+      plan('verified', [{ status: 'verified', amount: 3000, amountPaid: 3000 }]),
+      plan('settled', [{ ...pending, amountPaid: 3000 }]),
+      plan('empty', []),
+      plan('cancelled', [pending], 'cancelled'),
+      plan('deleted', [pending], 'payment_pending', new Date()),
+      { projectId: null, stages: [pending] },
+      plan('partial', [{ ...pending, amountPaid: 1500 }]),
+    ]);
+    expect(await getDashboardSummary('cashier-1', ['cashier']))
+      .toMatchObject({ unpaidProjects: 1 });
+  });
+
+  it('does not count floating point residue as an unpaid cent', async () => {
+    plansQuery([
+      plan('rounded', [{ ...pending, amount: 0.1 + 0.2, amountPaid: 0.3 }]),
+      plan('cent-due', [{ ...pending, amount: 0.3, amountPaid: 0.29 }]),
+    ]);
+    expect(await getDashboardSummary('cashier-1', ['cashier']))
+      .toMatchObject({ unpaidProjects: 1 });
+  });
+
+  it('scopes customer plan queries to their own projects', async () => {
+    dashboardMocks.projectFind.mockImplementation(() => ({
+      distinct: () => mockExecValue(['own-project']),
+      select: () => mockLeanExecValue([]),
+    }));
+    plansQuery([plan('own-project', [pending])]);
+    const summary = await getDashboardSummary('customer-1', ['customer']);
+    expect(summary.unpaidProjects).toBe(1);
+    expect(dashboardMocks.planFind).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: { $in: ['own-project'] },
+    }));
+  });
+});
 
 describe('getLifecycleMismatchHotspots', () => {
   afterEach(() => {

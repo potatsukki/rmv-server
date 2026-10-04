@@ -660,6 +660,31 @@ export async function getConversionReport(query: {
 
 // ── Dashboard Summary ──
 
+async function countUnpaidProjects(projectIds: Types.ObjectId[] | null) {
+  const plans = await PaymentPlan.find({
+    ...(projectIds ? { projectId: { $in: projectIds } } : {}),
+    stages: { $elemMatch: { status: { $ne: PaymentStageStatus.VERIFIED }, amount: { $gt: 0 } } },
+  })
+    .select('projectId stages.status stages.amount stages.amountPaid')
+    .populate<{ projectId: { _id: Types.ObjectId; status: ProjectStatus; deletedAt?: Date | null } | null }>(
+      'projectId', 'status deletedAt',
+    )
+    .lean()
+    .exec();
+
+  const unpaidProjects = new Set<string>();
+  for (const plan of plans) {
+    const project = plan.projectId;
+    if (!project || project.deletedAt || project.status === ProjectStatus.CANCELLED) continue;
+    const hasBalance = plan.stages.some(stage =>
+      stage.status !== PaymentStageStatus.VERIFIED
+      && Math.round(stage.amount * 100) > Math.round((stage.amountPaid ?? 0) * 100),
+    );
+    if (hasBalance) unpaidProjects.add(String(project._id));
+  }
+  return unpaidProjects.size;
+}
+
 export async function getDashboardSummary(userId?: string, userRoles?: string[]) {
   try {
     const now = new Date();
@@ -687,6 +712,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       activeProjects,
       completedProjects,
       pendingPayments,
+      unpaidProjects,
       revenueResult,
       pendingAppointments,
       totalAppointmentsToday,
@@ -718,6 +744,8 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       customerProjectIds
         ? Payment.countDocuments({ status: PaymentStageStatus.PROOF_SUBMITTED, projectId: { $in: customerProjectIds } }).exec()
         : Payment.countDocuments({ status: PaymentStageStatus.PROOF_SUBMITTED }).exec(),
+      // Count projects with an unsettled balance, independently of submitted payment records.
+      countUnpaidProjects(customerProjectIds),
       Payment.aggregate([
         { $match: { status: PaymentStageStatus.VERIFIED, verifiedAt: { $gte: monthStart }, amountPaid: { $lte: MAX_REPORTABLE_PAYMENT_AMOUNT } } },
         { $group: { _id: null, total: { $sum: '$amountPaid' } } },
@@ -796,6 +824,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       activeProjects,
       completedProjects,
       pendingPayments,
+      unpaidProjects,
       revenueThisMonth,
       totalRevenue: revenueThisMonth,
       pendingAppointments,
@@ -818,6 +847,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       activeProjects: 0,
       completedProjects: 0,
       pendingPayments: 0,
+      unpaidProjects: 0,
       revenueThisMonth: 0,
       totalRevenue: 0,
       pendingAppointments: 0,
