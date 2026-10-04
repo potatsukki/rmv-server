@@ -13,6 +13,8 @@ import { createAndSendNotification, notifyRole } from '../notifications/socket.s
 import { generateAndUploadContract, type ContractData } from '../../services/contract.service.js';
 import { generateDownloadUrl, verifyFileExists } from '../uploads/upload.service.js';
 import { logger } from '../../utils/logger.js';
+import { cleanSalesNotes, combineSalesNotes } from '../../utils/salesNotes.js';
+import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 import type {
   CreateProjectInput,
   UpdateProjectInput,
@@ -299,9 +301,9 @@ async function syncProjectItemFromReport(project: any, report: any, relatedRepor
   const initialDesignKeys = report.initialDesignKeys?.length
     ? report.initialDesignKeys
     : isPrimaryService ? project.initialDesignKeys || [] : [];
-  const initialDesignNotes = report.initialDesignNotes?.trim()
-    ? report.initialDesignNotes
-    : isPrimaryService ? project.initialDesignNotes : undefined;
+  const initialDesignNotes = isPrimaryService && project.initialDesignNotes !== undefined
+    ? cleanSalesNotes(project.initialDesignNotes)
+    : cleanSalesNotes(report.initialDesignNotes);
   const hasInitialDesign = Boolean(initialDesignKeys.length || initialDesignNotes?.trim());
   const reportNotes = combinedReportNotes(...sameServiceReports);
   const importedFields: Record<string, unknown> = {
@@ -577,7 +579,9 @@ export async function createProject(
   const sketchKeys = preferProjectInput(input.sketchKeys, primaryReport?.sketchKeys) || [];
   const referenceImageKeys = preferProjectInput(input.referenceImageKeys, primaryReport?.referenceImageKeys) || [];
   const initialDesignKeys = preferProjectInput(input.initialDesignKeys, primaryReport?.initialDesignKeys) || [];
-  const initialDesignNotes = preferProjectInput(input.initialDesignNotes, primaryReport?.initialDesignNotes);
+  const initialDesignNotes = input.initialDesignNotes !== undefined
+    ? cleanSalesNotes(input.initialDesignNotes)
+    : combineSalesNotes(primaryReport?.initialDesignNotes, appointment?.initialDesignNotes, ...appointmentReports.map((report) => report.initialDesignNotes));
 
   const project = await Project.create({
     appointmentId: input.appointmentId,
@@ -647,6 +651,7 @@ export async function createProject(
       bookedBy: actorId,
       sourceConsultationAppointmentId: appointment?._id,
       sourceConsultationReportId: primaryReport?._id,
+      initialDesignNotes,
       serviceTypes,
       serviceTypeCustom: input.serviceTypeCustom || appointment?.serviceTypeCustom,
       selectedDesignTemplateId: project.selectedDesignTemplateId,
@@ -674,6 +679,7 @@ export async function createProject(
       report.recommendedOcularAddress = undefined;
       report.actualVisitDateTime = undefined;
       report.linkedProjectId = project._id;
+      report.initialDesignNotes = input.initialDesignNotes !== undefined ? initialDesignNotes : cleanSalesNotes(report.initialDesignNotes);
       await report.save();
 
       const item = await syncProjectItemFromReport(project, report, appointmentReports);
@@ -725,6 +731,9 @@ export async function createProject(
     userAgent: ua,
   });
 
+  if (input.initialDesignNotes !== undefined && input.appointmentId) {
+    await syncAppointmentSalesNotes(input.appointmentId, input.initialDesignNotes);
+  }
   if (!input.ocularVisit) {
     await notifyProjectSubmittedAfterContract(project);
   }
@@ -769,6 +778,7 @@ export async function finalizeOcularProject(
   }
 
   const { customerId: _customerId, appointmentId: _appointmentId, ocularVisit: _ocularVisit, ...details } = input;
+  if (details.initialDesignNotes !== undefined) details.initialDesignNotes = cleanSalesNotes(details.initialDesignNotes);
   Object.assign(project, details);
   project.serviceTypes = [...new Set([input.serviceType, ...reports.map((report) => report.serviceType).filter(Boolean)])];
   project.visitReportId = (reports.find((report) => report.serviceType === input.serviceType) || reports[0])._id;
@@ -809,6 +819,10 @@ export async function finalizeOcularProject(
     { upsert: true, new: true },
   );
   await ProjectItem.updateMany({ projectId: project._id, status: ProjectStatus.DRAFT }, { $set: { status: ProjectStatus.SUBMITTED } });
+  if (input.initialDesignNotes !== undefined) {
+    await syncAppointmentSalesNotes(String(ocular._id), input.initialDesignNotes);
+    await ProjectItem.updateMany({ projectId: project._id }, { $set: { initialDesignNotes: project.initialDesignNotes || '' } });
+  }
   await AuditLog.create({
     action: AuditAction.PROJECT_UPDATED,
     actorId,

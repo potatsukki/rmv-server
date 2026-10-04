@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   paymentPlanFindOne: vi.fn(),
   generateProjectNumber: vi.fn(),
   prepareOcularSchedule: vi.fn(),
+  syncSalesNotes: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -48,6 +49,7 @@ vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() })
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 vi.mock('../appointments/appointments.service.js', () => ({ prepareProjectOcularSchedule: mocks.prepareOcularSchedule }));
+vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
 import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, transitionProject, uploadSignedContract, updateProject, updateProjectSiteAddress } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
@@ -111,6 +113,14 @@ describe('finalizeOcularProject', () => {
       { upsert: true, new: true },
     );
     expect(reports[0].materials).toBe('Original ocular material');
+  });
+
+  it.each(['Customer wants grade 316.', ''])('keeps the shared sales notes when finalizing (%s)', async (initialDesignNotes) => {
+    reports[0].initialDesignNotes = 'Earlier consultation notes';
+    const project = await finalizeOcularProject('project-1', { ...input, initialDesignNotes }, actorId, [Role.SALES_STAFF]);
+    expect(project.initialDesignNotes).toBe(initialDesignNotes);
+    expect(mocks.syncSalesNotes).toHaveBeenCalledWith('ocular-1', initialDesignNotes);
+    expect(mocks.projectItemUpdateMany).toHaveBeenLastCalledWith({ projectId: 'project-1' }, { $set: { initialDesignNotes } });
   });
 
   it.each([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.CANCELLED])('rejects finalization while the ocular is %s', async (status) => {

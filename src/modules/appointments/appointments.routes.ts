@@ -24,9 +24,12 @@ import {
   agentCreateOcularSchema,
   submitOcularLocationSchema,
   agentFinalizeOcularSchema,
+  salesNotesSchema,
 } from './appointments.validation.js';
 
 const router = Router();
+
+router.put('/:id/sales-notes', authenticate, authorize(Role.SALES_STAFF, Role.ADMIN), validate(salesNotesSchema), ctrl.updateSalesNotes);
 
 // ── Public-ish (authenticated) ──
 router.get(

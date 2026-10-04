@@ -1,4 +1,6 @@
 import { z } from 'zod';
+
+export const salesNotesSchema = z.object({ initialDesignNotes: z.string().max(2000).trim() });
 import { AppointmentType, PaymentMethod, OcularFeePaymentChoice, ServiceType, MeasurementUnit, Environment, SLOT_CODES } from '../../utils/constants.js';
 import { isSafeLocalCatalogImagePath } from '../../utils/selectedDesign.js';
 

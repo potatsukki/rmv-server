@@ -18,6 +18,8 @@ import type { ICustomerSiteDetails } from '../../models/Appointment.js';
 import type { UserAddressInput } from '../../utils/userAddresses.js';
 import { normalizeUserAddress, requirePinnedAddress } from '../../utils/userAddresses.js';
 import { visitReportStatusCondition } from './visit-reports.list-policy.js';
+import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
+import { cleanSalesNotes } from '../../utils/salesNotes.js';
 
 function isNonEmptyString(value?: string | null) {
   return Boolean(value?.trim());
@@ -324,12 +326,12 @@ async function ensureAppointmentServiceTypeReports(
   const customServiceTypeLabel = customerSiteDetails?.serviceTypeCustom || serviceTypeCustomOverride;
   const appointmentContext = await Appointment.findById(appointmentId)
     .select(
-      'serviceTypes sourceConsultationAppointmentId selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl',
+      'serviceTypes sourceConsultationAppointmentId initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl',
     )
     .lean();
   const sourceConsultationContext = appointmentContext?.sourceConsultationAppointmentId
     ? await Appointment.findById(appointmentContext.sourceConsultationAppointmentId)
-      .select('serviceTypes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl')
+      .select('serviceTypes initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl')
       .lean()
     : undefined;
   const bookingSelectedDesign = selectedDesignSnapshot(appointmentContext, sourceConsultationContext);
@@ -499,6 +501,7 @@ async function ensureAppointmentServiceTypeReports(
       salesStaffId,
       status: VisitReportStatus.DRAFT,
       visitType,
+      initialDesignNotes: cleanSalesNotes(appointmentContext?.initialDesignNotes ?? sourceConsultationContext?.initialDesignNotes),
       ...(linkedProjectId && { linkedProjectId }),
       serviceType,
       serviceTypeCustom: serviceType === ServiceType.CUSTOM ? customServiceTypeLabel : undefined,
@@ -1174,6 +1177,7 @@ export async function createReport(
     salesStaffId,
     status: VisitReportStatus.DRAFT,
     visitType: inferredVisitType,
+    initialDesignNotes: cleanSalesNotes(appointment.initialDesignNotes),
     serviceType: input.serviceType,
     serviceTypeCustom: input.serviceTypeCustom,
     lineItems: [],
@@ -1524,6 +1528,7 @@ export async function updateReport(
   }
 
   const changes: Record<string, unknown> = {};
+  if (input.initialDesignNotes !== undefined) input.initialDesignNotes = cleanSalesNotes(input.initialDesignNotes);
   for (const [key, value] of Object.entries(input)) {
     if (value !== undefined) {
       (report as any)[key] = value;
@@ -1543,6 +1548,10 @@ export async function updateReport(
   }
 
   await report.save();
+
+  if (input.initialDesignNotes !== undefined) {
+    await syncAppointmentSalesNotes(String(report.appointmentId), input.initialDesignNotes);
+  }
 
   await AuditLog.create({
     action: AuditAction.VISIT_REPORT_UPDATED,
@@ -2004,7 +2013,7 @@ export async function submitReport(
       if (report.finishes) linkedProject.finishColor = report.finishes;
       if (report.notes) linkedProject.notes = report.notes;
       if (report.initialDesignKeys?.length) linkedProject.initialDesignKeys = report.initialDesignKeys;
-      if (report.initialDesignNotes) linkedProject.initialDesignNotes = report.initialDesignNotes;
+      if (report.initialDesignNotes !== undefined) linkedProject.initialDesignNotes = cleanSalesNotes(report.initialDesignNotes);
       if (report.initialDesignKeys?.length || report.initialDesignNotes?.trim()) {
         linkedProject.designReviewStatus = linkedProject.designReviewStatus === 'approved'
           ? 'approved'
