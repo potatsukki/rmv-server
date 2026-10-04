@@ -95,15 +95,7 @@ function formatDateTokens(dateStr?: string | null): string[] {
 }
 
 function collectStatusTerms(appointment: SearchAppointmentInput): string[] {
-  const aliases = APPOINTMENT_STATUS_LABELS[appointment.status || ''] || [labelize(appointment.status)];
-  if (
-    appointment.type === AppointmentType.OFFICE
-    && appointment.status === AppointmentStatus.COMPLETED
-    && appointment.consultationReportSubmitted
-  ) {
-    return [...aliases, 'ready for ocular'];
-  }
-  return aliases;
+  return APPOINTMENT_STATUS_LABELS[appointment.status || ''] || [labelize(appointment.status)];
 }
 
 export function normalizeAppointmentSearchTerm(term?: string | null): string {

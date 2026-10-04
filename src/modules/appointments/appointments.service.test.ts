@@ -107,6 +107,7 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 import {
+  completeAppointment,
   getAvailableSlots,
   requestAppointment,
   requestReschedule,
@@ -147,6 +148,30 @@ function selectLeanResult<T>(value: T) {
     }),
   };
 }
+
+describe('completeAppointment', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it.each([true, false])('keeps consultation completed when report submitted is %s', async (consultationReportSubmitted) => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      salesStaffId: 'sales-1',
+      slotCode: '09:00',
+      consultationReportSubmitted,
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+
+    const result = await completeAppointment('appointment-1', 'sales-1');
+
+    expect(result.status).toBe(AppointmentStatus.COMPLETED);
+    expect(appointment.save).toHaveBeenCalledOnce();
+    expect(mockAssertTransition).toHaveBeenCalledExactlyOnceWith(
+      AppointmentStatus.CONFIRMED,
+      AppointmentStatus.COMPLETED,
+    );
+  });
+});
 
 describe('getAvailableSlots', () => {
   afterEach(() => {

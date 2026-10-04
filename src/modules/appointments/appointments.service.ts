@@ -1712,15 +1712,8 @@ export async function completeAppointment(
 
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
 
-  // If it's a consultation and the report is already submitted, move directly to READY_FOR_OCULAR.
-  // Otherwise, move to COMPLETED.
-  if (appointment.type === AppointmentType.OFFICE && appointment.consultationReportSubmitted) {
-    appointment.status = AppointmentStatus.COMPLETED;
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.READY_FOR_OCULAR);
-    appointment.status = AppointmentStatus.READY_FOR_OCULAR;
-  } else {
-    appointment.status = AppointmentStatus.COMPLETED;
-  }
+  // Completing a consultation does not select the project's ocular workflow.
+  appointment.status = AppointmentStatus.COMPLETED;
 
   await appointment.save();
 

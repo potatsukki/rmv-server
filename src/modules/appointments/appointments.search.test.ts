@@ -68,7 +68,7 @@ describe('appointments.search', () => {
     )).toBe(true);
   });
 
-  it('treats completed consultation with submitted report as ready for ocular in search', () => {
+  it('does not treat completed consultation with submitted report as ready for ocular in search', () => {
     const matched = matchesAppointmentSearch(
       {
         type: 'office',
@@ -79,7 +79,15 @@ describe('appointments.search', () => {
       'staff',
     );
 
-    expect(matched).toBe(true);
+    expect(matched).toBe(false);
+  });
+
+  it('still matches an explicit ready for ocular status', () => {
+    expect(matchesAppointmentSearch(
+      { type: 'office', status: 'ready_for_ocular' },
+      'ready ocular',
+      'staff',
+    )).toBe(true);
   });
 
   it('does not use staff-only fields in customer scope', () => {
