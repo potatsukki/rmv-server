@@ -2054,9 +2054,10 @@ export async function repairMissingProjectNumbers() {
 async function enrichProjectsForList(projects: any[]) {
   if (!projects.length) return projects;
   const projectIds = projects.map((p) => p._id);
+  const ocularAppointmentIds = [...new Set(projects.map((p) => p.ocularAppointmentId).filter(Boolean))];
 
   // 1. Batch-fetch latest blueprint status + existing project items in parallel
-  const [latestBlueprints, existingItems] = await Promise.all([
+  const [latestBlueprints, existingItems, ocularAppointments] = await Promise.all([
     Blueprint.aggregate([
       { $match: { projectId: { $in: projectIds } } },
       { $sort: { version: -1 } },
@@ -2065,9 +2066,13 @@ async function enrichProjectsForList(projects: any[]) {
     ProjectItem.find({ projectId: { $in: projectIds } })
       .sort({ createdAt: 1 })
       .lean(),
+    ocularAppointmentIds.length
+      ? Appointment.find({ _id: { $in: ocularAppointmentIds } }).select('_id status').lean()
+      : [],
   ]);
 
   const bpMap = new Map(latestBlueprints.map((b) => [String(b._id), b.status]));
+  const ocularStatusMap = new Map(ocularAppointments.map((appointment) => [String(appointment._id), appointment.status]));
 
   // Group existing items by projectId
   const itemMap = new Map<string, any[]>();
@@ -2126,6 +2131,7 @@ async function enrichProjectsForList(projects: any[]) {
   // 3. Assemble final results
   return projects.map((p) => {
     const obj = { ...p };
+    if (obj.ocularAppointmentId) obj.ocularVisitStatus = ocularStatusMap.get(String(obj.ocularAppointmentId));
     obj.latestBlueprintStatus = bpMap.get(String(obj._id)) || null;
     obj.items = itemMap.get(String(obj._id)) || [];
     return obj;

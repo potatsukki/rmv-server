@@ -748,6 +748,13 @@ async function transitionConsultationReportsToOcularAppointment(
       ? candidates.find((report) => report._id.toString() === preferredReportId.toString()) || pickCanonicalLifecycleReport(candidates)
       : pickCanonicalLifecycleReport(candidates);
     const duplicates = candidates.filter((report) => report._id.toString() !== canonical._id.toString());
+    const isConsultationTransition = canonical.visitType === 'consultation';
+    const needsProjectLink = linkedProjectId && !canonical.linkedProjectId;
+    // Reading an already promoted ocular report must not reopen a submitted report.
+    if (!isConsultationTransition && duplicates.length === 0 && !needsProjectLink) {
+      canonicalReports.push(canonical);
+      continue;
+    }
     const conflictFields = new Set<string>();
 
     for (const duplicate of duplicates) {
@@ -760,7 +767,7 @@ async function transitionConsultationReportsToOcularAppointment(
 
     canonical.appointmentId = ocularAppointmentId as Types.ObjectId;
     canonical.visitType = 'ocular';
-    canonical.status = VisitReportStatus.DRAFT;
+    if (isConsultationTransition) canonical.status = VisitReportStatus.DRAFT;
     if (linkedProjectId && !canonical.linkedProjectId) {
       canonical.linkedProjectId = linkedProjectId as Types.ObjectId;
     }
@@ -768,13 +775,13 @@ async function transitionConsultationReportsToOcularAppointment(
     canonicalReports.push(canonical);
 
     await AuditLog.create({
-      action: AuditAction.VISIT_REPORT_CREATED,
+      action: isConsultationTransition ? AuditAction.VISIT_REPORT_CREATED : AuditAction.VISIT_REPORT_UPDATED,
       actorId: salesStaffId.toString(),
       targetType: 'visit_report',
       targetId: canonical._id,
       details: {
         appointmentId: ocularAppointmentId.toString(),
-        transitionedFromConsultation: true,
+        transitionedFromConsultation: isConsultationTransition,
         sourceConsultationAppointmentId: sourceConsultationAppointmentId.toString(),
         serviceType,
         duplicateIdsRemoved: duplicates.map((duplicate) => duplicate._id.toString()),
