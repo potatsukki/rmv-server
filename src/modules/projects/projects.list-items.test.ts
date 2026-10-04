@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   projectItemFind: vi.fn(),
   projectItemBulkWrite: vi.fn(),
   blueprintAggregate: vi.fn(),
+  appointmentFind: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -17,7 +18,7 @@ vi.mock('../../models/index.js', () => ({
     find: mocks.projectItemFind,
     bulkWrite: mocks.projectItemBulkWrite,
   },
-  Appointment: {},
+  Appointment: { find: mocks.appointmentFind },
   User: {},
   AuditLog: {},
   VisitReport: {},
@@ -39,7 +40,7 @@ import { ProjectStatus, Role } from '../../utils/constants.js';
 
 function queryChain<T>(result: T) {
   const chain: Record<string, unknown> = {};
-  for (const method of ['populate', 'sort', 'skip', 'limit']) {
+  for (const method of ['populate', 'sort', 'skip', 'limit', 'select']) {
     chain[method] = vi.fn(() => chain);
   }
   chain.lean = vi.fn().mockResolvedValue(result);
@@ -116,5 +117,29 @@ describe('listProjects project-item fallback', () => {
     expect(siblingItem).not.toHaveProperty('specifications');
     expect(siblingItem).not.toHaveProperty('customerRequirements');
     expect(siblingItem).not.toHaveProperty('notes');
+    expect(mocks.appointmentFind).not.toHaveBeenCalled();
+  });
+
+  it('includes each ocular visit status with one batch lookup while preserving appointment IDs', async () => {
+    const projects = [
+      { _id: 'project-1', serviceType: 'railings', status: ProjectStatus.DRAFT, ocularAppointmentId: 'ocular-1' },
+      { _id: 'project-2', serviceType: 'gates', status: ProjectStatus.DRAFT, ocularAppointmentId: 'ocular-2' },
+      { _id: 'project-3', serviceType: 'doors', status: ProjectStatus.SUBMITTED },
+    ];
+    mocks.projectFind.mockReturnValue(queryChain(projects));
+    mocks.projectCountDocuments.mockResolvedValue(3);
+    mocks.projectItemFind.mockReturnValue(queryChain(projects.map((p) => ({ projectId: p._id, serviceType: p.serviceType }))));
+    mocks.blueprintAggregate.mockResolvedValue([]);
+    mocks.appointmentFind.mockReturnValue(queryChain([
+      { _id: 'ocular-1', status: 'completed' },
+      { _id: 'ocular-2', status: 'confirmed' },
+    ]));
+
+    const result = await listProjects({}, 'sales-1', [Role.SALES_STAFF]);
+    expect(result.items[0]).toMatchObject({ ocularAppointmentId: 'ocular-1', ocularVisitStatus: 'completed' });
+    expect(result.items[1]).toMatchObject({ ocularAppointmentId: 'ocular-2', ocularVisitStatus: 'confirmed' });
+    expect(result.items[2].ocularVisitStatus).toBeUndefined();
+    expect(mocks.appointmentFind).toHaveBeenCalledOnce();
+    expect(mocks.appointmentFind).toHaveBeenCalledWith({ _id: { $in: ['ocular-1', 'ocular-2'] } });
   });
 });

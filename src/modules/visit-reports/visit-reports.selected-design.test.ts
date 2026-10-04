@@ -286,4 +286,51 @@ describe('autoCreateDraft selected design', () => {
     expect(filledDraft.save).toHaveBeenCalledOnce();
     expect(mockVisitReportCreate).not.toHaveBeenCalled();
   });
+
+  it.each(['submitted', 'completed', 'returned'])('preserves an existing ocular report status %s when ensuring reports again', async (status) => {
+    const report = {
+      _id: 'ocular-report', appointmentId: 'ocular-1', visitType: 'ocular', status,
+      serviceType: ServiceType.RAILINGS, salesStaffId: 'sales-1',
+      materials: 'Verified stainless steel', lineItems: [], photoKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mockAppointmentFindById.mockReturnValue(selectLeanResult({ serviceTypes: [ServiceType.RAILINGS] }));
+    mockVisitReportFind.mockImplementation((filter) => ({
+      sort: vi.fn().mockResolvedValue(filter.visitType === 'consultation' ? [] : [report]),
+    }));
+
+    for (let read = 0; read < 2; read++) {
+      await autoCreateDraft('ocular-1', 'customer-1', 'sales-1', 'ocular', undefined, [ServiceType.RAILINGS]);
+      expect(report.status).toBe(status);
+    }
+    expect(report.save).not.toHaveBeenCalled();
+    expect(mockAuditCreate).not.toHaveBeenCalled();
+    expect(mockVisitReportCreate).not.toHaveBeenCalled();
+  });
+
+  it('starts a promoted consultation report as an ocular draft only on its first transition', async () => {
+    const report = {
+      _id: 'source-report', appointmentId: 'consultation-1', visitType: 'consultation', status: 'submitted',
+      serviceType: ServiceType.RAILINGS, salesStaffId: 'sales-1',
+      notes: 'Customer reference', lineItems: [], photoKeys: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mockAppointmentFindById.mockImplementation((id) => selectLeanResult({
+      serviceTypes: [ServiceType.RAILINGS],
+      ...(id === 'ocular-1' && { sourceConsultationAppointmentId: 'consultation-1' }),
+    }));
+    mockVisitReportFind.mockImplementation((filter) => ({
+      sort: vi.fn().mockImplementation(async () => (
+        filter.appointmentId === report.appointmentId && (!filter.visitType || filter.visitType === report.visitType)
+          ? [report] : []
+      )),
+    }));
+
+    await autoCreateDraft('ocular-1', 'customer-1', 'sales-1', 'ocular', undefined, [ServiceType.RAILINGS]);
+    expect(report).toMatchObject({ appointmentId: 'ocular-1', visitType: 'ocular', status: 'draft' });
+    report.status = 'submitted';
+    await autoCreateDraft('ocular-1', 'customer-1', 'sales-1', 'ocular', undefined, [ServiceType.RAILINGS]);
+    expect(report.status).toBe('submitted');
+    expect(report.save).toHaveBeenCalledOnce();
+  });
 });
