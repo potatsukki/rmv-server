@@ -87,6 +87,8 @@ export interface IAppointment extends Document {
   ocularFeePaymentMethod?: PaymentMethod;
   ocularFeePaymentChoice?: OcularFeePaymentChoice;
   ocularFeePaid?: boolean;
+  paymentStatus?: 'unpaid' | 'pending_verification' | 'paid' | 'rejected';
+  bookingStatus?: 'pending_payment' | 'confirmed';
   ocularFeeProofKey?: string;
   ocularFeeReferenceNumber?: string;
   ocularFeeVerifiedBy?: Types.ObjectId;
@@ -205,6 +207,8 @@ const appointmentSchema = new Schema<IAppointment>(
     ocularFeePaymentMethod: { type: String, enum: Object.values(PaymentMethod) },
     ocularFeePaymentChoice: { type: String, enum: Object.values(OcularFeePaymentChoice) },
     ocularFeePaid: { type: Boolean, default: false },
+    paymentStatus: { type: String, enum: ['unpaid', 'pending_verification', 'paid', 'rejected'] },
+    bookingStatus: { type: String, enum: ['pending_payment', 'confirmed'] },
     ocularFeeProofKey: { type: String },
     ocularFeeReferenceNumber: { type: String },
     ocularFeeStatus: { type: String, enum: ['pending', 'cash_pending', 'proof_submitted', 'verified', 'declined'] },

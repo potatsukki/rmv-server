@@ -178,7 +178,7 @@ router.post(
 router.post(
   '/:id/ocular-fee',
   authenticate,
-  authorize(Role.APPOINTMENT_AGENT, Role.SALES_STAFF),
+  authorize(Role.APPOINTMENT_AGENT, Role.SALES_STAFF, Role.CASHIER),
   validate(recordOcularFeeSchema),
   ctrl.recordOcularFee,
 );

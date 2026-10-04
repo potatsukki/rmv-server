@@ -1,6 +1,9 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as paymentsService from './payments.service.js';
+import { Payment } from '../../models/Payment.js';
+import { reviewGcash } from './gcash.service.js';
+import { PaymentMethod, Role } from '../../utils/constants.js';
 
 export const createPaymentPlan = asyncHandler(async (req: Request, res: Response) => {
   const plan = await paymentsService.createPaymentPlan(req.body, req.userId!, req.ip, req.get('user-agent'));
@@ -19,6 +22,12 @@ export const submitPaymentProof = asyncHandler(async (req: Request, res: Respons
 });
 
 export const verifyPayment = asyncHandler(async (req: Request, res: Response) => {
+  const existingPayment = await Payment.findById(req.params.id as string);
+  if (existingPayment?.method === PaymentMethod.GCASH) {
+    const result = await reviewGcash(req.params.id as string, req.userId!, req.userRoles!, 'paid', undefined, req.body.signatureKey);
+    res.json({ success: true, data: result });
+    return;
+  }
   const result = await paymentsService.verifyPayment(
     (req.params.id as string),
     req.body,
@@ -30,6 +39,12 @@ export const verifyPayment = asyncHandler(async (req: Request, res: Response) =>
 });
 
 export const declinePayment = asyncHandler(async (req: Request, res: Response) => {
+  const existingPayment = await Payment.findById(req.params.id as string);
+  if (existingPayment?.method === PaymentMethod.GCASH) {
+    const result = await reviewGcash(req.params.id as string, req.userId!, req.userRoles!, 'rejected', req.body.reason);
+    res.json({ success: true, data: result });
+    return;
+  }
   const payment = await paymentsService.declinePayment((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
   res.json({ success: true, data: payment });
 });
@@ -61,7 +76,7 @@ export const listPaymentsByProject = asyncHandler(async (req: Request, res: Resp
 
 export const listPendingPayments = asyncHandler(async (req: Request, res: Response) => {
   const result = await paymentsService.listPendingPayments(req.query as any);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: req.userRoles!.includes(Role.CASHIER) ? result : result.filter((payment) => payment.method !== PaymentMethod.GCASH) });
 });
 
 export const getPaymentById = asyncHandler(async (req: Request, res: Response) => {

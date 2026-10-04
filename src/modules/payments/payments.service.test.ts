@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockPaymentFindById,
+  mockPaymentFind,
   mockProjectFindById,
   mockProjectItemUpdateMany,
   mockPaymentPlanFindOne,
@@ -11,6 +12,7 @@ const {
   mockAuditCreate,
 } = vi.hoisted(() => ({
   mockPaymentFindById: vi.fn(),
+  mockPaymentFind: vi.fn(),
   mockProjectFindById: vi.fn(),
   mockProjectItemUpdateMany: vi.fn(),
   mockPaymentPlanFindOne: vi.fn(),
@@ -24,6 +26,7 @@ vi.mock('../../models/index.js', () => ({
   PaymentPlan: { findOne: mockPaymentPlanFindOne },
   Payment: {
     findById: mockPaymentFindById,
+    find: mockPaymentFind,
     create: mockPaymentCreate,
   },
   Project: {
@@ -85,8 +88,25 @@ import {
   activateAssignedFabricationAfterInitialPayment,
   getPaymentEvidenceTrail,
   recordCashPayment,
+  listPendingPayments,
 } from './payments.service.js';
 import { PaymentMethod, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
+
+describe('flagged GCash history', () => {
+  it('returns rejected duplicates separately from the pending queue with cashier audit details', async () => {
+    const history = [{ _id: 'attempt-1', method: 'gcash', duplicateReference: true, paymentStatus: 'rejected',
+      rejectionReason: 'Duplicate reference number', rejectedAt: new Date(), rejectionSource: 'system',
+      bookingId: { appointmentNumber: 'RMV-APPT-101', serviceTypes: ['Kitchen Counter'] },
+      customerId: { firstName: 'Test', lastName: 'Customer' } }];
+    const cursor = { populate: vi.fn(), sort: vi.fn(), skip: vi.fn(), limit: vi.fn(), lean: vi.fn().mockResolvedValue(history) };
+    cursor.populate.mockReturnValue(cursor); cursor.sort.mockReturnValue(cursor); cursor.skip.mockReturnValue(cursor); cursor.limit.mockReturnValue(cursor);
+    mockPaymentFind.mockReturnValue(cursor);
+    const flagged = await listPendingPayments({ limit: '100' }, true);
+    expect(mockPaymentFind).toHaveBeenCalledWith({ method: 'gcash', duplicateReference: true, paymentStatus: 'rejected' });
+    expect(flagged[0]).toMatchObject({ customerName: 'Test Customer', bookingReference: 'RMV-APPT-101', duplicateReference: true, rejectionReason: 'Duplicate reference number' });
+    expect(cursor.populate).toHaveBeenCalledWith('rejectedBy', 'firstName lastName');
+  });
+});
 
 function mockPopulateValue<T>(value: T) {
   return {

@@ -32,7 +32,8 @@ export const submitPaymentProofSchema = z.object({
   method: z.nativeEnum(PaymentMethod),
   amountPaid: z.number().positive().max(MAX_PAYMENT_AMOUNT),
   referenceNumber: z.string().max(100).trim().optional(),
-  proofKey: z.string().min(1),
+  proofKey: z.string().min(1).optional(),
+  paymentDate: z.string().datetime({ offset: true }),
 });
 
 export const verifyPaymentSchema = z.object({
@@ -41,7 +42,7 @@ export const verifyPaymentSchema = z.object({
 });
 
 export const declinePaymentSchema = z.object({
-  reason: z.string().min(1).max(500).trim(),
+  reason: z.string().trim().min(1).max(500),
 });
 
 export const recordCashPaymentSchema = z.object({

@@ -4,6 +4,10 @@ import { authenticate } from '../../middleware/auth.js';
 import { authorize } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { Role } from '../../utils/constants.js';
+import { asyncHandler } from '../../utils/asyncHandler.js';
+import { gcashTargetSchema, submitGcashSchema } from './gcash.validation.js';
+import { getGcashContext, submitGcash, reviewGcash, selectCash } from './gcash.service.js';
+import { listPendingPayments } from './payments.service.js';
 import {
   createPaymentPlanSchema,
   updatePaymentPlanSchema,
@@ -14,6 +18,24 @@ import {
 } from './payments.validation.js';
 
 const router = Router();
+router.get('/gcash/flagged', authenticate, authorize(Role.CASHIER), asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await listPendingPayments(req.query as { page?: string; limit?: string }, true) });
+}));
+router.post('/gcash/cash', authenticate, authorize(Role.CUSTOMER), validate(gcashTargetSchema), asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await selectCash(req.body, req.userId!) });
+}));
+router.get('/gcash/context', authenticate, authorize(Role.CUSTOMER), validate(gcashTargetSchema, 'query'), asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await getGcashContext(gcashTargetSchema.parse(req.query), req.userId!) });
+}));
+router.post('/gcash/submit', authenticate, authorize(Role.CUSTOMER), validate(submitGcashSchema), asyncHandler(async (req, res) => {
+  res.status(201).json({ success: true, data: await submitGcash(req.body, req.userId!) });
+}));
+router.post('/gcash/:id/approve', authenticate, authorize(Role.CASHIER), validate(verifyPaymentSchema), asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await reviewGcash(req.params.id as string, req.userId!, req.userRoles!, 'paid', undefined, req.body.signatureKey) });
+}));
+router.post('/gcash/:id/reject', authenticate, authorize(Role.CASHIER), validate(declinePaymentSchema), asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await reviewGcash(req.params.id as string, req.userId!, req.userRoles!, 'rejected', req.body.reason) });
+}));
 
 // ── Cashier: Payment Plan ──
 router.post(
