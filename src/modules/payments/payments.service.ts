@@ -17,6 +17,7 @@ import { r2Client } from '../../config/r2.js';
 import { generateDownloadUrl } from '../uploads/upload.service.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import { recordCashPaymentSchema } from './payments.validation.js';
 import type {
   CreatePaymentPlanInput,
   UpdatePaymentPlanInput,
@@ -1148,6 +1149,9 @@ export async function recordCashPayment(
   ip?: string,
   ua?: string,
 ) {
+  if (!recordCashPaymentSchema.safeParse({ stageId, amountPaid }).success) {
+    throw AppError.badRequest('Enter a valid amount with no more than two decimal places');
+  }
   const plan = await PaymentPlan.findOne({ 'stages.stageId': stageId });
   if (!plan) throw AppError.notFound('Payment stage not found');
 
@@ -1160,6 +1164,12 @@ export async function recordCashPayment(
       ErrorCode.PAYMENT_STAGE_NOT_ACCEPTING,
       { helpPath: '/help/payments/payment-stage-status-reference#overview' },
     );
+  }
+
+  const amountPaidCents = Math.round(amountPaid * 100);
+  const outstandingCents = Math.round(stage.amount * 100) - Math.round(stage.amountPaid * 100);
+  if (outstandingCents <= 0 || amountPaidCents > outstandingCents) {
+    throw AppError.badRequest('Amount cannot exceed the amount due');
   }
 
   const project = await Project.findById(plan.projectId);
@@ -1207,18 +1217,13 @@ export async function recordCashPayment(
   if (cashReceipt.key) payment.receiptKey = cashReceipt.key;
 
   // Update stage
-  const totalPaid = stage.amountPaid + amountPaid;
-  const remaining = stage.amount - totalPaid;
+  const totalPaid = (Math.round(stage.amountPaid * 100) + amountPaidCents) / 100;
+  const remaining = (outstandingCents - amountPaidCents) / 100;
 
   if (remaining <= 0) {
     stage.status = PaymentStageStatus.VERIFIED;
     stage.amountPaid = totalPaid;
     stage.remainingBalance = 0;
-    const excess = Math.abs(remaining);
-    if (excess > 0) {
-      payment.excessCredit = excess;
-      await applyExcessCredit(plan, excess);
-    }
   } else {
     stage.amountPaid = totalPaid;
     stage.remainingBalance = remaining;

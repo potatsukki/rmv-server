@@ -1,19 +1,30 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockPaymentFindById,
   mockProjectFindById,
   mockProjectItemUpdateMany,
+  mockPaymentPlanFindOne,
+  mockPaymentCreate,
+  mockUserFindById,
+  mockReceiptCounterUpdate,
+  mockAuditCreate,
 } = vi.hoisted(() => ({
   mockPaymentFindById: vi.fn(),
   mockProjectFindById: vi.fn(),
   mockProjectItemUpdateMany: vi.fn(),
+  mockPaymentPlanFindOne: vi.fn(),
+  mockPaymentCreate: vi.fn(),
+  mockUserFindById: vi.fn(),
+  mockReceiptCounterUpdate: vi.fn(),
+  mockAuditCreate: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
-  PaymentPlan: {},
+  PaymentPlan: { findOne: mockPaymentPlanFindOne },
   Payment: {
     findById: mockPaymentFindById,
+    create: mockPaymentCreate,
   },
   Project: {
     findById: mockProjectFindById,
@@ -21,9 +32,9 @@ vi.mock('../../models/index.js', () => ({
   ProjectItem: {
     updateMany: mockProjectItemUpdateMany,
   },
-  User: {},
-  AuditLog: {},
-  ReceiptCounter: {},
+  User: { findById: mockUserFindById },
+  AuditLog: { create: mockAuditCreate },
+  ReceiptCounter: { findOneAndUpdate: mockReceiptCounterUpdate },
   Appointment: {},
 }));
 
@@ -73,6 +84,7 @@ vi.mock('../../utils/logger.js', () => ({
 import {
   activateAssignedFabricationAfterInitialPayment,
   getPaymentEvidenceTrail,
+  recordCashPayment,
 } from './payments.service.js';
 import { PaymentMethod, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -168,5 +180,73 @@ describe('fabrication activation after initial payment', () => {
     expect(project.status).toBe(ProjectStatus.PAYMENT_PENDING);
     expect(project.save).not.toHaveBeenCalled();
     expect(mockProjectItemUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('recordCashPayment amount limits', () => {
+  const stage = {
+    stageId: 'stage-1', label: 'Full Payment', amount: 3000,
+    amountPaid: 0, remainingBalance: 3000, status: PaymentStageStatus.PENDING,
+  };
+  const plan = {
+    projectId: 'project-1', totalAmount: 3000, stages: [stage], isImmutable: false,
+    save: vi.fn(),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.assign(stage, { amount: 3000, amountPaid: 0, remainingBalance: 3000, status: PaymentStageStatus.PENDING });
+    plan.isImmutable = false;
+    mockPaymentPlanFindOne.mockResolvedValue(plan);
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1', title: 'Railings', customerId: 'customer-1', status: ProjectStatus.PAYMENT_PENDING,
+    });
+    mockReceiptCounterUpdate.mockResolvedValue({ lastSeq: 1 });
+    mockPaymentCreate.mockImplementation(async (input) => ({
+      ...input, _id: 'payment-1', evidenceTrail: [], save: vi.fn(),
+    }));
+    mockUserFindById.mockResolvedValue(null);
+  });
+
+  it.each([3500, 3000.01, 999_999_999])('rejects an amount of %s above the outstanding balance before writing', async (amount) => {
+    await expect(recordCashPayment('stage-1', amount, 'cashier-1')).rejects.toThrow(/cannot exceed.*amount due/i);
+    expect(mockPaymentCreate).not.toHaveBeenCalled();
+    expect(mockReceiptCounterUpdate).not.toHaveBeenCalled();
+    expect(plan.save).not.toHaveBeenCalled();
+    expect(mockAuditCreate).not.toHaveBeenCalled();
+  });
+
+  it('uses the unpaid balance after a partial payment', async () => {
+    stage.amountPaid = 1000;
+    stage.remainingBalance = 2000;
+    await expect(recordCashPayment('stage-1', 2500, 'cashier-1')).rejects.toThrow(/cannot exceed.*amount due/i);
+    expect(mockPaymentCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, NaN, Infinity, 1e100, 1.005, 0.0000001, 3000.0000001])('rejects invalid or unsupported cash amounts: %s', async (amount) => {
+    await expect(recordCashPayment('stage-1', amount, 'cashier-1')).rejects.toThrow(/valid amount|decimal places|too large/i);
+    expect(mockPaymentCreate).not.toHaveBeenCalled();
+    expect(plan.save).not.toHaveBeenCalled();
+  });
+
+  it('accepts the exact amount due and verifies the stage without excess credit', async () => {
+    const result = await recordCashPayment('stage-1', 3000, 'cashier-1');
+    expect(result.payment).toMatchObject({ amountPaid: 3000, excessCredit: 0 });
+    expect(stage).toMatchObject({ status: PaymentStageStatus.VERIFIED, amountPaid: 3000, remainingBalance: 0 });
+    expect(plan.save).toHaveBeenCalledOnce();
+  });
+
+  it('preserves partial payments without marking the whole stage paid', async () => {
+    await recordCashPayment('stage-1', 1000.25, 'cashier-1');
+    expect(stage).toMatchObject({ status: PaymentStageStatus.PENDING, amountPaid: 1000.25, remainingBalance: 1999.75 });
+    expect(plan.save).toHaveBeenCalledOnce();
+  });
+
+  it('settles a fractional balance without leaving a floating-point remainder', async () => {
+    stage.amount = 0.3;
+    stage.amountPaid = 0.1;
+    stage.remainingBalance = 0.2;
+    await recordCashPayment('stage-1', 0.2, 'cashier-1');
+    expect(stage).toMatchObject({ status: PaymentStageStatus.VERIFIED, amountPaid: 0.3, remainingBalance: 0 });
   });
 });

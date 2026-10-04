@@ -46,7 +46,10 @@ export const declinePaymentSchema = z.object({
 
 export const recordCashPaymentSchema = z.object({
   stageId: z.string().min(1),
-  amountPaid: z.number().positive().max(MAX_PAYMENT_AMOUNT),
+  amountPaid: z.number().positive().max(MAX_PAYMENT_AMOUNT).refine(
+    (amount) => Number(amount.toFixed(2)) === amount,
+    { message: 'Use no more than two decimal places' },
+  ),
 });
 
 export type CreatePaymentPlanInput = z.infer<typeof createPaymentPlanSchema>;
