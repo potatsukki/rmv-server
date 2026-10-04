@@ -799,7 +799,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
     const conversionRate = totalProjects > 0 ? completedProjects / totalProjects : 0;
 
     // ── Pending installation confirmations (customer-facing) ──
-    // Legacy projects confirm after fabrication; on-site projects confirm before site preparation.
+    // Legacy projects confirm after fabrication; on-site projects confirm before completion.
     let pendingInstallationConfirmations: { _id: string; title: string }[] = [];
     if (isCustomerOnly && userId) {
       const readyProjects = await FabricationUpdate.aggregate([

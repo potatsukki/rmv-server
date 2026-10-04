@@ -104,12 +104,15 @@ export enum PaymentMethod {
 // ── Fabrication Status ──
 export enum FabricationStatus {
   QUEUED = 'queued',
+  // Legacy on-site values stay valid for stored history; new transitions use the six-stage flow.
   SITE_PREPARATION = 'site_preparation',
   MEASUREMENT_LAYOUT = 'measurement_layout',
   MATERIAL_PREP = 'material_prep',
   CUTTING = 'cutting',
   WELDING = 'welding',
   ASSEMBLY = 'assembly',
+  FABRICATION = 'fabrication',
+  INSTALLATION = 'installation',
   FABRICATION_INSTALLATION = 'fabrication_installation',
   WELDING_ASSEMBLY = 'welding_assembly',
   FINISHING = 'finishing',

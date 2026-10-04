@@ -7,6 +7,8 @@ import {
   DeliveryType, FabricationStatus, PaymentStageStatus, ProjectStatus, AuditAction, NotificationCategory, Role,
 } from '../../utils/constants.js';
 import { getFabricationStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
+import { ON_SITE_FABRICATION_STAGES, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
+import type { IFabricationUpdate } from '../../models/FabricationUpdate.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { createAndSendNotification, getIO } from '../notifications/socket.service.js';
 import { sendFabricationUpdateEmail, sendPaymentHeadsUpEmail, sendPaymentDueEmail, sendReadyForDeliveryEmail, sendProjectCompletedEmail } from '../notifications/email.service.js';
@@ -28,21 +30,15 @@ const SHOP_FABRICATION_STAGE_ORDER = [
   FabricationStatus.DONE,
 ];
 
-const ON_SITE_INSTALLATION_STAGE_ORDER = [
-  FabricationStatus.SITE_PREPARATION,
-  FabricationStatus.MEASUREMENT_LAYOUT,
-  FabricationStatus.MATERIAL_PREP,
-  FabricationStatus.FABRICATION_INSTALLATION,
-  FabricationStatus.WELDING_ASSEMBLY,
-  FabricationStatus.FINISHING,
-  FabricationStatus.QUALITY_CHECK,
-  FabricationStatus.TURNOVER,
-];
-
 function getFabricationStageOrder(deliveryType?: string) {
   return deliveryType === DeliveryType.ON_SITE_INSTALLATION
-    ? ON_SITE_INSTALLATION_STAGE_ORDER
+    ? ON_SITE_FABRICATION_STAGES
     : SHOP_FABRICATION_STAGE_ORDER;
+}
+
+function normalizeFabricationUpdate(update: IFabricationUpdate, deliveryType?: string) {
+  const status = normalizeFabricationStatus(update.status, deliveryType);
+  return status === update.status ? update : { ...update.toObject(), status };
 }
 
 /**
@@ -113,13 +109,9 @@ export async function createFabricationUpdate(
   const latestUpdate = await FabricationUpdate.findOne(itemScopedQuery(input.projectId, input.projectItemId))
     .sort({ createdAt: -1 });
 
-  const currentStatus = latestUpdate
-    ? latestUpdate.status
-    : FabricationStatus.QUEUED;
-  const deliveryType = (project as any).deliveryType as DeliveryType | undefined;
-  const terminalStatus = deliveryType === DeliveryType.ON_SITE_INSTALLATION
-    ? FabricationStatus.TURNOVER
-    : FabricationStatus.DONE;
+  const deliveryType = project.deliveryType;
+  const currentStatus = normalizeFabricationStatus(latestUpdate?.status || FabricationStatus.QUEUED, deliveryType);
+  const terminalStatus = FabricationStatus.DONE;
 
   // Validate status transition (forward-only)
   getFabricationStateMachine(deliveryType).assertTransition(currentStatus, input.status);
@@ -142,7 +134,7 @@ export async function createFabricationUpdate(
   // Schedule confirmation gates completion, allowing paid on-site work to progress first.
   // Legacy projects without a delivery type retain the previous confirmation gate at Done.
   const requiresInstallationConfirmation = (
-    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.TURNOVER
+    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.DONE
   ) || (
     !deliveryType && input.status === FabricationStatus.DONE
   );
@@ -205,17 +197,15 @@ export async function createFabricationUpdate(
   if (customer) {
     const statusLabels: Record<string, string> = {
       [FabricationStatus.MATERIAL_PREP]: 'Material Preparation',
-      [FabricationStatus.SITE_PREPARATION]: 'Site Preparation',
-      [FabricationStatus.MEASUREMENT_LAYOUT]: 'Measurement / Layout',
       [FabricationStatus.CUTTING]: 'Cutting',
       [FabricationStatus.WELDING]: 'Welding',
       [FabricationStatus.ASSEMBLY]: 'Assembly',
-      [FabricationStatus.FABRICATION_INSTALLATION]: 'Fabrication / Installation',
+      [FabricationStatus.FABRICATION]: 'Fabrication',
       [FabricationStatus.WELDING_ASSEMBLY]: 'Welding / Assembly',
+      [FabricationStatus.INSTALLATION]: 'Installation',
       [FabricationStatus.FINISHING]: 'Finishing',
       [FabricationStatus.QUALITY_CHECK]: 'Quality Check',
       [FabricationStatus.READY_FOR_DELIVERY]: 'Ready for Delivery',
-      [FabricationStatus.TURNOVER]: 'Turnover',
       [FabricationStatus.DONE]: 'Done',
     };
 
@@ -304,9 +294,9 @@ export async function createFabricationUpdate(
 
         // ── Activation trigger: stage becomes due ──
         const activationTrigger = activationMap[i] ?? null;
-        const normalizedActivationTrigger = deliveryType === DeliveryType.ON_SITE_INSTALLATION && activationTrigger === FabricationStatus.DONE
-          ? FabricationStatus.TURNOVER
-          : activationTrigger;
+        const normalizedActivationTrigger = activationTrigger
+          ? normalizeFabricationStatus(activationTrigger as FabricationStatus, deliveryType)
+          : null;
         if (normalizedActivationTrigger && normalizedActivationTrigger === input.status) {
           stage.activatedAt = new Date();
           planDirty = true;
@@ -334,15 +324,17 @@ export async function createFabricationUpdate(
 
         // ── Heads-up trigger: advance notice (stage stays locked) ──
         const headsUpTrigger = headsUpMap[i] ?? null;
-        const normalizedHeadsUpTrigger = deliveryType === DeliveryType.ON_SITE_INSTALLATION && headsUpTrigger === FabricationStatus.READY_FOR_DELIVERY
-          ? FabricationStatus.QUALITY_CHECK
-          : headsUpTrigger;
+        const normalizedHeadsUpTrigger = headsUpTrigger
+          ? normalizeFabricationStatus(headsUpTrigger as FabricationStatus, deliveryType)
+          : null;
         if (normalizedHeadsUpTrigger && normalizedHeadsUpTrigger === input.status && !stage.headsUpSentAt) {
           stage.headsUpSentAt = new Date();
           planDirty = true;
 
           if (customer) {
-            const statusLabel = input.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            const statusLabel = input.status === FabricationStatus.WELDING_ASSEMBLY
+              ? 'Welding / Assembly'
+              : input.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
             await createAndSendNotification(
               project.customerId,
               NotificationCategory.PAYMENT,
@@ -408,6 +400,9 @@ export async function updateFabricationUpdate(
     throw AppError.forbidden('You can only edit your own updates');
   }
 
+  const project = await Project.findById(update.projectId)
+    .select('customerId fabricationLeadId fabricationAssistantIds engineerIds deliveryType');
+
   if (input.notes !== undefined) update.notes = input.notes;
   if (input.photoKeys !== undefined) update.photoKeys = input.photoKeys;
   await update.save();
@@ -423,8 +418,6 @@ export async function updateFabricationUpdate(
   // Notify stakeholders in real-time
   try {
     const io = getIO();
-    const project = await Project.findById(update.projectId)
-      .select('customerId fabricationLeadId fabricationAssistantIds engineerIds');
     if (project) {
       const rooms = new Set<string>();
       rooms.add(`user:${project.customerId}`);
@@ -438,7 +431,7 @@ export async function updateFabricationUpdate(
     logger.warn('Failed to emit fabrication:update on edit', err);
   }
 
-  return update;
+  return normalizeFabricationUpdate(update, project?.deliveryType);
 }
 
 // ── Delete a Fabrication Update (author or admin only) ──
@@ -494,23 +487,23 @@ async function assertFabricationProjectAccess(
   projectId: string,
   actorId: string,
   actorRoles: Role[],
-): Promise<void> {
+): Promise<DeliveryType | undefined> {
   const project = await Project.findById(projectId)
-    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds status');
+    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds status deliveryType');
   if (!project) throw AppError.notFound('Project not found');
 
-  if (actorRoles.includes(Role.ADMIN)) return;
+  if (actorRoles.includes(Role.ADMIN)) return project.deliveryType;
 
-  if (actorRoles.includes(Role.CUSTOMER) && project.customerId.toString() === actorId) return;
-  if (actorRoles.includes(Role.SALES_STAFF) && project.salesStaffId?.toString() === actorId) return;
+  if (actorRoles.includes(Role.CUSTOMER) && project.customerId.toString() === actorId) return project.deliveryType;
+  if (actorRoles.includes(Role.SALES_STAFF) && project.salesStaffId?.toString() === actorId) return project.deliveryType;
 
-  if (actorRoles.includes(Role.ENGINEER)) return;
+  if (actorRoles.includes(Role.ENGINEER)) return project.deliveryType;
 
   if (
     actorRoles.includes(Role.FABRICATION_STAFF) &&
     (project.fabricationLeadId?.toString() === actorId ||
       project.fabricationAssistantIds.some((id) => id.toString() === actorId))
-  ) return;
+  ) return project.deliveryType;
 
   throw AppError.forbidden('Access denied');
 }
@@ -574,11 +567,11 @@ export async function listFabricationUpdates(
   actorRoles: Role[],
   projectItemId?: string,
 ) {
-  await assertFabricationProjectAccess(projectId, actorId, actorRoles);
+  const deliveryType = await assertFabricationProjectAccess(projectId, actorId, actorRoles);
   const updates = await FabricationUpdate.find(itemScopedQuery(projectId, projectItemId))
     .populate('updatedBy', 'firstName lastName')
     .sort({ createdAt: 1 });
-  return updates;
+  return updates.map((update) => normalizeFabricationUpdate(update, deliveryType));
 }
 
 // ── Get Latest Fabrication Status ──
@@ -589,10 +582,7 @@ export async function getLatestFabricationStatus(
   actorRoles: Role[],
   projectItemId?: string,
 ) {
-  await assertFabricationProjectAccess(projectId, actorId, actorRoles);
-  const project = await Project.findById(projectId).select('deliveryType');
-  if (!project) throw AppError.notFound('Project not found');
-  const deliveryType = (project as any).deliveryType as DeliveryType | undefined;
+  const deliveryType = await assertFabricationProjectAccess(projectId, actorId, actorRoles);
   const latest = await FabricationUpdate.findOne(itemScopedQuery(projectId, projectItemId))
     .sort({ createdAt: -1 })
     .populate('updatedBy', 'firstName lastName');
@@ -605,9 +595,8 @@ export async function getLatestFabricationStatus(
   const unpaidCount = totalStages - paidCount;
 
   // Build per-transition gate requirements
-  const allowedTransitions = getFabricationStateMachine(deliveryType).getAllowed(
-    latest?.status || FabricationStatus.QUEUED,
-  );
+  const currentStatus = normalizeFabricationStatus(latest?.status || FabricationStatus.QUEUED, deliveryType);
+  const allowedTransitions = getFabricationStateMachine(deliveryType).getAllowed(currentStatus);
 
   const stageGates: Record<string, { requiredPaid: number; currentPaid: number; blocked: boolean; nextUnpaidLabel?: string }> = {};
   if (totalStages > 0) {
@@ -629,12 +618,12 @@ export async function getLatestFabricationStatus(
     lifecycleStatuses: getFabricationStageOrder(deliveryType),
     requiresInstallationConfirmation: deliveryType !== DeliveryType.SHOP_FABRICATED,
     confirmationGateStatus: deliveryType === DeliveryType.ON_SITE_INSTALLATION
-      ? FabricationStatus.TURNOVER
+      ? FabricationStatus.DONE
       : !deliveryType
         ? FabricationStatus.DONE
         : null,
-    currentStatus: latest?.status || FabricationStatus.QUEUED,
-    latestUpdate: latest,
+    currentStatus,
+    latestUpdate: latest ? normalizeFabricationUpdate(latest, deliveryType) : null,
     allowedTransitions,
     paymentGate: {
       allPaid,
@@ -656,6 +645,6 @@ export async function getFabricationUpdateById(
   const update = await FabricationUpdate.findById(updateId)
     .populate('updatedBy', 'firstName lastName');
   if (!update) throw AppError.notFound('Fabrication update not found');
-  await assertFabricationProjectAccess(update.projectId.toString(), actorId, actorRoles);
-  return update;
+  const deliveryType = await assertFabricationProjectAccess(update.projectId.toString(), actorId, actorRoles);
+  return normalizeFabricationUpdate(update, deliveryType);
 }
