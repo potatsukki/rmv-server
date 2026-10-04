@@ -16,6 +16,7 @@ import { logger } from '../../utils/logger.js';
 import type {
   CreateProjectInput,
   UpdateProjectInput,
+  UpdateProjectSiteAddressInput,
   AssignEngineersInput,
   ReassignProjectSalesInput,
   AssignFabricationInput,
@@ -755,6 +756,43 @@ export async function updateProject(
     userAgent: ua,
   });
 
+  return project;
+}
+
+// ── Update Fabricator Site Address ──
+
+export async function updateProjectSiteAddress(
+  projectId: string,
+  input: UpdateProjectSiteAddressInput,
+  actorId: string,
+  ip?: string,
+  ua?: string,
+  actorRoles: Role[] = [],
+) {
+  const project = await Project.findById(projectId);
+  if (!project) throw AppError.notFound('Project not found');
+
+  const isAssignedFabricator = actorRoles.includes(Role.FABRICATION_STAFF)
+    && [project.fabricationLeadId, ...project.fabricationAssistantIds]
+      .some((memberId) => memberId?.toString() === actorId);
+  if (!actorRoles.includes(Role.ADMIN) && !isAssignedFabricator) {
+    throw AppError.forbidden('Only the assigned fabrication team can update the project site address');
+  }
+  if ([ProjectStatus.COMPLETED, ProjectStatus.CANCELLED].includes(project.status)) {
+    throw AppError.badRequest('The site address cannot be changed for a completed or cancelled project');
+  }
+
+  project.siteAddress = input.siteAddress;
+  await project.save();
+  await AuditLog.create({
+    action: AuditAction.PROJECT_UPDATED,
+    actorId,
+    targetType: 'project',
+    targetId: project._id,
+    details: { siteAddress: input.siteAddress },
+    ipAddress: ip,
+    userAgent: ua,
+  });
   return project;
 }
 

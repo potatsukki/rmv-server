@@ -46,7 +46,7 @@ vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() })
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 
-import { assignFabricationStaff, createProject, updateProject } from './projects.service.js';
+import { assignFabricationStaff, createProject, updateProject, updateProjectSiteAddress } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -122,6 +122,19 @@ describe('createProject', () => {
       ipAddress: '127.0.0.1',
       userAgent: 'vitest',
     }));
+  });
+
+  it.each([false, true])('creates a project without a site address with ocular selected: %s', async (withOcular) => {
+    const { siteAddress: _siteAddress, ...withoutAddress } = input;
+    const report = { _id: 'report-1', serviceType: 'gates', save: vi.fn() };
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([report]) });
+    const project = await createProject({
+      ...withoutAddress,
+      appointmentId,
+      ocularVisit: withOcular ? { date: '2026-10-08', slotCode: '09:00' } : undefined,
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+    expect(project.siteAddress).toBeUndefined();
+    expect(project.status).toBe(withOcular ? ProjectStatus.DRAFT : ProjectStatus.SUBMITTED);
   });
 
   it('imports every appointment service as a separate project item with its own visit details', async () => {
@@ -548,5 +561,56 @@ describe('updateProject delivery type authorization', () => {
     );
     expect(project.deliveryType).toBe(DeliveryType.ON_SITE_INSTALLATION);
     expect(project.save).toHaveBeenCalled();
+  });
+});
+
+describe('updateProjectSiteAddress', () => {
+  const address = { siteAddress: '456 Installation Street' };
+  let project: { _id: string; status: ProjectStatus; siteAddress?: string; fabricationLeadId: string; fabricationAssistantIds: string[]; save: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = {
+      _id: 'project-1', status: ProjectStatus.FABRICATION,
+      fabricationLeadId: 'fabricator-1', fabricationAssistantIds: ['assistant-1'],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+  });
+
+  it.each(['fabricator-1', 'assistant-1'])('persists the address entered by assigned member %s', async (memberId) => {
+    const result = await updateProjectSiteAddress('project-1', address, memberId, '127.0.0.1', 'vitest', [Role.FABRICATION_STAFF]);
+    expect(result.siteAddress).toBe(address.siteAddress);
+    expect(project.save).toHaveBeenCalledOnce();
+    expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: memberId, action: AuditAction.PROJECT_UPDATED, targetId: 'project-1', details: address,
+    }));
+  });
+
+  it.each([
+    ['unassigned-fabricator', Role.FABRICATION_STAFF],
+    ['fabricator-1', Role.SALES_STAFF],
+    ['fabricator-1', Role.ENGINEER],
+    ['fabricator-1', Role.CUSTOMER],
+  ])('denies %s with role %s', async (memberId, role) => {
+    await expect(updateProjectSiteAddress('project-1', address, memberId, undefined, undefined, [role as Role])).rejects.toThrow('Only the assigned fabrication team');
+    expect(project.save).not.toHaveBeenCalled();
+    expect(project.siteAddress).toBeUndefined();
+  });
+
+  it('allows the admin to save an address', async () => {
+    await updateProjectSiteAddress('project-1', address, 'admin-1', undefined, undefined, [Role.ADMIN]);
+    expect(project.siteAddress).toBe(address.siteAddress);
+  });
+
+  it.each([ProjectStatus.COMPLETED, ProjectStatus.CANCELLED])('rejects changes to a %s project', async (status) => {
+    project.status = status;
+    await expect(updateProjectSiteAddress('project-1', address, 'fabricator-1', undefined, undefined, [Role.FABRICATION_STAFF])).rejects.toThrow('completed or cancelled');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('returns not found for a missing project', async () => {
+    mocks.projectFindById.mockResolvedValue(null);
+    await expect(updateProjectSiteAddress('missing', address, 'fabricator-1', undefined, undefined, [Role.FABRICATION_STAFF])).rejects.toThrow('Project not found');
   });
 });
