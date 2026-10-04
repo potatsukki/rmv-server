@@ -2,6 +2,12 @@ import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as appointmentsService from './appointments.service.js';
 import { AppointmentStatus, Role } from '../../utils/constants.js';
+import { updateAppointmentSalesNotes } from '../../services/sales-notes.service.js';
+
+export const updateSalesNotes = asyncHandler(async (req: Request, res: Response) => {
+  const appointment = await updateAppointmentSalesNotes(req.params.id as string, req.body.initialDesignNotes, req.userId!, req.userRoles ?? [], req.ip, req.get('user-agent'));
+  res.json({ success: true, data: formatAppointment(appointment) });
+});
 
 /** Map populated appointment to the shape the frontend expects */
 function formatAppointment(appt: any) {
