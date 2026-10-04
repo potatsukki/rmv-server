@@ -590,22 +590,36 @@ export async function uploadRevision(
   const project = await Project.findById(currentBlueprint.projectId);
   if (!project) throw AppError.notFound('Project not found');
 
+  const isCostingRevision = currentBlueprint.revisionComponent === 'costing';
+  const quotation = isCostingRevision ? input.quotation ?? currentBlueprint.quotation : currentBlueprint.quotation;
+  const hasNewQuotation = isCostingRevision && Boolean(input.quotation);
+  const blueprintKey = isCostingRevision ? currentBlueprint.blueprintKey : input.blueprintKey ?? currentBlueprint.blueprintKey;
+  const designKey = isCostingRevision ? currentBlueprint.designKey : input.designKey ?? currentBlueprint.designKey;
+  if (!blueprintKey || !designKey) {
+    throw AppError.badRequest('Blueprint and design files are required before submitting the revision');
+  }
+
   // Mark current as superseded by updating status
   currentBlueprint.status = BlueprintStatus.REVISION_UPLOADED;
   await currentBlueprint.save();
 
-  // Create new version (carry over quotation if provided, otherwise keep previous)
+  // Only the requested component changes; retain the other component's review state.
   const blueprint = await Blueprint.create({
     projectId: currentBlueprint.projectId,
     projectItemId: currentBlueprint.projectItemId,
     version: newVersion,
     status: BlueprintStatus.UPLOADED,
-    blueprintKey: input.blueprintKey,
-    designKey: input.designKey,
-    costingKey: input.costingKey,
+    blueprintKey,
+    designKey,
+    costingKey: isCostingRevision ? input.costingKey ?? currentBlueprint.costingKey : currentBlueprint.costingKey,
+    blueprintApproved: isCostingRevision ? currentBlueprint.blueprintApproved : false,
+    costingApproved: isCostingRevision ? false : currentBlueprint.costingApproved,
     uploadedBy,
-    quotation: input.quotation ?? currentBlueprint.quotation,
-    quotationReviewStatus: input.quotation ? 'sent_to_customer' : currentBlueprint.quotationReviewStatus,
+    quotation,
+    quotationReviewStatus: hasNewQuotation ? 'sent_to_customer' : currentBlueprint.quotationReviewStatus,
+    quotationReviewedBy: isCostingRevision ? undefined : currentBlueprint.quotationReviewedBy,
+    quotationReviewedAt: isCostingRevision ? undefined : currentBlueprint.quotationReviewedAt,
+    quotationSentAt: hasNewQuotation ? new Date() : currentBlueprint.quotationSentAt,
   });
 
   await AuditLog.create({
@@ -618,7 +632,7 @@ export async function uploadRevision(
     userAgent: ua,
   });
 
-  if (input.quotation) {
+  if (hasNewQuotation) {
     await AuditLog.create({
       action: AuditAction.QUOTATION_SENT_TO_CUSTOMER,
       actorId: uploadedBy,
@@ -628,7 +642,7 @@ export async function uploadRevision(
         projectId: currentBlueprint.projectId.toString(),
         previousId: blueprintId,
         reviewStatus: 'sent_to_customer',
-        total: input.quotation.total,
+        total: quotation!.total,
       },
       ipAddress: ip,
       userAgent: ua,
@@ -653,7 +667,7 @@ export async function uploadRevision(
     });
   }
 
-  if (input.quotation) {
+  if (hasNewQuotation) {
     await notifyCustomerAndCashierQuotationReady(project, blueprint.projectItemId);
   }
 
@@ -778,9 +792,13 @@ export async function requestRevision(
   }
 
   blueprint.status = BlueprintStatus.REVISION_REQUESTED;
-  blueprint.blueprintApproved = false;
-  blueprint.costingApproved = false;
-  blueprint.quotationReviewStatus = blueprint.quotation ? 'draft' : blueprint.quotationReviewStatus;
+  blueprint.revisionComponent = input.component ?? BlueprintComponent.BLUEPRINT;
+  if (blueprint.revisionComponent === BlueprintComponent.COSTING) {
+    blueprint.costingApproved = false;
+    blueprint.quotationReviewStatus = blueprint.quotation ? 'draft' : blueprint.quotationReviewStatus;
+  } else {
+    blueprint.blueprintApproved = false;
+  }
   blueprint.revisionNotes = input.notes;
   blueprint.revisionRefKeys = input.refKeys;
   await blueprint.save();
@@ -790,7 +808,7 @@ export async function requestRevision(
     actorId: customerId,
     targetType: 'blueprint',
     targetId: blueprint._id,
-    details: { notes: input.notes, version: blueprint.version },
+    details: { notes: input.notes, version: blueprint.version, component: blueprint.revisionComponent },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -800,7 +818,7 @@ export async function requestRevision(
     blueprint.uploadedBy,
     NotificationCategory.BLUEPRINT,
     'Revision Requested',
-    `Customer requested a revision for blueprint V${blueprint.version} of "${project.title}". Notes: ${input.notes}`,
+    `Customer requested a ${blueprint.revisionComponent} revision for V${blueprint.version} of "${project.title}". Notes: ${input.notes}`,
     buildProjectBlueprintLink(project._id.toString(), blueprint.projectItemId?.toString()),
   );
 
@@ -827,7 +845,7 @@ export async function upsertBlueprintDraft(
   const projectItem = await resolveProjectItemForBlueprint(project, projectItemId);
   const latestBlueprint = await Blueprint.findOne(itemScopedQuery(projectId, projectItemId))
     .sort({ version: -1 })
-    .select('_id status');
+    .select('_id status revisionComponent');
 
   if (input.mode === 'initial') {
     if (latestBlueprint) {
@@ -869,16 +887,19 @@ export async function upsertBlueprintDraft(
     unset.sourceBlueprintId = '';
   }
 
-  if (input.files && 'blueprint' in input.files) {
+  const canEditBlueprint = input.mode === 'initial' || latestBlueprint?.revisionComponent !== 'costing';
+  const canEditCosting = input.mode === 'initial' || latestBlueprint?.revisionComponent === 'costing';
+
+  if (canEditBlueprint && input.files && 'blueprint' in input.files) {
     set['files.blueprint'] = normalizeDraftFile(input.files.blueprint ?? null) ?? null;
   }
-  if (input.files && 'design' in input.files) {
+  if (canEditBlueprint && input.files && 'design' in input.files) {
     set['files.design'] = normalizeDraftFile(input.files.design ?? null) ?? null;
   }
-  if (input.files && 'costing' in input.files) {
+  if (canEditCosting && input.files && 'costing' in input.files) {
     set['files.costing'] = normalizeDraftFile(input.files.costing ?? null) ?? null;
   }
-  if (input.quotation !== undefined) {
+  if (canEditCosting && input.quotation !== undefined) {
     set.quotation = normalizeDraftQuotation(input.quotation);
   }
 
@@ -968,7 +989,7 @@ export async function finalizeBlueprintDraft(
   const designKey = draft.files?.design?.key;
   const costingKey = draft.files?.costing?.key;
 
-  if (!blueprintKey || !designKey) {
+  if (draft.mode === 'initial' && (!blueprintKey || !designKey)) {
     throw AppError.badRequest('Blueprint and design files are required before finalizing the draft');
   }
 
@@ -984,7 +1005,7 @@ export async function finalizeBlueprintDraft(
         {
           blueprintKey,
           designKey,
-          costingKey: costingKey || '',
+          costingKey,
           quotation,
         },
         actorId,
@@ -995,8 +1016,8 @@ export async function finalizeBlueprintDraft(
         {
           projectId,
           projectItemId: draft.projectItemId?.toString() || projectItemId,
-          blueprintKey,
-          designKey,
+          blueprintKey: blueprintKey!,
+          designKey: designKey!,
           costingKey: costingKey || '',
           quotation,
         },

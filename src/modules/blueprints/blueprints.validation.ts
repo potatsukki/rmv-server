@@ -62,9 +62,9 @@ export const uploadBlueprintSchema = z.object({
 });
 
 export const revisionUploadSchema = z.object({
-  blueprintKey: z.string().min(1),
-  designKey: z.string().min(1),
-  costingKey: z.string().optional().default(''),
+  blueprintKey: z.string().min(1).optional(),
+  designKey: z.string().min(1).optional(),
+  costingKey: z.string().optional(),
   quotation: quotationSchema.optional(),
 });
 
@@ -73,6 +73,7 @@ export const approveBlueprintSchema = z.object({
 });
 
 export const requestRevisionSchema = z.object({
+  component: z.nativeEnum(BlueprintComponent).default(BlueprintComponent.BLUEPRINT),
   notes: z.string().min(1).max(2000).trim(),
   refKeys: z.array(z.string()).max(5).default([]),
 });
