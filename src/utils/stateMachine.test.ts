@@ -130,12 +130,18 @@ describe('delivery-type fabrication lifecycles', () => {
     expect(machine.getAllowed(FabricationStatus.READY_FOR_DELIVERY)).toEqual([FabricationStatus.DONE]);
   });
 
-  it('uses the on-site installation sequence', () => {
+  it('enforces only the six on-site stages in order, including the first update', () => {
     const machine = getFabricationStateMachine(DeliveryType.ON_SITE_INSTALLATION);
-    expect(machine.getAllowed(FabricationStatus.QUEUED)).toEqual([FabricationStatus.SITE_PREPARATION]);
-    expect(machine.getAllowed(FabricationStatus.MEASUREMENT_LAYOUT)).toEqual([FabricationStatus.MATERIAL_PREP]);
-    expect(machine.getAllowed(FabricationStatus.MATERIAL_PREP)).toEqual([FabricationStatus.FABRICATION_INSTALLATION]);
-    expect(machine.getAllowed(FabricationStatus.QUALITY_CHECK)).toEqual([FabricationStatus.TURNOVER]);
-    expect(machine.getAllowed(FabricationStatus.TURNOVER)).toEqual([]);
+    const stages = ['fabrication', 'welding_assembly', 'installation', 'finishing', 'quality_check', 'done'] as FabricationStatus[];
+    expect(machine.getAllowed(FabricationStatus.QUEUED)).toEqual([stages[0]]);
+    for (const [index, stage] of stages.entries()) {
+      expect(machine.getAllowed(stage)).toEqual(stages.slice(index + 1, index + 2));
+      for (const target of Object.values(FabricationStatus)) {
+        expect(machine.canTransition(stage, target)).toBe(target === stages[index + 1]);
+      }
+    }
+    for (const removed of [FabricationStatus.SITE_PREPARATION, FabricationStatus.MEASUREMENT_LAYOUT, FabricationStatus.MATERIAL_PREP, FabricationStatus.FABRICATION_INSTALLATION, FabricationStatus.TURNOVER]) {
+      expect(machine.canTransition(FabricationStatus.QUEUED, removed)).toBe(false);
+    }
   });
 });
