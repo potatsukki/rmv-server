@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockAppointmentExists,
@@ -101,8 +101,16 @@ describe('availability-session.service summary', () => {
 });
 
 describe('availability-session.service sales assignment eligibility', () => {
+  beforeEach(() => {
+    // Exercise the April fixture during its active shift, independently of the
+    // date on which the suite runs. Other tests still check expired shifts.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-04-23T00:30:00.000Z'));
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it('respects unavailable overrides even when an old available session exists', async () => {
@@ -242,5 +250,30 @@ describe('availability-session.service sales assignment eligibility', () => {
     });
 
     expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  it('allows a timed-in employee without a scheduled shift end', async () => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockAppointmentCountDocuments.mockResolvedValueOnce(0);
+    mockAppointmentExists.mockResolvedValueOnce(null);
+    const result = await evaluateSalesAssignmentEligibility({
+      salesStaffId: 'sales-1', userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      session: buildSession({ shiftEndAt: undefined }) as never,
+      dateStr: '2026-04-23', slotCode: '09:00', appointmentType: AppointmentType.OFFICE,
+    });
+    expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  it.each([
+    [{ shiftEndAt: new Date('2026-04-23T00:00:00Z') }, 'Shift ended'],
+    [{ closedAt: new Date('2026-04-23T00:00:00Z') }, 'Setup required'],
+    [{ shiftStartAt: new Date('2026-04-23T03:00:00Z') }, 'Off shift'],
+  ])('rejects an expired, closed, or off-shift session: %s', async (overrides, reason) => {
+    const result = await evaluateSalesAssignmentEligibility({
+      salesStaffId: 'sales-1', userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      session: buildSession(overrides) as never, dateStr: '2026-04-23', slotCode: '09:00',
+    });
+    expect(result).toEqual({ assignmentEligible: false, assignmentBlockedReason: reason });
+    expect(mockAppointmentExists).not.toHaveBeenCalled();
   });
 });

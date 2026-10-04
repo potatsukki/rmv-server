@@ -4,11 +4,12 @@ import { StaffAvailabilityStatus } from '../../utils/constants.js';
 import {
   salesStaffLookupQuerySchema,
   updateOwnAvailabilitySchema,
+  updateUserSchema,
 } from './users.validation.js';
 
-describe('users.validation availability rules', () => {
+describe('users.validation admin-managed availability rules', () => {
   it('requires shift bounds when marking availability as available', () => {
-    const result = updateOwnAvailabilitySchema.safeParse({
+    const result = updateUserSchema.safeParse({
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       availabilityNote: 'On-site work',
     });
@@ -21,7 +22,7 @@ describe('users.validation availability rules', () => {
   });
 
   it('rejects shift windows where the end is not after the start', () => {
-    const result = updateOwnAvailabilitySchema.safeParse({
+    const result = updateUserSchema.safeParse({
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       shiftStartAt: '2026-04-23T08:00:00.000Z',
       shiftEndAt: '2026-04-23T08:00:00.000Z',
@@ -32,7 +33,7 @@ describe('users.validation availability rules', () => {
   });
 
   it('allows unavailable status without shift times', () => {
-    const result = updateOwnAvailabilitySchema.safeParse({
+    const result = updateUserSchema.safeParse({
       availabilityStatus: StaffAvailabilityStatus.UNAVAILABLE,
       availabilityNote: 'Not reporting today',
     });
@@ -43,6 +44,22 @@ describe('users.validation availability rules', () => {
       availabilityNote: 'Not reporting today',
     });
   });
+});
+
+describe('users.validation employee time-in rules', () => {
+  it('accepts time-in without client-selected shift times', () => {
+    expect(updateOwnAvailabilitySchema.safeParse({
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      availabilityNote: 'Timed in',
+    }).success).toBe(true);
+    expect(updateOwnAvailabilitySchema.safeParse({}).success).toBe(true);
+  });
+
+  it.each([StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE])(
+    'does not allow employees to set admin-managed status %s through time-in', (availabilityStatus) => {
+      expect(updateOwnAvailabilitySchema.safeParse({ availabilityStatus }).success).toBe(false);
+    },
+  );
 });
 
 describe('users.validation sales staff lookup query', () => {
