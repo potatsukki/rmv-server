@@ -10,7 +10,7 @@ env:
 
 jobs:
   ci:
-    name: Build Check
+    name: Tests and Build Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,6 +24,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test
+        run: npm run test -- --run
 
       - name: Build
         run: npm run build
