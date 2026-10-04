@@ -32,8 +32,8 @@ export const createProjectSchema = z.object({
   ...projectDetailsSchema.shape,
   customerId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid customer ID').optional(),
   appointmentId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid appointment ID').optional(),
-  title: z.string().trim().min(1).max(100),
-  serviceType: z.string().trim().min(1).max(100),
+  title: z.string().trim().min(1).max(100).optional(),
+  serviceType: z.string().trim().min(1).max(100).optional(),
   deliveryType: z.nativeEnum(DeliveryType).optional(),
   description: z.string().trim().max(2000).optional(),
   siteAddress: z.string().trim().min(1).max(500).optional(),
@@ -49,7 +49,7 @@ export const createProjectSchema = z.object({
   finishColor: z.string().max(500).optional(),
   quantity: z.number().int().min(1).default(1),
   notes: z.string().max(2000).trim().optional(),
-  contractFileKey: signedContractFileKeySchema,
+  contractFileKey: signedContractFileKeySchema.optional(),
   contractFileName: z.string().max(255).trim().optional(),
   contractContentType: z.string().max(100).trim().optional(),
   contractFileSize: z.number().int().positive().optional(),
@@ -60,8 +60,16 @@ export const createProjectSchema = z.object({
 }).refine((input) => Boolean(input.customerId || input.appointmentId), {
   message: 'Select a customer for the project',
   path: ['customerId'],
-}).refine((input) => !input.ocularVisit || Boolean(input.appointmentId), {
-  message: 'An ocular visit requires a completed appointment',
+}).superRefine((input, ctx) => {
+  if (!input.ocularVisit) {
+    for (const field of ['title', 'serviceType', 'contractFileKey'] as const) {
+      if (!input[field]) ctx.addIssue({ code: 'custom', message: 'Required for a final project', path: [field] });
+    }
+  }
+});
+
+export const finalizeOcularProjectSchema = createProjectSchema.refine((input) => !input.ocularVisit, {
+  message: 'The ocular visit is already scheduled',
   path: ['ocularVisit'],
 });
 

@@ -32,6 +32,11 @@ export const createProject = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
+export const finalizeOcularProject = asyncHandler(async (req: Request, res: Response) => {
+  const project = await projectsService.finalizeOcularProject(req.params.id as string, req.body, req.userId!, req.userRoles || [], req.ip, req.get('user-agent'));
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
+});
+
 export const updateProject = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.updateProject((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'), req.userRoles || []);
   res.json({ success: true, data: serializeProjectForActor(project, req) });

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   appointmentCreate: vi.fn(),
   projectFindOne: vi.fn(),
   projectFindById: vi.fn(),
+  projectFindOneAndUpdate: vi.fn(),
   projectCreate: vi.fn(),
   userFindOne: vi.fn(),
   auditCreate: vi.fn(),
@@ -17,10 +18,11 @@ const mocks = vi.hoisted(() => ({
   blueprintFindOne: vi.fn(),
   paymentPlanFindOne: vi.fn(),
   generateProjectNumber: vi.fn(),
+  prepareOcularSchedule: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, create: mocks.projectCreate },
+  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, findOneAndUpdate: mocks.projectFindOneAndUpdate, create: mocks.projectCreate },
   ProjectItem: {
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
@@ -45,8 +47,9 @@ vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn(
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
+vi.mock('../appointments/appointments.service.js', () => ({ prepareProjectOcularSchedule: mocks.prepareOcularSchedule }));
 
-import { assignFabricationStaff, createProject, updateProject, updateProjectSiteAddress } from './projects.service.js';
+import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, transitionProject, uploadSignedContract, updateProject, updateProjectSiteAddress } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -66,6 +69,100 @@ const input = {
   notes: 'Use project measurements',
   contractFileKey: 'contracts/signed-contract.pdf',
 };
+
+describe('finalizeOcularProject', () => {
+  let draft: Record<string, any>;
+  let reports: Record<string, any>[];
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    draft = {
+      _id: 'project-1', customerId, salesStaffId: actorId,
+      projectNumber: 'RMV-2026-0001', ocularAppointmentId: 'ocular-1',
+      status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING,
+      serviceType: 'gates', serviceTypes: ['gates'], initialDesignKeys: [],
+      engineerIds: [], save: vi.fn(),
+    };
+    reports = [{
+      _id: 'report-1', serviceType: 'gates', visitType: 'ocular', status: 'submitted',
+      materials: 'Original ocular material', lineItems: [{ label: 'Gate', quantity: 1 }],
+      linkedProjectId: 'project-1', save: vi.fn(),
+    }];
+    mocks.projectFindById.mockResolvedValue(draft);
+    mocks.projectFindOneAndUpdate.mockImplementation(async (_filter, update) => Object.assign(draft, update.$set));
+    mocks.appointmentFindById.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.COMPLETED });
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(reports) });
+    mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({ _id: 'item-1', ...update.$set, save: vi.fn() }));
+    vi.mocked(verifyFileExists).mockResolvedValue(true);
+  });
+
+  it('creates the final project on the same record and keeps sales edits in the primary item', async () => {
+    const project = await finalizeOcularProject('project-1', { ...input, serviceType: 'gates' }, actorId, [Role.SALES_STAFF]);
+    expect(project).toMatchObject({
+      _id: 'project-1', projectNumber: 'RMV-2026-0001',
+      status: ProjectStatus.SUBMITTED, contractStatus: ContractStatus.UPLOADED,
+      contractFileKey: input.contractFileKey, materialType: input.materialType,
+    });
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+    expect(mocks.appointmentCreate).not.toHaveBeenCalled();
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenLastCalledWith(
+      { projectId: 'project-1', serviceType: 'gates' },
+      expect.objectContaining({ $set: expect.objectContaining({ materials: input.materialType }) }),
+      { upsert: true, new: true },
+    );
+    expect(reports[0].materials).toBe('Original ocular material');
+  });
+
+  it.each([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.CANCELLED])('rejects finalization while the ocular is %s', async (status) => {
+    mocks.appointmentFindById.mockResolvedValue({ _id: 'ocular-1', status });
+    await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('Complete the ocular visit');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('requires every ocular report to be submitted', async () => {
+    reports.push({ _id: 'report-2', serviceType: 'railings', status: 'draft' });
+    await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit all ocular reports');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('requires a signed contract', async () => {
+    await expect(finalizeOcularProject('project-1', { ...input, contractFileKey: undefined }, actorId, [Role.SALES_STAFF])).rejects.toThrow('upload the signed contract');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unverified contract before changing the pending record', async () => {
+    vi.mocked(verifyFileExists).mockResolvedValue(false);
+    await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('could not be verified');
+    expect(draft.status).toBe(ProjectStatus.DRAFT);
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects another sales staff and a customer change', async () => {
+    await expect(finalizeOcularProject('project-1', input, 'another-sales', [Role.SALES_STAFF])).rejects.toThrow('Only the assigned sales staff');
+    await expect(finalizeOcularProject('project-1', { ...input, customerId: appointmentId }, actorId, [Role.SALES_STAFF])).rejects.toThrow('customer cannot be changed');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects a repeat finalization', async () => {
+    draft.status = ProjectStatus.SUBMITTED;
+    await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('no longer pending');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects a competing finalization without updating items twice', async () => {
+    mocks.projectFindOneAndUpdate.mockResolvedValue(null);
+    await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('no longer pending');
+    expect(mocks.projectItemFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('keeps Pending Ocular out of engineering even if a contract was uploaded early', async () => {
+    draft.contractStatus = ContractStatus.UPLOADED;
+    await expect(assignEngineers('project-1', { engineerIds: ['engineer-1'] }, actorId)).rejects.toThrow('Complete the pending ocular project');
+    await expect(transitionProject('project-1', { status: ProjectStatus.SUBMITTED }, actorId)).rejects.toThrow('Complete the pending ocular project');
+    await expect(uploadSignedContract('project-1', { contractFileKey: input.contractFileKey }, actorId, [Role.SALES_STAFF])).rejects.toThrow('Use Complete Project');
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+});
 
 function appointment(overrides: Record<string, unknown> = {}) {
   return {
@@ -87,7 +184,8 @@ describe('createProject', () => {
     mocks.projectFindOne.mockResolvedValue(null);
     mocks.userFindOne.mockResolvedValue({ _id: customerId, roles: [Role.CUSTOMER], isActive: true });
     mocks.generateProjectNumber.mockResolvedValue('RMV-2026-0001');
-    mocks.projectCreate.mockImplementation(async (payload) => ({ _id: 'project-1', ...payload }));
+    mocks.projectCreate.mockImplementation(async (payload) => ({ _id: 'project-1', ...payload, save: vi.fn() }));
+    mocks.prepareOcularSchedule.mockResolvedValue(actorId);
     mocks.appointmentCreate.mockImplementation(async (payload) => ({ _id: 'ocular-appointment-1', ...payload }));
     mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
     mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
@@ -98,6 +196,27 @@ describe('createProject', () => {
     }));
     mocks.auditCreate.mockResolvedValue({});
     vi.mocked(verifyFileExists).mockResolvedValue(true);
+  });
+
+  it.each([undefined, appointmentId])('saves an ocular draft without a signed contract (appointment: %s)', async (sourceAppointmentId) => {
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([{ _id: 'report-1', serviceType: 'gates', save: vi.fn() }]) });
+    const project = await createProject({
+      customerId,
+      appointmentId: sourceAppointmentId,
+      quantity: 1,
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+    expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING, ocularAppointmentId: 'ocular-appointment-1' });
+    expect(verifyFileExists).not.toHaveBeenCalled();
+    expect(mocks.appointmentCreate).toHaveBeenCalledOnce();
+    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ customerId, date: '2026-10-08', slotCode: '09:00' }));
+  });
+
+  it('does not persist a draft or appointment when the ocular schedule is unavailable', async () => {
+    mocks.prepareOcularSchedule.mockRejectedValue(new Error('Slot unavailable'));
+    await expect(createProject({ ...input, ocularVisit: { date: '2026-10-08', slotCode: '09:00' } }, actorId, undefined, undefined, [Role.SALES_STAFF])).rejects.toThrow('Slot unavailable');
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+    expect(mocks.appointmentCreate).not.toHaveBeenCalled();
   });
 
   it('creates a standalone draft using the project form and the acting sales staff', async () => {

@@ -6,6 +6,7 @@ import { validate } from '../../middleware/validate.js';
 import { Role } from '../../utils/constants.js';
 import {
   createProjectSchema,
+  finalizeOcularProjectSchema,
   updateProjectSchema,
   updateProjectSiteAddressSchema,
   assignEngineersSchema,
@@ -38,6 +39,14 @@ router.patch(
   authorize(Role.SALES_STAFF, Role.ENGINEER, Role.ADMIN),
   validate(updateProjectSchema),
   ctrl.updateProject,
+);
+
+router.post(
+  '/:id/finalize-ocular',
+  authenticate,
+  authorize(Role.SALES_STAFF, Role.ADMIN),
+  validate(finalizeOcularProjectSchema),
+  ctrl.finalizeOcularProject,
 );
 
 router.patch(

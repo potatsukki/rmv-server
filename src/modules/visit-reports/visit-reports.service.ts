@@ -977,20 +977,24 @@ function getIncompleteOcularFields(report: {
 }
 
 async function notifySalesContractUploadRequired(project: any, serviceLabel: string, reason: string) {
+  const pendingOcular = project.status === ProjectStatus.DRAFT && project.ocularAppointmentId;
+  const path = pendingOcular ? `/projects/create?pendingProjectId=${project._id}` : `/projects/${project._id}/contract`;
   await notifyRole(
     Role.ADMIN,
     NotificationCategory.PROJECT,
     'Signed Contract Required',
     `Project "${serviceLabel}" is ready for signed contract upload before engineering can claim it. ${reason}`,
-    `/projects/${project._id}/contract`,
+    path,
   );
 
   await createAndSendNotification(
     project.salesStaffId,
     NotificationCategory.PROJECT,
-    'Upload Signed Contract',
-    `Upload the manually signed contract for "${serviceLabel}" so engineering can claim the project.`,
-    `/projects/${project._id}/contract`,
+    pendingOcular ? 'Complete Project' : 'Upload Signed Contract',
+    pendingOcular
+      ? `Complete the project details and upload the signed contract for "${serviceLabel}" after the ocular visit.`
+      : `Upload the manually signed contract for "${serviceLabel}" so engineering can claim the project.`,
+    path,
   );
 }
 
@@ -2009,6 +2013,7 @@ export async function submitReport(
 
       const submitProjectAfterOcular = Boolean(
         linkedProject.status === ProjectStatus.DRAFT
+        && !linkedProject.ocularAppointmentId
         && linkedProject.contractStatus === ContractStatus.UPLOADED,
       );
       if (submitProjectAfterOcular) {

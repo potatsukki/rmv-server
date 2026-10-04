@@ -37,6 +37,7 @@ import { PaymentStageStatus } from '../../utils/constants.js';
 import { getInstallmentConfig } from '../config/config.service.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
+import { prepareProjectOcularSchedule } from '../appointments/appointments.service.js';
 import {
   activeProjectStatusesForRoles,
   maskProjectTotalCostForActor,
@@ -534,14 +535,27 @@ export async function createProject(
   const customer = await User.findOne({ _id: customerId, roles: Role.CUSTOMER, isActive: true });
   if (!customer) throw AppError.badRequest('Select an active customer for the project');
 
-  assertSignedContractKey(input.contractFileKey);
-  const contractExists = await verifyFileExists(input.contractFileKey);
-  if (!contractExists) {
-    throw AppError.badRequest('Uploaded contract file could not be verified. Please upload the file again.');
+  if (!input.ocularVisit && (!input.title || !input.serviceType || !input.contractFileKey)) {
+    throw AppError.badRequest('Complete the project details and upload the signed contract before creating the project');
+  }
+  if (input.contractFileKey) {
+    assertSignedContractKey(input.contractFileKey);
+    if (!await verifyFileExists(input.contractFileKey)) {
+      throw AppError.badRequest('Uploaded contract file could not be verified. Please upload the file again.');
+    }
   }
 
+  const salesStaffId = input.ocularVisit
+    ? await prepareProjectOcularSchedule({
+      customerId,
+      ...input.ocularVisit,
+      salesStaffId: appointment?.salesStaffId?.toString()
+        || (actorRoles.includes(Role.SALES_STAFF) ? actorId : undefined),
+    })
+    : appointment?.salesStaffId || actorId;
+
   const projectNumber = await generateProjectNumber();
-  const contractUploadedAt = new Date();
+  const contractUploadedAt = input.contractFileKey ? new Date() : undefined;
   const primaryReport = appointmentReports.find((report) => (
     report.serviceType === input.serviceType && report.visitType === 'ocular'
   ))
@@ -556,7 +570,8 @@ export async function createProject(
     ...appointmentServiceTypes,
     ...appointmentReports.map((report) => report.serviceType).filter(Boolean),
   ])];
-  const serviceTypes = linkedServiceTypes.length ? linkedServiceTypes : [input.serviceType];
+  const serviceType = input.serviceType || primaryReport?.serviceType || linkedServiceTypes[0] || ServiceType.CUSTOM;
+  const serviceTypes = linkedServiceTypes.length ? linkedServiceTypes : [serviceType];
   const photoKeys = preferProjectInput(input.photoKeys, primaryReport?.photoKeys) || [];
   const videoKeys = preferProjectInput(input.videoKeys, primaryReport?.videoKeys) || [];
   const sketchKeys = preferProjectInput(input.sketchKeys, primaryReport?.sketchKeys) || [];
@@ -569,9 +584,9 @@ export async function createProject(
     visitReportId: primaryReport?._id,
     projectNumber,
     customerId,
-    salesStaffId: appointment?.salesStaffId || actorId,
-    title: input.title,
-    serviceType: input.serviceType,
+    salesStaffId,
+    title: input.title || (serviceType === ServiceType.CUSTOM ? 'Ocular Visit' : `${readableServiceTitle(serviceType)} Project`),
+    serviceType,
     serviceTypes,
     deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
     description: input.description,
@@ -599,13 +614,13 @@ export async function createProject(
     mediaKeys: [...new Set([...photoKeys, ...videoKeys, ...sketchKeys, ...referenceImageKeys])],
     designReviewStatus: initialDesignKeys.length || initialDesignNotes?.trim() ? 'pending' : 'not_required',
     status: input.ocularVisit ? ProjectStatus.DRAFT : ProjectStatus.SUBMITTED,
-    contractStatus: ContractStatus.UPLOADED,
+    contractStatus: input.contractFileKey ? ContractStatus.UPLOADED : ContractStatus.MISSING,
     contractFileKey: input.contractFileKey,
-    contractFileName: input.contractFileName || getObjectFileName(input.contractFileKey),
-    contractContentType: input.contractContentType || inferContractContentType(input.contractFileKey),
+    contractFileName: input.contractFileName || (input.contractFileKey ? getObjectFileName(input.contractFileKey) : undefined),
+    contractContentType: input.contractContentType || (input.contractFileKey ? inferContractContentType(input.contractFileKey) : undefined),
     contractFileSize: input.contractFileSize,
     contractUploadedAt,
-    contractUploadedBy: actorId,
+    contractUploadedBy: input.contractFileKey ? actorId : undefined,
   });
 
   for (const report of appointmentReports) {
@@ -621,28 +636,31 @@ export async function createProject(
     }
   }
 
-  if (input.ocularVisit && appointment) {
+  if (input.ocularVisit) {
     const ocularAppointment = await Appointment.create({
       customerId,
       type: AppointmentType.OCULAR,
       date: input.ocularVisit.date,
       slotCode: input.ocularVisit.slotCode,
       status: AppointmentStatus.REQUESTED,
-      salesStaffId: appointment.salesStaffId || actorId,
+      salesStaffId,
       bookedBy: actorId,
-      sourceConsultationAppointmentId: appointment._id,
+      sourceConsultationAppointmentId: appointment?._id,
       sourceConsultationReportId: primaryReport?._id,
       serviceTypes,
-      serviceTypeCustom: input.serviceTypeCustom || appointment.serviceTypeCustom,
+      serviceTypeCustom: input.serviceTypeCustom || appointment?.serviceTypeCustom,
       selectedDesignTemplateId: project.selectedDesignTemplateId,
       selectedDesignTemplateName: project.selectedDesignTemplateName,
       selectedDesignTemplateImageUrl: project.selectedDesignTemplateImageUrl,
       customerSiteDetails: {
         serviceTypes,
-        serviceTypeCustom: input.serviceTypeCustom || appointment.serviceTypeCustom,
+        serviceTypeCustom: input.serviceTypeCustom || appointment?.serviceTypeCustom,
       },
-      customerNotes: `Ocular visit scheduled while creating project ${project.projectNumber}`,
+      customerNotes: `Ocular visit scheduled for pending project ${project.projectNumber}`,
     });
+
+    project.ocularAppointmentId = ocularAppointment._id;
+    await project.save();
 
     for (const report of appointmentReports) {
       report.appointmentId = ocularAppointment._id;
@@ -673,7 +691,7 @@ export async function createProject(
       details: {
         triggeredBy: 'project_creation',
         projectId: project._id,
-        sourceConsultationAppointmentId: appointment._id,
+        sourceConsultationAppointmentId: appointment?._id,
       },
       ipAddress: ip,
       userAgent: ua,
@@ -701,7 +719,7 @@ export async function createProject(
       title: input.title,
       deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
       contractFileKey: input.contractFileKey,
-      contractStatus: ContractStatus.UPLOADED,
+      contractStatus: project.contractStatus,
     },
     ipAddress: ip,
     userAgent: ua,
@@ -711,6 +729,96 @@ export async function createProject(
     await notifyProjectSubmittedAfterContract(project);
   }
 
+  return project;
+}
+
+// Complete the existing ocular draft rather than creating another project.
+export async function finalizeOcularProject(
+  projectId: string,
+  input: CreateProjectInput,
+  actorId: string,
+  actorRoles: Role[],
+  ip?: string,
+  ua?: string,
+) {
+  let project = await Project.findById(projectId);
+  if (!project) throw AppError.notFound('Project not found');
+  if (!actorRoles.includes(Role.ADMIN) && project.salesStaffId.toString() !== actorId) {
+    throw AppError.forbidden('Only the assigned sales staff can complete this pending project');
+  }
+  if (project.status !== ProjectStatus.DRAFT || !project.ocularAppointmentId) {
+    throw AppError.conflict('This project is no longer pending ocular');
+  }
+  if (input.ocularVisit || !input.title || !input.serviceType || !input.contractFileKey) {
+    throw AppError.badRequest('Complete the project details and upload the signed contract');
+  }
+  if (input.customerId && input.customerId !== project.customerId.toString()) {
+    throw AppError.badRequest('The customer cannot be changed for a pending ocular');
+  }
+  const ocular = await Appointment.findById(project.ocularAppointmentId);
+  if (!ocular || ocular.status !== AppointmentStatus.COMPLETED) {
+    throw AppError.badRequest('Complete the ocular visit before creating the final project');
+  }
+  const reports = await VisitReport.find({ appointmentId: ocular._id }).sort({ createdAt: 1 });
+  if (!reports.length || reports.some((report) => ![VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED].includes(report.status))) {
+    throw AppError.badRequest('Submit all ocular reports before creating the final project');
+  }
+  assertSignedContractKey(input.contractFileKey);
+  if (!await verifyFileExists(input.contractFileKey)) {
+    throw AppError.badRequest('Uploaded contract file could not be verified. Please upload the file again.');
+  }
+
+  const { customerId: _customerId, appointmentId: _appointmentId, ocularVisit: _ocularVisit, ...details } = input;
+  Object.assign(project, details);
+  project.serviceTypes = [...new Set([input.serviceType, ...reports.map((report) => report.serviceType).filter(Boolean)])];
+  project.visitReportId = (reports.find((report) => report.serviceType === input.serviceType) || reports[0])._id;
+  project.contractStatus = ContractStatus.UPLOADED;
+  project.contractFileName = input.contractFileName || getObjectFileName(input.contractFileKey);
+  project.contractContentType = input.contractContentType || inferContractContentType(input.contractFileKey);
+  project.contractUploadedAt = new Date();
+  project.contractUploadedBy = actorId as unknown as Types.ObjectId;
+  project.status = ProjectStatus.SUBMITTED;
+  const photoKeys = project.photoKeys || [];
+  const videoKeys = project.videoKeys || [];
+  const sketchKeys = project.sketchKeys || [];
+  const referenceImageKeys = project.referenceImageKeys || [];
+  project.mediaKeys = [...new Set([...photoKeys, ...videoKeys, ...sketchKeys, ...referenceImageKeys])];
+  project.designReviewStatus = project.initialDesignKeys?.length || project.initialDesignNotes?.trim() ? 'pending' : 'not_required';
+  project = await Project.findOneAndUpdate(
+    { _id: projectId, status: ProjectStatus.DRAFT, ocularAppointmentId: ocular._id },
+    { $set: {
+      ...details,
+      serviceTypes: project.serviceTypes,
+      visitReportId: project.visitReportId,
+      contractStatus: project.contractStatus,
+      contractFileName: project.contractFileName,
+      contractContentType: project.contractContentType,
+      contractUploadedAt: project.contractUploadedAt,
+      contractUploadedBy: project.contractUploadedBy,
+      status: project.status,
+      mediaKeys: project.mediaKeys,
+      designReviewStatus: project.designReviewStatus,
+    } },
+    { new: true, runValidators: true },
+  );
+  if (!project) throw AppError.conflict('This project is no longer pending ocular');
+  for (const report of reports) await syncProjectItemFromReport(project, report, reports);
+  await ProjectItem.findOneAndUpdate(
+    { projectId: project._id, serviceType: project.serviceType },
+    { $set: { ...buildFallbackProjectItem(project, project.serviceType), appointmentId: ocular._id } },
+    { upsert: true, new: true },
+  );
+  await ProjectItem.updateMany({ projectId: project._id, status: ProjectStatus.DRAFT }, { $set: { status: ProjectStatus.SUBMITTED } });
+  await AuditLog.create({
+    action: AuditAction.PROJECT_UPDATED,
+    actorId,
+    targetType: 'project',
+    targetId: project._id,
+    details: { action: 'pending_ocular_finalized', from: ProjectStatus.DRAFT, to: ProjectStatus.SUBMITTED },
+    ipAddress: ip,
+    userAgent: ua,
+  });
+  await notifyProjectSubmittedAfterContract(project);
   return project;
 }
 
@@ -807,6 +915,10 @@ export async function assignEngineers(
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
+
+  if (project.status === ProjectStatus.DRAFT && project.ocularAppointmentId) {
+    throw AppError.badRequest('Complete the pending ocular project before assigning engineers');
+  }
 
   if (
     [ProjectStatus.DRAFT, ProjectStatus.SUBMITTED].includes(project.status)
@@ -1697,6 +1809,10 @@ export async function transitionProject(
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
 
+  if (project.status === ProjectStatus.DRAFT && project.ocularAppointmentId && input.status !== ProjectStatus.CANCELLED) {
+    throw AppError.badRequest('Complete the pending ocular project details before submitting it');
+  }
+
   if (
     input.status === ProjectStatus.SUBMITTED
     && project.contractStatus !== ContractStatus.UPLOADED
@@ -2065,6 +2181,10 @@ export async function uploadSignedContract(
   const isAssignedSales = project.salesStaffId.toString() === actorId;
   if (!isAdmin && !isAssignedSales) {
     throw AppError.forbidden('Only admins or the assigned sales staff can upload the signed contract');
+  }
+
+  if (project.status === ProjectStatus.DRAFT && project.ocularAppointmentId) {
+    throw AppError.badRequest('Use Complete Project after the ocular visit to upload the contract and finalize the project');
   }
 
   const engineeringStarted = project.engineerIds.length > 0 || ![ProjectStatus.DRAFT, ProjectStatus.SUBMITTED].includes(project.status);

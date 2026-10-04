@@ -5,6 +5,7 @@ import type { IProjectItem } from './ProjectItem.js';
 export interface IProject extends Document {
   _id: Types.ObjectId;
   appointmentId?: Types.ObjectId;
+  ocularAppointmentId?: Types.ObjectId;
   projectNumber: string; // PRJ-YYYY-#####
   visitReportId?: Types.ObjectId; // link back to the specific visit report
   customerId: Types.ObjectId;
@@ -105,6 +106,7 @@ export interface IProject extends Document {
 const projectSchema = new Schema<IProject>(
   {
     appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
+    ocularAppointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
     projectNumber: { type: String, required: true, unique: true },
     visitReportId: { type: Schema.Types.ObjectId, ref: 'VisitReport' },
     customerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -221,6 +223,7 @@ projectSchema.index({ engineerIds: 1 });
 projectSchema.index({ status: 1 });
 projectSchema.index({ contractStatus: 1 });
 projectSchema.index({ appointmentId: 1 }); // no longer unique — multiple projects per appointment
+projectSchema.index({ ocularAppointmentId: 1 });
 projectSchema.index({ visitReportId: 1 });
 
 // Soft delete filter

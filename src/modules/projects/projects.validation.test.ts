@@ -48,17 +48,32 @@ describe('createProjectSchema', () => {
     expect(createProjectSchema.safeParse({ ...details, appointmentId }).success).toBe(true);
   });
 
-  it('accepts an ocular visit schedule only when the project is linked to an appointment', () => {
+  it('accepts an ocular visit schedule from either project entry point', () => {
     const ocularVisit = { date: '2026-10-08', slotCode: '09:00' };
 
     expect(createProjectSchema.safeParse({ ...details, customerId, appointmentId, ocularVisit }).success).toBe(true);
-    expect(createProjectSchema.safeParse({ ...details, customerId, ocularVisit }).success).toBe(false);
+    expect(createProjectSchema.safeParse({ ...details, customerId, ocularVisit }).success).toBe(true);
     expect(createProjectSchema.safeParse({
       ...details,
       customerId,
       appointmentId,
       ocularVisit: { ...ocularVisit, slotCode: '12:30' },
     }).success).toBe(false);
+  });
+
+  it.each([undefined, appointmentId])('saves Pending Ocular without final project details or a contract (appointment: %s)', (sourceAppointmentId) => {
+    const parsed = createProjectSchema.parse({
+      customerId,
+      appointmentId: sourceAppointmentId,
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+    });
+    expect(parsed.contractFileKey).toBeUndefined();
+    expect(parsed.serviceType).toBeUndefined();
+  });
+
+  it.each(['title', 'serviceType', 'contractFileKey'])('still requires %s for a final project', (field) => {
+    const input = { ...details, customerId, [field]: undefined };
+    expect(createProjectSchema.safeParse(input).success).toBe(false);
   });
 
   it('preserves every moved project field through validation and model serialization', () => {
