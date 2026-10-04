@@ -404,6 +404,21 @@ async function assertNoActiveAppointment(customerId: string): Promise<void> {
   }
 }
 
+export async function prepareProjectOcularSchedule(input: {
+  customerId: string;
+  date: string;
+  slotCode: SlotCode;
+  salesStaffId?: string;
+}): Promise<string> {
+  await assertNoActiveAppointment(input.customerId);
+  await assertDateAvailable(input.date);
+  const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
+  const salesStaffId = input.salesStaffId || freeSalesStaffIds[0];
+  if (!salesStaffId) throw AppError.badRequest('No sales staff available for this ocular visit');
+  await assertSalesAvailable(salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR);
+  return salesStaffId;
+}
+
 async function assertDateAvailable(dateStr: string): Promise<void> {
   // Check it's not in the past
   const now = toZonedTime(new Date(), TZ);
@@ -499,7 +514,7 @@ async function getSlotAvailability(
   const awaitingAssignment = scheduledAppointments.filter((appointment) => !appointment.salesStaffId).length;
   const remaining = Math.max(0, eligibleIds.size - assignedStaffIds.size - awaitingAssignment);
 
-  return { available: remaining > 0, remaining };
+  return { available: remaining > 0, remaining, salesStaffIds: [...eligibleIds].filter((id) => !assignedStaffIds.has(id)) };
 }
 
 async function assertSlotAvailable(
@@ -507,7 +522,7 @@ async function assertSlotAvailable(
   slotCode: string,
   type: string,
   appointmentId?: string,
-): Promise<void> {
+): Promise<string[]> {
   const blocked = await BlockedSlot.exists({ date: dateStr, slotCode, type });
   if (blocked) {
     throw AppError.conflict('This slot has been blocked by an administrator', ErrorCode.SLOT_LOCKED);
@@ -520,6 +535,7 @@ async function assertSlotAvailable(
       ErrorCode.SLOT_LOCKED,
     );
   }
+  return capacity.salesStaffIds || [];
 }
 
 async function assertSalesAvailable(
@@ -1662,13 +1678,13 @@ export async function completePaidOcularBooking(appointment: import('../../model
   const sourceConsultationAppointmentId = appointment.sourceConsultationAppointmentId;
 
   // Find the project from the exact source consultation, not any latest customer project.
-  const consultationProject = sourceConsultationAppointmentId
-    ? await Project.findOne({
-      appointmentId: sourceConsultationAppointmentId,
+  const consultationProject = await Project.findOne({
+      ...(sourceConsultationAppointmentId
+        ? { appointmentId: sourceConsultationAppointmentId }
+        : { ocularAppointmentId: appointment._id }),
       customerId: appointment.customerId,
       status: { $in: [ProjectStatus.DRAFT, ProjectStatus.SUBMITTED] },
-    }).sort({ createdAt: -1 })
-    : null;
+    }).sort({ createdAt: -1 });
 
   // Pre-populate ocular report with data from the consultation visit report
   let consultationSiteDetails: import('../../models/Appointment.js').ICustomerSiteDetails | undefined;

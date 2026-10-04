@@ -108,6 +108,7 @@ vi.mock('../../utils/logger.js', () => ({
 
 import {
   completeAppointment,
+  prepareProjectOcularSchedule,
   getAvailableSlots,
   requestAppointment,
   requestReschedule,
@@ -140,6 +141,31 @@ function createAppointment(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe('prepareProjectOcularSchedule', () => {
+  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+
+  it('rejects a second active appointment before scheduling a pending ocular', async () => {
+    mockAppointmentFindOne.mockResolvedValue({ _id: 'active-1', status: AppointmentStatus.REQUESTED });
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('already have an active appointment');
+  });
+
+  it('enforces the existing advance booking rule', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
+    mockAppointmentFindOne.mockResolvedValue(null);
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-06', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('at least 3 days');
+  });
+
+  it('rejects a blocked ocular slot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
+    mockAppointmentFindOne.mockResolvedValue(null);
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(true);
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('blocked by an administrator');
+  });
+});
 
 function selectLeanResult<T>(value: T) {
   return {
