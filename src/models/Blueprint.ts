@@ -28,6 +28,7 @@ export interface IBlueprint extends Document {
   costingApproved: boolean;
   uploadedBy: Types.ObjectId; // Engineer
   revisionNotes?: string; // Customer's revision request notes
+  revisionComponent?: 'blueprint' | 'costing';
   revisionRefKeys: string[]; // Customer's reference file attachments
   quotationReviewStatus: QuotationReviewStatus;
   quotationReviewedBy?: Types.ObjectId;
@@ -106,6 +107,7 @@ const blueprintSchema = new Schema<IBlueprint>(
     costingApproved: { type: Boolean, default: false },
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     revisionNotes: { type: String },
+    revisionComponent: { type: String, enum: ['blueprint', 'costing'] },
     revisionRefKeys: [{ type: String }],
     quotationReviewStatus: {
       type: String,
