@@ -13,6 +13,8 @@ import { getInstallmentConfig } from '../config/config.service.js';
 import { deleteFile } from '../uploads/upload.service.js';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../utils/logger.js';
+import { isDeepStrictEqual } from 'node:util';
+import type { IBlueprint } from '../../models/Blueprint.js';
 import type {
   UploadBlueprintInput,
   RevisionUploadInput,
@@ -366,6 +368,51 @@ function isQuotationSentToCustomer(blueprint: { quotationReviewStatus?: string; 
   return hasPayableQuotation(blueprint) && blueprint.quotationReviewStatus === 'sent_to_customer';
 }
 
+function quotationSnapshot(quotation: IBlueprint['quotation']) {
+  // Mongoose assigns new subdocument IDs when an unchanged quotation is copied.
+  return JSON.parse(JSON.stringify(quotation, (key, value) => key === '_id' ? undefined : value));
+}
+
+async function restoreReleasedQuotation<T extends IBlueprint | null>(blueprint: T): Promise<T> {
+  if (!blueprint?.quotation || !Number.isFinite(blueprint.quotation.total) || blueprint.quotation.total <= 0
+    || blueprint.quotationReviewStatus !== 'draft'
+    || blueprint.revisionComponent === 'costing') return blueprint;
+
+  // Older blueprint revisions reset the release status. Recover it only from
+  // a recorded release of this exact quotation, following its revision chain.
+  let source: IBlueprint = blueprint;
+  const quotation = quotationSnapshot(blueprint.quotation);
+  for (let hops = 0; hops <= MAX_REVISIONS; hops += 1) {
+    const released = await AuditLog.findOne({
+      targetType: 'blueprint',
+      targetId: source._id,
+      action: AuditAction.QUOTATION_SENT_TO_CUSTOMER,
+      'details.total': blueprint.quotation.total,
+    }).sort({ createdAt: -1 });
+    if (released) {
+      blueprint.quotationReviewStatus = 'sent_to_customer';
+      blueprint.quotationSentAt ??= released.createdAt;
+      return blueprint;
+    }
+
+    const revision = await AuditLog.findOne({
+      targetType: 'blueprint', targetId: source._id,
+      action: AuditAction.BLUEPRINT_REVISION_UPLOADED,
+    }).sort({ createdAt: -1 });
+    const previousId = revision?.details?.previousId;
+    if (typeof previousId !== 'string' || hops === MAX_REVISIONS) break;
+    const previous = await Blueprint.findById(previousId);
+    if (!previous?.quotation
+      || previous.projectId.toString() !== blueprint.projectId.toString()
+      || previous.projectItemId?.toString() !== blueprint.projectItemId?.toString()
+      || previous.version !== source.version - 1
+      || previous.revisionComponent === 'costing'
+      || !isDeepStrictEqual(quotation, quotationSnapshot(previous.quotation))) break;
+    source = previous;
+  }
+  return blueprint;
+}
+
 async function notifyCustomerAndCashierQuotationReady(
   project: { _id: Types.ObjectId; title: string; customerId: Types.ObjectId | string },
   projectItemId?: Types.ObjectId | string | null,
@@ -591,6 +638,7 @@ export async function uploadRevision(
   if (!project) throw AppError.notFound('Project not found');
 
   const isCostingRevision = currentBlueprint.revisionComponent === 'costing';
+  if (!isCostingRevision) await restoreReleasedQuotation(currentBlueprint);
   const quotation = isCostingRevision ? input.quotation ?? currentBlueprint.quotation : currentBlueprint.quotation;
   const hasNewQuotation = isCostingRevision && Boolean(input.quotation);
   const blueprintKey = isCostingRevision ? currentBlueprint.blueprintKey : input.blueprintKey ?? currentBlueprint.blueprintKey;
@@ -701,6 +749,7 @@ export async function approveComponent(
     throw AppError.badRequest('Cannot approve billing without a valid quotation total. Please ask engineering to upload costing with pricing.');
   }
 
+  await restoreReleasedQuotation(blueprint);
   if (input.component === BlueprintComponent.COSTING && !isQuotationSentToCustomer(blueprint)) {
     throw AppError.badRequest('Customer billing approval is available only after the quotation has been sent to the customer.');
   }
@@ -1085,7 +1134,7 @@ export async function getBlueprintById(
     .populate('uploadedBy', 'firstName lastName phone');
   if (!blueprint) throw AppError.notFound('Blueprint not found');
   await assertBlueprintProjectAccess(blueprint.projectId.toString(), actorId, actorRoles);
-  return blueprint;
+  return restoreReleasedQuotation(blueprint);
 }
 
 // ── List Blueprints for a Project ──
@@ -1100,7 +1149,7 @@ export async function listBlueprintsByProject(
   const blueprints = await Blueprint.find(itemScopedQuery(projectId, projectItemId))
     .populate('uploadedBy', 'firstName lastName phone')
     .sort({ version: -1 });
-  return blueprints;
+  return Promise.all(blueprints.map((blueprint) => restoreReleasedQuotation(blueprint)));
 }
 
 // ── Get Latest Blueprint for a Project ──
@@ -1115,7 +1164,7 @@ export async function getLatestBlueprint(
   const blueprint = await Blueprint.findOne(itemScopedQuery(projectId, projectItemId))
     .sort({ version: -1 })
     .populate('uploadedBy', 'firstName lastName phone');
-  return blueprint;
+  return restoreReleasedQuotation(blueprint);
 }
 
 export async function approveAndSendQuotation(
