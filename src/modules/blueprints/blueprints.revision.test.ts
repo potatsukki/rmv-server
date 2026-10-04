@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  blueprintFindById: vi.fn(), blueprintFindOne: vi.fn(), blueprintCreate: vi.fn(),
+  blueprintFindById: vi.fn(), blueprintFindOne: vi.fn(), blueprintFind: vi.fn(), blueprintCreate: vi.fn(),
   projectFindById: vi.fn(), draftFindOne: vi.fn(), draftUpdate: vi.fn(), draftFindById: vi.fn(),
-  auditCreate: vi.fn(), userFindById: vi.fn(), notifyRole: vi.fn(), deleteFile: vi.fn(),
+  auditCreate: vi.fn(), auditFindOne: vi.fn(), userFindById: vi.fn(), notifyRole: vi.fn(), deleteFile: vi.fn(),
 }));
 vi.mock('../../models/index.js', () => ({
-  Blueprint: { findById: mocks.blueprintFindById, findOne: mocks.blueprintFindOne, create: mocks.blueprintCreate },
+  Blueprint: { findById: mocks.blueprintFindById, findOne: mocks.blueprintFindOne, find: mocks.blueprintFind, create: mocks.blueprintCreate },
   BlueprintDraft: { findOne: mocks.draftFindOne, findOneAndUpdate: mocks.draftUpdate, findById: mocks.draftFindById },
   Project: { findById: mocks.projectFindById }, ProjectItem: { countDocuments: async () => 0 }, PaymentPlan: {},
-  User: { findById: mocks.userFindById }, AuditLog: { create: mocks.auditCreate },
+  User: { findById: mocks.userFindById }, AuditLog: { create: mocks.auditCreate, findOne: mocks.auditFindOne },
 }));
 vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: mocks.notifyRole }));
 vi.mock('../notifications/email.service.js', () => ({ sendBlueprintUploadedEmail: vi.fn() }));
@@ -17,9 +17,9 @@ vi.mock('../uploads/upload.service.js', () => ({ deleteFile: mocks.deleteFile })
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
 
-import { finalizeBlueprintDraft, requestRevision, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
+import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
 import { requestRevisionSchema, revisionUploadSchema } from './blueprints.validation.js';
-import { BlueprintStatus, ProjectStatus } from '../../utils/constants.js';
+import { AuditAction, BlueprintComponent, BlueprintStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
 function source(component?: 'blueprint' | 'costing') {
   return {
@@ -43,6 +43,7 @@ describe('component-scoped blueprint revisions', () => {
     mocks.projectFindById.mockImplementation(projectQuery);
     mocks.blueprintCreate.mockImplementation(async (value) => ({ _id: 'bp-2', ...value }));
     mocks.userFindById.mockResolvedValue(null);
+    mocks.auditFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
   });
 
   it.each(['blueprint', 'costing'] as const)('requesting %s preserves the other approval and resets only the requested part', async (component) => {
@@ -137,5 +138,115 @@ describe('component-scoped blueprint revisions', () => {
       quotation: { total: 4000 }, blueprintApproved: true, costingApproved: false,
       quotationReviewStatus: 'sent_to_customer',
     });
+  });
+
+  it('restores the released costing when a legacy blueprint revision reset its status to draft', async () => {
+    const bp = { ...source(), quotationReviewStatus: 'draft', quotationSentAt: undefined };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    const sentAt = new Date('2026-10-01');
+    mocks.auditFindOne.mockReturnValue({ sort: async () => ({ createdAt: sentAt }) });
+    const result = await uploadRevision('bp-1', revisionUploadSchema.parse({ blueprintKey: 'revised.pdf' }), 'engineer-1');
+    expect(result).toMatchObject({ quotation: bp.quotation, quotationReviewStatus: 'sent_to_customer', quotationSentAt: sentAt });
+    expect(mocks.auditFindOne).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'bp-1', action: AuditAction.QUOTATION_SENT_TO_CUSTOMER, 'details.total': 3000,
+    }));
+    expect(mocks.notifyRole).not.toHaveBeenCalled();
+  });
+
+  it('customer billing approval accepts a previously released quotation whose legacy status was reset', async () => {
+    const bp = { ...source(), status: BlueprintStatus.UPLOADED, blueprintApproved: false, costingApproved: false, quotationReviewStatus: 'draft' };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    mocks.auditFindOne.mockReturnValue({ sort: async () => ({ createdAt: new Date('2026-10-01') }) });
+    expect(await approveComponent('bp-1', { component: BlueprintComponent.COSTING }, 'customer-1'))
+      .toMatchObject({ costingApproved: true, quotationReviewStatus: 'sent_to_customer' });
+    expect(bp.save).toHaveBeenCalled();
+  });
+});
+
+describe('customer visibility of inherited costing', () => {
+  const latest = () => ({ ...source(), _id: 'bp-3', version: 3, status: BlueprintStatus.UPLOADED, quotationReviewStatus: 'draft' });
+  const query = (value: unknown) => ({ sort: vi.fn().mockReturnThis(), populate: vi.fn().mockResolvedValue(value) });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.projectFindById.mockImplementation(projectQuery);
+    mocks.auditFindOne.mockImplementation((filter) => ({
+      sort: async () => filter.action === AuditAction.QUOTATION_SENT_TO_CUSTOMER
+        ? (filter.targetId === 'bp-1' ? { createdAt: new Date('2026-10-01') } : null)
+        : { details: { previousId: filter.targetId === 'bp-3' ? 'bp-2' : 'bp-1' } },
+    }));
+    mocks.blueprintFindById.mockImplementation(async (id) => ({
+      ...source(), _id: id, version: id === 'bp-2' ? 2 : 1, quotationReviewStatus: 'draft',
+    }));
+  });
+
+  it('shows the unchanged quotation inherited across two blueprint revisions', async () => {
+    const bp = latest();
+    mocks.blueprintFindOne.mockReturnValue(query(bp));
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotation: { total: 3000 }, quotationReviewStatus: 'sent_to_customer' });
+    expect(bp.save).not.toHaveBeenCalled();
+  });
+
+  it('normalizes history responses so the summary remains visible in the customer costing tab', async () => {
+    const bp = latest();
+    mocks.blueprintFind.mockReturnValue({ populate: () => ({ sort: async () => [bp] }) });
+    expect(await listBlueprintsByProject('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toEqual([expect.objectContaining({ quotationReviewStatus: 'sent_to_customer' })]);
+  });
+
+  it('keeps a real unsent quotation hidden when no release is recorded', async () => {
+    mocks.auditFindOne.mockReturnValue({ sort: async () => null });
+    mocks.blueprintFindOne.mockReturnValue(query(latest()));
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+  });
+
+  it('does not inherit release status if the pricing changed despite the same total', async () => {
+    const bp = latest();
+    mocks.blueprintFindOne.mockReturnValue(query(bp));
+    mocks.blueprintFindById.mockResolvedValue({ ...source(), _id: 'bp-2', version: 2, quotation: { ...bp.quotation, discount: 0 } });
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+  });
+
+  it('does not restore the old release during a costing revision', async () => {
+    const bp = { ...latest(), status: BlueprintStatus.REVISION_REQUESTED, revisionComponent: 'costing' as const };
+    mocks.blueprintFindOne.mockReturnValue(query(bp));
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+    expect(mocks.auditFindOne).not.toHaveBeenCalled();
+  });
+
+  it('does not inherit a quotation from a different project', async () => {
+    mocks.blueprintFindOne.mockReturnValue(query(latest()));
+    mocks.blueprintFindById.mockResolvedValue({ ...source(), _id: 'bp-2', version: 2, projectId: 'other-project' });
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+  });
+
+  it('does not inherit a quotation from another project item', async () => {
+    mocks.blueprintFindOne.mockReturnValue(query({ ...latest(), projectItemId: 'item-1' }));
+    mocks.blueprintFindById.mockResolvedValue({ ...source(), _id: 'bp-2', version: 2, projectItemId: 'item-2' });
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER], 'item-1'))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+  });
+
+  it('does not inherit the old release from a costing revision without a new quotation', async () => {
+    mocks.blueprintFindOne.mockReturnValue(query(latest()));
+    mocks.blueprintFindById.mockResolvedValue({ ...source('costing'), _id: 'bp-2', version: 2 });
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'draft' });
+  });
+
+  it('recognizes unchanged line items even when Mongoose assigns new subdocument IDs', async () => {
+    const quotation = { total: 3000, lineItems: [{ _id: 'new-id', label: 'Steel', quantity: 1, materials: 3000, labor: 0, amount: 3000 }] };
+    mocks.blueprintFindOne.mockReturnValue(query({ ...latest(), quotation }));
+    mocks.blueprintFindById.mockImplementation(async (id) => ({
+      ...source(), _id: id, version: id === 'bp-2' ? 2 : 1,
+      quotation: { ...quotation, lineItems: [{ ...quotation.lineItems[0], _id: 'old-id' }] },
+    }));
+    expect(await getLatestBlueprint('project-1', 'customer-1', [Role.CUSTOMER]))
+      .toMatchObject({ quotationReviewStatus: 'sent_to_customer' });
   });
 });
