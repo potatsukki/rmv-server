@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   projectItemUpdateMany: vi.fn(),
   blueprintFindOne: vi.fn(),
   paymentPlanFindOne: vi.fn(),
+  paymentPlanFind: vi.fn(),
+  paymentPlanInsertMany: vi.fn(),
   generateProjectNumber: vi.fn(),
   prepareOcularSchedule: vi.fn(),
   syncSalesNotes: vi.fn(),
@@ -35,7 +37,7 @@ vi.mock('../../models/index.js', () => ({
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
 }));
-vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymentPlanFindOne } }));
+vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymentPlanFindOne, find: mocks.paymentPlanFind, insertMany: mocks.paymentPlanInsertMany } }));
 vi.mock('../../models/Blueprint.js', () => ({ Blueprint: { findOne: mocks.blueprintFindOne } }));
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(), notifyRole: vi.fn(),
@@ -51,7 +53,7 @@ vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: 
 vi.mock('../appointments/appointments.service.js', () => ({ prepareProjectOcularSchedule: mocks.prepareOcularSchedule }));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
-import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, transitionProject, uploadSignedContract, updateProject, updateProjectSiteAddress } from './projects.service.js';
+import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject, updateProjectSiteAddress } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -745,5 +747,56 @@ describe('updateProjectSiteAddress', () => {
   it('returns not found for a missing project', async () => {
     mocks.projectFindById.mockResolvedValue(null);
     await expect(updateProjectSiteAddress('missing', address, 'fabricator-1', undefined, undefined, [Role.FABRICATION_STAFF])).rejects.toThrow('Project not found');
+  });
+});
+
+describe('selectPaymentPlan for a project with several items', () => {
+  const items = [
+    { _id: 'item-1', title: 'Gate', status: ProjectStatus.APPROVED },
+    { _id: 'item-2', title: 'Railing', status: ProjectStatus.APPROVED },
+  ];
+  const quotation = (total: number, status = 'approved') => ({ status, quotationReviewStatus: 'sent_to_customer', quotation: { total } });
+  let project: Record<string, any>;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = { _id: 'project-1', title: 'Gate and railing', customerId: { _id: actorId }, status: ProjectStatus.APPROVED, save: vi.fn() };
+    const query = { populate: vi.fn() };
+    query.populate.mockReturnValue(query);
+    Object.assign(query, { then: (resolve: (value: unknown) => unknown) => Promise.resolve(project).then(resolve) });
+    mocks.projectFindById.mockReturnValue(query);
+    mocks.projectItemFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(items) });
+    mocks.paymentPlanFind.mockResolvedValue([]);
+    mocks.paymentPlanInsertMany.mockImplementation(async (docs) => docs);
+    mocks.auditCreate.mockResolvedValue({});
+  });
+
+  it('creates one combined plan for every item instead of one plan per item', async () => {
+    const totals: Record<string, number> = { 'item-1': 1000, 'item-2': 2000 };
+    mocks.blueprintFindOne.mockImplementation((filter) => ({ sort: vi.fn().mockResolvedValue(quotation(totals[filter.projectItemId]!)) }));
+
+    const result = await selectPaymentPlan('project-1', { paymentType: 'full' } as any, actorId);
+
+    expect(mocks.paymentPlanInsertMany).toHaveBeenCalledOnce();
+    expect(result.paymentPlans).toHaveLength(1);
+    expect(result.paymentPlan).toMatchObject({ projectId: 'project-1', totalAmount: 3000, isPayInFull: true });
+    expect(result.paymentPlan).not.toHaveProperty('projectItemId');
+    expect(result.paymentPlan!.stages).toHaveLength(1);
+    expect(result.paymentPlan!.stages[0]).toMatchObject({ label: 'Full Payment', amount: 3000, remainingBalance: 3000 });
+    expect(mocks.projectItemUpdateMany).toHaveBeenCalledWith({ _id: { $in: ['item-1', 'item-2'] } }, { $set: { status: ProjectStatus.PAYMENT_PENDING } });
+    expect(project.status).toBe(ProjectStatus.PAYMENT_PENDING);
+  });
+
+  it('waits until every item is approved before payment can be chosen', async () => {
+    items[1]!.status = ProjectStatus.BLUEPRINT;
+    await expect(selectPaymentPlan('project-1', { paymentType: 'full' } as any, actorId)).rejects.toThrow('every item are approved');
+    items[1]!.status = ProjectStatus.APPROVED;
+    expect(mocks.paymentPlanInsertMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a second plan for the same project', async () => {
+    mocks.paymentPlanFind.mockResolvedValue([{ _id: 'plan-1' }]);
+    mocks.blueprintFindOne.mockImplementation(() => ({ sort: vi.fn().mockResolvedValue(quotation(1000)) }));
+    await expect(selectPaymentPlan('project-1', { paymentType: 'full' } as any, actorId)).rejects.toThrow('already exists for this project');
   });
 });

@@ -89,6 +89,7 @@ import {
   getPaymentEvidenceTrail,
   recordCashPayment,
   listPendingPayments,
+  listGcashPayments,
 } from './payments.service.js';
 import { PaymentMethod, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -105,6 +106,32 @@ describe('flagged GCash history', () => {
     expect(mockPaymentFind).toHaveBeenCalledWith({ method: 'gcash', duplicateReference: true, paymentStatus: 'rejected' });
     expect(flagged[0]).toMatchObject({ customerName: 'Test Customer', bookingReference: 'RMV-APPT-101', duplicateReference: true, rejectionReason: 'Duplicate reference number' });
     expect(cursor.populate).toHaveBeenCalledWith('rejectedBy', 'firstName lastName');
+  });
+});
+
+describe('GCash verification history filters', () => {
+  function cursorWith(rows: unknown[] = []) {
+    const cursor = { populate: vi.fn(), sort: vi.fn(), skip: vi.fn(), limit: vi.fn(), lean: vi.fn().mockResolvedValue(rows) };
+    cursor.populate.mockReturnValue(cursor); cursor.sort.mockReturnValue(cursor); cursor.skip.mockReturnValue(cursor); cursor.limit.mockReturnValue(cursor);
+    mockPaymentFind.mockReturnValue(cursor);
+    return cursor;
+  }
+  it.each([
+    ['pending', { method: 'gcash', paymentStatus: 'pending_verification' }, 1],
+    ['verified', { method: 'gcash', paymentStatus: 'paid' }, -1],
+    ['rejected', { method: 'gcash', paymentStatus: 'rejected', duplicateReference: { $ne: true } }, -1],
+    ['flagged', { method: 'gcash', duplicateReference: true }, -1],
+  ] as const)('%s filter queries only matching GCash payments', async (filter, expected, direction) => {
+    const cursor = cursorWith();
+    await listGcashPayments(filter, {});
+    expect(mockPaymentFind).toHaveBeenCalledWith(expected);
+    expect(cursor.sort).toHaveBeenCalledWith({ createdAt: direction });
+    expect(cursor.populate).toHaveBeenCalledWith('verifiedBy', 'firstName lastName');
+  });
+  it('all filter covers pending, verified and rejected GCash payments, including flagged duplicates', async () => {
+    cursorWith();
+    await listGcashPayments('all', {});
+    expect(mockPaymentFind).toHaveBeenCalledWith({ method: 'gcash', paymentStatus: { $in: ['pending_verification', 'paid', 'rejected'] } });
   });
 });
 

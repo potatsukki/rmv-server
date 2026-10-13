@@ -1,9 +1,5 @@
 import { z } from 'zod';
 
-const money = z.number().positive().max(999_999_999).refine(
-  (value) => Math.round(value * 100) === value * 100 || Math.abs(Math.round(value * 100) - value * 100) < 1e-6,
-  'Use no more than two decimal places',
-);
 export const gcashTargetSchema = z.object({
   bookingId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   stageId: z.string().min(1).max(100).optional(),
@@ -12,10 +8,9 @@ export const submitGcashSchema = z.object({
   bookingId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   stageId: z.string().min(1).max(100).optional(),
   referenceNumber: z.string().trim().regex(/^\d{13}$/, 'Enter the 13-digit GCash reference number'),
-  amountPaid: money,
-  paymentDate: z.string().datetime({ offset: true }).refine(
-    (value) => Date.parse(value) <= Date.now(), 'Payment date cannot be in the future',
-  ),
+  // amountPaid and paymentDate are not accepted from the client: the amount is the
+  // backend-computed amount due and the date is the moment of submission. The GCash
+  // reference number is the unique evidence the cashier verifies against.
   proofKey: z.string().min(1).max(300).optional(),
 }).refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), 'Choose one booking or payment stage');
 export const gcashSettingsSchema = z.object({

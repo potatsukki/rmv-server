@@ -604,8 +604,12 @@ export async function getPaymentPlanByProject(
   projectItemId?: string,
 ) {
   await assertPaymentProjectAccess(projectId, actorId, actorRoles);
+  // Multi-item projects have one combined project-level plan; every item shows that same plan.
   const plan = await PaymentPlan.findOne(itemScopedQuery(projectId, projectItemId))
-    .populate('createdBy', 'firstName lastName');
+    .populate('createdBy', 'firstName lastName')
+    ?? (projectItemId
+      ? await PaymentPlan.findOne(itemScopedQuery(projectId)).populate('createdBy', 'firstName lastName')
+      : null);
   return plan;
 }
 
@@ -618,7 +622,9 @@ export async function listPaymentsByProject(
   projectItemId?: string,
 ) {
   await assertPaymentProjectAccess(projectId, actorId, actorRoles);
-  const payments = await Payment.find(itemScopedQuery(projectId, projectItemId))
+  const payments = await Payment.find(projectItemId
+    ? { projectId, $or: [{ projectItemId }, { projectItemId: { $exists: false } }] }
+    : itemScopedQuery(projectId))
     .populate('verifiedBy', 'firstName lastName')
     .sort({ createdAt: -1 });
   return payments.filter((payment) => payment.method !== PaymentMethod.GCASH || actorRoles.includes(Role.CASHIER)
@@ -631,21 +637,49 @@ export async function listPendingPayments(query: {
   page?: string;
   limit?: string;
 }, flaggedOnly = false) {
+  return listQueuePayments(
+    flaggedOnly ? { method: PaymentMethod.GCASH, duplicateReference: true, paymentStatus: 'rejected' }
+      : { status: PaymentStageStatus.PROOF_SUBMITTED },
+    flaggedOnly ? -1 : 1,
+    query,
+  );
+}
+
+export type GcashQueueFilter = 'all' | 'pending' | 'verified' | 'rejected' | 'flagged';
+
+// Cashier GCash history: pending, verified, rejected (cashier or system) and flagged duplicate attempts.
+export async function listGcashPayments(filter: GcashQueueFilter, query: { page?: string; limit?: string }) {
+  const gcash = { method: PaymentMethod.GCASH };
+  const filters: Record<GcashQueueFilter, Record<string, unknown>> = {
+    all: { ...gcash, paymentStatus: { $in: ['pending_verification', 'paid', 'rejected'] } },
+    pending: { ...gcash, paymentStatus: 'pending_verification' },
+    verified: { ...gcash, paymentStatus: 'paid' },
+    rejected: { ...gcash, paymentStatus: 'rejected', duplicateReference: { $ne: true } },
+    flagged: { ...gcash, duplicateReference: true },
+  };
+  // Pending is oldest-first so it can be worked in order; every other view shows the latest first.
+  return listQueuePayments(filters[filter], filter === 'pending' ? 1 : -1, query);
+}
+
+async function listQueuePayments(filter: Record<string, unknown>, sortDirection: 1 | -1, query: {
+  page?: string;
+  limit?: string;
+}) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
 
   const [payments] = await Promise.all([
-    Payment.find(flaggedOnly ? { method: PaymentMethod.GCASH, duplicateReference: true, paymentStatus: 'rejected' }
-      : { status: PaymentStageStatus.PROOF_SUBMITTED })
+    Payment.find(filter)
       .populate('customerId', 'firstName lastName email phone')
       .populate('bookingId', 'appointmentNumber serviceTypes customerAddress date slotCode')
       .populate('rejectedBy', 'firstName lastName')
+      .populate('verifiedBy', 'firstName lastName')
       .populate({
         path: 'projectId',
         select: 'title projectNumber customerId',
         populate: { path: 'customerId', select: 'firstName lastName' },
       })
-      .sort({ createdAt: flaggedOnly ? -1 : 1 })
+      .sort({ createdAt: sortDirection })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
