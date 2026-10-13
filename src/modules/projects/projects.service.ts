@@ -641,12 +641,15 @@ export async function createProject(
   }
 
   if (input.ocularVisit) {
+    // prepareProjectOcularSchedule already validated the slot and sales staff, so this
+    // is created confirmed — no separate agent/customer confirmation step is needed.
     const ocularAppointment = await Appointment.create({
       customerId,
       type: AppointmentType.OCULAR,
       date: input.ocularVisit.date,
       slotCode: input.ocularVisit.slotCode,
-      status: AppointmentStatus.REQUESTED,
+      status: AppointmentStatus.CONFIRMED,
+      confirmedBy: actorId,
       salesStaffId,
       bookedBy: actorId,
       sourceConsultationAppointmentId: appointment?._id,

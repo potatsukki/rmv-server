@@ -17,8 +17,8 @@ vi.mock('../uploads/upload.service.js', () => ({ deleteFile: mocks.deleteFile })
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
 
-import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
-import { requestRevisionSchema, revisionUploadSchema } from './blueprints.validation.js';
+import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadBlueprint, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
+import { requestRevisionSchema, revisionUploadSchema, uploadBlueprintSchema } from './blueprints.validation.js';
 import { AuditAction, BlueprintComponent, BlueprintStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
 function source(component?: 'blueprint' | 'costing') {
@@ -33,7 +33,7 @@ function source(component?: 'blueprint' | 'costing') {
   };
 }
 function projectQuery() {
-  const project = { _id: 'project-1', title: 'Railings', customerId: 'customer-1', engineerIds: ['engineer-1'], status: ProjectStatus.BLUEPRINT };
+  const project = { _id: 'project-1', title: 'Railings', customerId: 'customer-1', engineerIds: ['engineer-1'], status: ProjectStatus.BLUEPRINT, save: vi.fn().mockResolvedValue(undefined) };
   return Object.assign(Promise.resolve(project), { select: vi.fn().mockResolvedValue(project) });
 }
 
@@ -41,7 +41,7 @@ describe('component-scoped blueprint revisions', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.projectFindById.mockImplementation(projectQuery);
-    mocks.blueprintCreate.mockImplementation(async (value) => ({ _id: 'bp-2', ...value }));
+    mocks.blueprintCreate.mockImplementation(async (value) => ({ _id: 'bp-2', ...value, save: vi.fn().mockResolvedValue(undefined) }));
     mocks.userFindById.mockResolvedValue(null);
     mocks.auditFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
   });
@@ -77,9 +77,12 @@ describe('component-scoped blueprint revisions', () => {
     const result = await uploadRevision('bp-1', revisionUploadSchema.parse({
       blueprintKey: 'changed.pdf', designKey: 'changed.png', quotation: { total: 4000 },
     }), 'engineer-1');
+    // The new quotation is auto-approved on send, and the design was already approved,
+    // so this lands fully approved without a separate customer "Approve Billing" click.
     expect(result).toMatchObject({
       blueprintKey: 'original-blueprint.pdf', designKey: 'original-design.png',
-      blueprintApproved: true, costingApproved: false, quotation: { total: 4000 },
+      blueprintApproved: true, costingApproved: true, quotation: { total: 4000 },
+      status: BlueprintStatus.APPROVED,
     });
   });
 
@@ -133,10 +136,12 @@ describe('component-scoped blueprint revisions', () => {
       mode: 'revision', sourceBlueprintId: 'bp-1', files: {}, deleteOne: vi.fn(),
       quotation: { lineItems: [{ label: 'Steel', quantity: 1, materials: '4000', labor: '' }] },
     });
+    // The new quotation is auto-approved on send, and the design was already approved,
+    // so this lands fully approved without a separate customer "Approve Billing" click.
     expect(await finalizeBlueprintDraft('project-1', 'engineer-1')).toMatchObject({
       blueprintKey: 'original-blueprint.pdf', designKey: 'original-design.png',
-      quotation: { total: 4000 }, blueprintApproved: true, costingApproved: false,
-      quotationReviewStatus: 'sent_to_customer',
+      quotation: { total: 4000 }, blueprintApproved: true, costingApproved: true,
+      quotationReviewStatus: 'sent_to_customer', status: BlueprintStatus.APPROVED,
     });
   });
 
@@ -160,6 +165,25 @@ describe('component-scoped blueprint revisions', () => {
     expect(await approveComponent('bp-1', { component: BlueprintComponent.COSTING }, 'customer-1'))
       .toMatchObject({ costingApproved: true, quotationReviewStatus: 'sent_to_customer' });
     expect(bp.save).toHaveBeenCalled();
+  });
+
+  it('auto-approves billing on the initial blueprint upload once a quotation is sent', async () => {
+    mocks.blueprintFindOne.mockResolvedValue(null);
+    const result = await uploadBlueprint(uploadBlueprintSchema.parse({
+      projectId: 'project-1', blueprintKey: 'blueprint.pdf', designKey: 'design.png',
+      quotation: { total: 5000 },
+    }), 'engineer-1');
+    // The customer no longer has to click a separate "Approve Billing" step.
+    expect(result).toMatchObject({ costingApproved: true, quotationReviewStatus: 'sent_to_customer' });
+    expect(result.blueprintApproved).not.toBe(true);
+  });
+
+  it('does not auto-approve billing when no quotation is uploaded yet', async () => {
+    mocks.blueprintFindOne.mockResolvedValue(null);
+    const result = await uploadBlueprint(uploadBlueprintSchema.parse({
+      projectId: 'project-1', blueprintKey: 'blueprint.pdf', designKey: 'design.png',
+    }), 'engineer-1');
+    expect(result).toMatchObject({ costingApproved: false, quotationReviewStatus: 'draft' });
   });
 });
 

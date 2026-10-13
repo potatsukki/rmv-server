@@ -78,8 +78,8 @@ export const salesAppointmentDecisionSchema = z.object({
 
 export const rescheduleRequestSchema = z.object({
   reason: z.string().min(1).max(500).trim(),
-  newDate: z.string().regex(dateRegex, 'Date must be YYYY-MM-DD').optional(),
-  newSlotCode: z.enum(SLOT_CODES as unknown as [string, ...string[]]).optional(),
+  newDate: z.string().regex(dateRegex, 'Date must be YYYY-MM-DD'),
+  newSlotCode: z.enum(SLOT_CODES as unknown as [string, ...string[]]),
 });
 
 export const rescheduleCompleteSchema = z.object({
@@ -97,7 +97,7 @@ export const noShowSchema = z.object({
 });
 
 export const consultationAttendanceSchema = z.object({
-  action: z.enum(['check_in', 'test_start', 'no_show', 'reschedule', 'customer_declined']),
+  action: z.enum(['check_in', 'test_start', 'no_show', 'customer_declined']),
   actualArrivalAt: z.string().datetime().optional(),
   notes: z.string().max(1000).trim().optional(),
   overrideReason: z.string().max(1000).trim().optional(),

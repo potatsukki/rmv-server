@@ -489,6 +489,19 @@ async function syncProjectTotalCostFromApprovedBlueprints(project: any, fallback
   project.totalCost = aggregateTotal?.total ?? (typeof fallbackTotal === 'number' ? fallbackTotal : 0);
 }
 
+async function saveBlueprintAndSyncIfFullyApproved(blueprint: any, project: any) {
+  const fullyApproved = blueprint.blueprintApproved && blueprint.costingApproved;
+  if (fullyApproved) {
+    blueprint.status = BlueprintStatus.APPROVED;
+    await blueprint.save();
+    await syncProjectTotalCostFromApprovedBlueprints(project, blueprint);
+    await markProjectItemApprovedAndSaveProject(project, blueprint.projectItemId);
+  } else {
+    await blueprint.save();
+  }
+  return fullyApproved;
+}
+
 async function resolveProjectItemForBlueprint(project: any, projectItemId?: string) {
   const itemCount = await ProjectItem.countDocuments({ projectId: project._id });
 
@@ -548,6 +561,10 @@ export async function uploadBlueprint(
     uploadedBy,
     quotation: input.quotation,
     quotationReviewStatus: input.quotation ? 'sent_to_customer' : 'draft',
+    // Billing is approved automatically once the quotation is sent — the customer no
+    // longer has to click a separate "Approve Billing" step. They can still Request
+    // Revision if the pricing looks wrong. The blueprint design still needs approval.
+    costingApproved: Boolean(input.quotation),
   });
 
   if ([ProjectStatus.SUBMITTED, ProjectStatus.APPROVED].includes(project.status)) {
@@ -661,7 +678,9 @@ export async function uploadRevision(
     designKey,
     costingKey: isCostingRevision ? input.costingKey ?? currentBlueprint.costingKey : currentBlueprint.costingKey,
     blueprintApproved: isCostingRevision ? currentBlueprint.blueprintApproved : false,
-    costingApproved: isCostingRevision ? false : currentBlueprint.costingApproved,
+    // A new quotation is approved automatically on send (see uploadBlueprint); a
+    // costing revision without a new quotation still needs re-approval.
+    costingApproved: hasNewQuotation ? true : (isCostingRevision ? false : currentBlueprint.costingApproved),
     uploadedBy,
     quotation,
     quotationReviewStatus: hasNewQuotation ? 'sent_to_customer' : currentBlueprint.quotationReviewStatus,
@@ -669,6 +688,12 @@ export async function uploadRevision(
     quotationReviewedAt: isCostingRevision ? undefined : currentBlueprint.quotationReviewedAt,
     quotationSentAt: hasNewQuotation ? new Date() : currentBlueprint.quotationSentAt,
   });
+
+  // A costing-only revision can land already fully approved (design was approved earlier,
+  // and the new quotation is auto-approved on send) — finalize that the same way approval does.
+  if (hasNewQuotation) {
+    await saveBlueprintAndSyncIfFullyApproved(blueprint, project);
+  }
 
   await AuditLog.create({
     action: AuditAction.BLUEPRINT_REVISION_UPLOADED,
@@ -1186,7 +1211,9 @@ export async function approveAndSendQuotation(
   blueprint.quotationReviewedBy = adminId as any;
   blueprint.quotationReviewedAt = new Date();
   blueprint.quotationSentAt = new Date();
-  await blueprint.save();
+  // Billing is approved automatically once the quotation is sent to the customer.
+  blueprint.costingApproved = true;
+  await saveBlueprintAndSyncIfFullyApproved(blueprint, project);
 
   await AuditLog.create([
     {

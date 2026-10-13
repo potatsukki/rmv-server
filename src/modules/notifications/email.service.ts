@@ -40,6 +40,9 @@ const notificationEmailTemplates = new Set([
   'payment_due',
   'payment_overdue',
   'contract_expiring',
+  'ocular_address_needed',
+  'ocular_fee_due',
+  'ocular_visit_scheduled',
 ]);
 
 if (useSendGridApi) {
@@ -249,6 +252,35 @@ const templates: Record<string, string> = {
     `)}
     ${p('<strong style="color:#fff;">Please submit your payment immediately.</strong> Continued delays may affect your fabrication timeline.')}
     ${p('Contact us if you need assistance with payment arrangements.')}
+  `,
+
+  ocular_address_needed: `
+    ${heading('Action Required — Submit Ocular Site Details')}
+    ${p('Your ocular visit is scheduled for <strong style="color:#fff;">{{date}} at {{time}}</strong>. We still need your exact map pin and complete site address before we can confirm the visit.')}
+    ${infoCard('#eab308', 'rgba(234,179,8,0.06)', `
+      ${detail('Date', '{{date}}')}
+      ${detail('Time', '{{time}}')}
+    `)}
+    ${p('Open the appointment and submit your site location so we can confirm whether the visit is free within Metro Manila or requires an ocular fee.')}
+  `,
+  ocular_fee_due: `
+    ${heading('Ocular Visit Payment Required')}
+    ${p('Your ocular visit is scheduled for <strong style="color:#fff;">{{date}} at {{time}}</strong> at {{address}}.')}
+    ${infoCard('#c49a62', 'rgba(196,154,98,0.08)', `
+      <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.60);">Ocular Fee</p>
+      <p style="margin:8px 0 0;font-size:26px;font-weight:800;color:#c49a62;">{{amount}}</p>
+    `)}
+    ${p('Please pay the ocular fee to proceed with the visit.')}
+  `,
+  ocular_visit_scheduled: `
+    ${heading('Ocular Visit Scheduled')}
+    ${p('Your ocular visit is scheduled for <strong style="color:#fff;">{{date}} at {{time}}</strong> at {{address}}.')}
+    ${infoCard('#22c55e', 'rgba(34,197,94,0.06)', `
+      ${detail('Date', '{{date}}')}
+      ${detail('Time', '{{time}}')}
+      ${detail('Address', '{{address}}')}
+    `)}
+    ${p('No ocular fee is required. Please be available at the site on the scheduled date and time.')}
   `,
 
   contract_expiring: `
@@ -633,6 +665,39 @@ export async function sendPaymentOverdueEmail(
   });
 }
 
+
+export async function sendOcularAddressNeededEmail(
+  to: string,
+  data: { date: string; time: string; appointmentId?: string },
+): Promise<void> {
+  await sendEmail(to, 'Action Required — Submit Ocular Site Details', 'ocular_address_needed', {
+    ...data,
+    actionLabel: 'Submit Site Details',
+    actionUrl: data.appointmentId ? `${APP_URL}/appointments/${data.appointmentId}` : undefined,
+  });
+}
+
+export async function sendOcularFeeDueEmail(
+  to: string,
+  data: { date: string; time: string; address: string; amount: string; appointmentId?: string },
+): Promise<void> {
+  await sendEmail(to, 'Ocular Visit Payment Required - RMV Stainless Steel', 'ocular_fee_due', {
+    ...data,
+    actionLabel: 'Pay Ocular Fee',
+    actionUrl: data.appointmentId ? `${APP_URL}/appointments/${data.appointmentId}/pay-ocular-fee` : undefined,
+  });
+}
+
+export async function sendOcularVisitScheduledEmail(
+  to: string,
+  data: { date: string; time: string; address: string; appointmentId?: string },
+): Promise<void> {
+  await sendEmail(to, 'Ocular Visit Scheduled - RMV Stainless Steel', 'ocular_visit_scheduled', {
+    ...data,
+    actionLabel: 'View Appointment',
+    actionUrl: data.appointmentId ? `${APP_URL}/appointments/${data.appointmentId}` : undefined,
+  });
+}
 
 export async function sendContractExpiringEmail(
   to: string,

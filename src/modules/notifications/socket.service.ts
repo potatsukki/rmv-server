@@ -157,6 +157,45 @@ export async function notifyRole(
   }
 }
 
+/**
+ * Tell the appointment agent who booked or confirmed an appointment that the
+ * sales staff finished it. Falls back to all agents when no agent is linked.
+ */
+export async function notifyBookingAgentAppointmentSuccessful(appointment: {
+  _id: unknown;
+  appointmentNumber?: string;
+  type: string;
+  date: string;
+  bookedBy?: unknown;
+  confirmedBy?: unknown;
+}): Promise<void> {
+  const title = 'Appointment Successful';
+  const reference = appointment.appointmentNumber || `${appointment.type} appointment`;
+  const message = `${reference} on ${appointment.date} was completed successfully by the sales staff.`;
+  const link = `/appointments/${String(appointment._id)}`;
+
+  try {
+    const candidateIds = [appointment.bookedBy, appointment.confirmedBy]
+      .filter(Boolean)
+      .map((id) => String(id));
+    const agents = await User.find({
+      _id: { $in: [...new Set(candidateIds)] },
+      roles: Role.APPOINTMENT_AGENT,
+      isActive: true,
+    }).select('_id');
+
+    if (agents.length === 0) {
+      await notifyRole(Role.APPOINTMENT_AGENT, NotificationCategory.APPOINTMENT, title, message, link);
+      return;
+    }
+    for (const agent of agents) {
+      await createAndSendNotification(agent._id, NotificationCategory.APPOINTMENT, title, message, link);
+    }
+  } catch (error) {
+    logger.error('Failed to notify booking agent:', error);
+  }
+}
+
 export function emitUserEvent(userId: string, event: string, payload: Record<string, unknown>): void {
   if (io) io.to(`user:${userId}`).emit(event, payload);
 }

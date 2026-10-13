@@ -175,12 +175,13 @@ export const updateConsultationAttendance = asyncHandler(async (req: Request, re
   res.json({ success: true, data: formatAppointment(appointment) });
 });
 
-// ── Customer: Request Reschedule ──
+// ── Customer / Sales Staff: Reschedule (applies immediately) ──
 export const requestReschedule = asyncHandler(async (req: Request, res: Response) => {
   const appointment = await appointmentsService.requestReschedule(
     (req.params.id as string),
     req.body,
     req.userId!,
+    req.userRoles ?? [],
     req.ip,
     req.get('user-agent'),
   );

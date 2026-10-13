@@ -8,7 +8,8 @@ import {
   MeasurementUnit, ServiceType,
 } from '../../utils/constants.js';
 import { visitReportStateMachine, appointmentStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
+import { sendOcularAddressNeededEmail, sendOcularFeeDueEmail, sendOcularVisitScheduledEmail } from '../notifications/email.service.js';
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
 import { resolveOcularVisitData } from '../appointments/appointments.service.js';
@@ -1549,7 +1550,10 @@ export async function updateReport(
 
   await report.save();
 
-  if (input.initialDesignNotes !== undefined) {
+  // Only the consultation report's notes represent the appointment stage, so only
+  // those are mirrored onto the appointment and its sibling reports. The ocular
+  // report keeps its own notes — the two only get combined when a project is created.
+  if (input.initialDesignNotes !== undefined && report.visitType === 'consultation') {
     await syncAppointmentSalesNotes(String(report.appointmentId), input.initialDesignNotes);
   }
 
@@ -1795,12 +1799,15 @@ export async function submitReport(
       const ocularSelectedDesign = selectedDesignSnapshot(report, appt);
 
       if (!ocularAppointment) {
+        // The sales staff who recommended this already owns it, so it's created
+        // confirmed — no separate agent/customer confirmation step is needed.
         ocularAppointment = await Appointment.create({
           customerId: report.customerId,
           type: AppointmentType.OCULAR,
           date: recommendedOcularDate!,
           slotCode: recommendedOcularSlot!,
-          status: AppointmentStatus.REQUESTED,
+          status: AppointmentStatus.CONFIRMED,
+          confirmedBy: report.salesStaffId,
           salesStaffId: report.salesStaffId,
           bookedBy: report.salesStaffId,
           sourceConsultationAppointmentId: appt._id,
@@ -1915,6 +1922,9 @@ export async function submitReport(
       }
 
       const readableSlot = formatOcularSlot(recommendedOcularSlot!);
+      // Also email the customer at these key ocular-visit moments — in-app
+      // notifications alone are easy to miss if they're not actively using the app.
+      const ocularCustomerUser = await User.findById(report.customerId).select('email');
       if (!hasRecommendedOcularAddress) {
         await createAndSendNotification(
           report.customerId,
@@ -1923,6 +1933,13 @@ export async function submitReport(
           `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot}. Open this appointment to submit your exact map pin and complete site address. We will then confirm whether the visit is free within Metro Manila or requires an ocular fee.`,
           `/appointments/${ocularAppointment._id}`,
         );
+        if (ocularCustomerUser?.email) {
+          await sendOcularAddressNeededEmail(ocularCustomerUser.email, {
+            date: recommendedOcularDate!,
+            time: readableSlot,
+            appointmentId: String(ocularAppointment._id),
+          });
+        }
         if (ocularAppointment.salesStaffId) {
           await createAndSendNotification(
             ocularAppointment.salesStaffId.toString(),
@@ -1944,6 +1961,15 @@ export async function submitReport(
             `Your ocular visit for ${recommendedOcularDate} at ${readableSlot} uses ${addressLine}. Please pay the ocular fee of ₱${ocularAppointment.ocularFee?.toLocaleString()} to proceed.`,
             `/appointments/${ocularAppointment._id}/pay-ocular-fee`,
           );
+          if (ocularCustomerUser?.email) {
+            await sendOcularFeeDueEmail(ocularCustomerUser.email, {
+              date: recommendedOcularDate!,
+              time: readableSlot,
+              address: addressLine,
+              amount: `₱${ocularAppointment.ocularFee?.toLocaleString()}`,
+              appointmentId: String(ocularAppointment._id),
+            });
+          }
         } else {
           await createAndSendNotification(
             report.customerId,
@@ -1952,6 +1978,14 @@ export async function submitReport(
             `Your ocular visit is scheduled for ${recommendedOcularDate} at ${readableSlot} at ${addressLine}. No ocular fee is required.`,
             `/appointments/${ocularAppointment._id}`,
           );
+          if (ocularCustomerUser?.email) {
+            await sendOcularVisitScheduledEmail(ocularCustomerUser.email, {
+              date: recommendedOcularDate!,
+              time: readableSlot,
+              address: addressLine,
+              appointmentId: String(ocularAppointment._id),
+            });
+          }
         }
 
         if (ocularAppointment.salesStaffId) {
@@ -2075,6 +2109,8 @@ export async function submitReport(
       }
     }
   }
+
+  await notifyBookingAgentAppointmentSuccessful(appt);
 
   return populateVisitReportDetail(VisitReport.findById(report._id));
 }

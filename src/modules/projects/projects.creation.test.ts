@@ -220,6 +220,10 @@ describe('createProject', () => {
     expect(verifyFileExists).not.toHaveBeenCalled();
     expect(mocks.appointmentCreate).toHaveBeenCalledOnce();
     expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ customerId, date: '2026-10-08', slotCode: '09:00' }));
+    // prepareProjectOcularSchedule already validated the slot and staff, so it's created confirmed.
+    expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      status: AppointmentStatus.CONFIRMED, confirmedBy: actorId, salesStaffId: actorId,
+    }));
   });
 
   it('does not persist a draft or appointment when the ocular schedule is unavailable', async () => {

@@ -10,7 +10,7 @@ import {
   NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
 import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
 import { computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
@@ -116,6 +116,13 @@ const APPOINTMENT_REASSIGNABLE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.ARRIVED_AT_SITE,
   AppointmentStatus.IN_PROGRESS,
   AppointmentStatus.RESCHEDULE_REQUESTED,
+];
+
+// Matches the window the customer "Reschedule" button is shown in on the frontend.
+const RESCHEDULABLE_STATUSES: AppointmentStatus[] = [
+  AppointmentStatus.REQUESTED,
+  AppointmentStatus.CONFIRMED,
+  AppointmentStatus.PREPARING,
 ];
 
 const DERIVED_READY_FOR_OCULAR_FILTER = {
@@ -928,15 +935,25 @@ export async function reassignAppointmentSales(
     await confirmSlotLock(appointment.date, appointment.slotCode as SlotCode, input.salesStaffId, appointment._id);
   }
 
+  const wasRequested = appointment.status === AppointmentStatus.REQUESTED;
+  // Assigning sales staff to a brand-new office request confirms it immediately —
+  // the sales staff no longer has to separately accept or decline the assignment.
+  const confirmsOfficeAppointment = wasRequested && appointment.type === AppointmentType.OFFICE;
+
   appointment.salesStaffId = nextSalesStaff._id;
+  if (confirmsOfficeAppointment) {
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+    appointment.status = AppointmentStatus.CONFIRMED;
+    appointment.confirmedBy = actorId as unknown as Types.ObjectId;
+  }
   await appointment.save();
 
-  const ownershipSync = appointment.status === AppointmentStatus.REQUESTED
+  const ownershipSync = wasRequested
     ? { draftVisitReportsUpdated: 0, projectsUpdated: 0 }
     : await syncDraftOwnershipForReassignment(appointment._id, nextSalesStaff._id);
 
   await AuditLog.create({
-    action: AuditAction.SALES_ASSIGNED,
+    action: confirmsOfficeAppointment ? AuditAction.APPOINTMENT_CONFIRMED : AuditAction.SALES_ASSIGNED,
     actorId,
     targetType: 'appointment',
     targetId: appointment._id,
@@ -954,10 +971,12 @@ export async function reassignAppointmentSales(
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
-    appointment.status === AppointmentStatus.REQUESTED ? 'Appointment Review Required' : 'Appointment Reassigned',
-    appointment.status === AppointmentStatus.REQUESTED
-      ? `Please review the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} and accept or decline it.`
-      : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
+    confirmsOfficeAppointment ? 'Appointment Assigned' : (wasRequested ? 'Appointment Review Required' : 'Appointment Reassigned'),
+    confirmsOfficeAppointment
+      ? `You have been assigned and confirmed for the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`
+      : wasRequested
+        ? `Please review the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} and accept or decline it.`
+        : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
     `/appointments/${appointment._id}`,
   );
 
@@ -972,7 +991,15 @@ export async function reassignAppointmentSales(
     );
   }
 
-  if (appointment.status !== AppointmentStatus.REQUESTED) {
+  if (confirmsOfficeAppointment) {
+    await createAndSendNotification(
+      appointment.customerId,
+      NotificationCategory.APPOINTMENT,
+      'Appointment Confirmed',
+      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed.`,
+      `/appointments/${appointment._id}`,
+    );
+  } else if (!wasRequested) {
     await createAndSendNotification(
       appointment.customerId,
       NotificationCategory.APPOINTMENT,
@@ -1774,14 +1801,7 @@ export async function completeAppointment(
     `/appointments/${appointment._id}`,
   );
 
-  // Notify appointment agents
-  await notifyRole(
-    Role.APPOINTMENT_AGENT,
-    NotificationCategory.APPOINTMENT,
-    'Appointment Completed',
-    `${appointment.type.charAt(0).toUpperCase() + appointment.type.slice(1)} appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been completed.`,
-    `/appointments/${appointment._id}`,
-  );
+  await notifyBookingAgentAppointmentSuccessful(appointment);
 
   return appointment;
 }
@@ -2043,15 +2063,6 @@ export async function updateConsultationAttendance(
     appointment.status = AppointmentStatus.NO_SHOW;
     appointment.internalNotes = input.notes.trim();
     changes.appointmentStatus = AppointmentStatus.NO_SHOW;
-  } else if (input.action === 'reschedule') {
-    if (!input.notes?.trim()) {
-      throw AppError.badRequest('Rescheduled attendance requires notes', ErrorCode.VALIDATION_ERROR);
-    }
-    nextStatus = AppointmentAttendanceStatus.RESCHEDULED;
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.RESCHEDULE_REQUESTED);
-    appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
-    appointment.rescheduleReason = input.notes.trim();
-    changes.appointmentStatus = AppointmentStatus.RESCHEDULE_REQUESTED;
   } else if (input.action === 'customer_declined') {
     if (!input.notes?.trim()) {
       throw AppError.badRequest('Customer declined attendance requires notes', ErrorCode.VALIDATION_ERROR);
@@ -2181,19 +2192,25 @@ export async function getCustomerQueueStatus(customerId: string) {
 export async function requestReschedule(
   appointmentId: string,
   input: RescheduleRequestInput,
-  customerId: string,
+  actorId: string,
+  actorRoles: Role[],
   ip?: string,
   ua?: string,
 ) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
-  // Verify ownership
-  if (appointment.customerId.toString() !== customerId) {
-    throw AppError.forbidden('You can only reschedule your own appointments');
+  // Only the appointment agent (and admin) can reschedule — this keeps a reschedule
+  // to one owner instead of customers and sales staff moving dates independently.
+  const isAgentOrAdmin = actorRoles.some((role) => role === Role.APPOINTMENT_AGENT || role === Role.ADMIN);
+  if (!isAgentOrAdmin) {
+    throw AppError.forbidden('Only an appointment agent or admin can reschedule this appointment');
   }
 
-  // Check reschedule limit
+  if (!RESCHEDULABLE_STATUSES.includes(appointment.status)) {
+    throw AppError.badRequest('This appointment can no longer be rescheduled');
+  }
+
   if (appointment.rescheduleCount >= appointment.maxReschedules) {
     throw AppError.badRequest(
       `Maximum reschedule limit (${appointment.maxReschedules}) reached`,
@@ -2201,52 +2218,81 @@ export async function requestReschedule(
     );
   }
 
-  const alreadyRequested = appointment.status === AppointmentStatus.RESCHEDULE_REQUESTED;
-  if (!alreadyRequested) {
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.RESCHEDULE_REQUESTED);
-    appointment.previousStatusBeforeReschedule = appointment.status;
-  }
+  const oldDate = appointment.date;
+  const oldSlot = appointment.slotCode;
 
-  if (input.newDate || input.newSlotCode) {
-    const requestedDate = input.newDate || appointment.requestedRescheduleDate || appointment.date;
-    const requestedSlotCode = input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode;
-    await assertDateAvailable(requestedDate);
-    await assertSlotAvailable(
-      requestedDate,
-      requestedSlotCode,
+  await assertDateAvailable(input.newDate);
+  await assertSlotAvailable(input.newDate, input.newSlotCode, appointment.type, appointment._id.toString());
+
+  // Reschedules the same assigned sales staff into the new slot — rescheduling is a
+  // date/time change only, it doesn't need a fresh sales assignment or agent review.
+  if (appointment.salesStaffId) {
+    const salesStaffId = appointment.salesStaffId.toString();
+    await assertSalesAvailable(
+      salesStaffId,
+      input.newDate,
+      input.newSlotCode as SlotCode,
       appointment.type,
       appointment._id.toString(),
     );
+    if (appointment.type === AppointmentType.OCULAR) {
+      await releaseSlotLock(oldDate, oldSlot as SlotCode, salesStaffId);
+      await lockSlot(input.newDate, input.newSlotCode as SlotCode, salesStaffId, actorId);
+      await confirmSlotLock(input.newDate, input.newSlotCode as SlotCode, salesStaffId, appointment._id);
+    }
   }
 
-  appointment.status = AppointmentStatus.RESCHEDULE_REQUESTED;
+  appointment.date = input.newDate;
+  appointment.slotCode = input.newSlotCode as SlotCode;
+  appointment.rescheduleCount += 1;
   appointment.rescheduleReason = input.reason;
-  if (input.newDate) appointment.requestedRescheduleDate = input.newDate;
-  if (input.newSlotCode) appointment.requestedRescheduleSlotCode = input.newSlotCode as SlotCode;
+  appointment.previousStatusBeforeReschedule = undefined;
+  appointment.requestedRescheduleDate = undefined;
+  appointment.requestedRescheduleSlotCode = undefined;
+  if (appointment.type === AppointmentType.OFFICE) {
+    appointment.attendanceStatus = AppointmentAttendanceStatus.SCHEDULED;
+    appointment.actualArrivalAt = undefined;
+    appointment.consultationStartedAt = undefined;
+    appointment.consultationCompletedAt = undefined;
+    appointment.attendanceNotes = undefined;
+    appointment.attendanceOverrideReason = undefined;
+  }
   await appointment.save();
 
   await AuditLog.create({
-    action: AuditAction.APPOINTMENT_RESCHEDULE_REQUESTED,
-    actorId: customerId,
+    action: AuditAction.APPOINTMENT_RESCHEDULED,
+    actorId,
     targetType: 'appointment',
     targetId: appointment._id,
-    details: { reason: input.reason, count: appointment.rescheduleCount },
+    details: {
+      oldDate,
+      oldSlot,
+      newDate: input.newDate,
+      newSlot: input.newSlotCode,
+      rescheduleCount: appointment.rescheduleCount,
+      reason: input.reason,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
 
-  // Notify agents
-  await notifyRole(
-    Role.APPOINTMENT_AGENT,
+  const newSlotLabel = `${input.newDate} at ${formatSlotTime(input.newSlotCode)}`;
+  await createAndSendNotification(
+    appointment.customerId,
     NotificationCategory.APPOINTMENT,
-    alreadyRequested ? 'Reschedule Request Updated' : 'Reschedule Requested',
-    alreadyRequested
-      ? input.newDate || input.newSlotCode
-        ? `Customer requested ${input.newDate || appointment.requestedRescheduleDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.requestedRescheduleSlotCode || appointment.slotCode)}. Updated reason: ${input.reason}`
-        : `Customer updated the reschedule request for appointment on ${appointment.date}. New reason: ${input.reason}`
-      : `Customer requested ${input.newDate || appointment.date} at ${formatSlotTime(input.newSlotCode || appointment.slotCode)}. Reason: ${input.reason}`,
+    'Appointment Rescheduled',
+    `Your appointment has been rescheduled to ${newSlotLabel}. Reason: ${input.reason}`,
     `/appointments/${appointment._id}`,
   );
+  if (appointment.salesStaffId) {
+    await createAndSendNotification(
+      appointment.salesStaffId.toString(),
+      NotificationCategory.APPOINTMENT,
+      'Appointment Rescheduled',
+      `The appointment team rescheduled the appointment to ${newSlotLabel}. Reason: ${input.reason}`,
+      `/appointments/${appointment._id}`,
+    );
+  }
 
   return appointment;
 }

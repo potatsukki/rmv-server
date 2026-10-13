@@ -51,7 +51,7 @@ router.post(
 router.post(
   '/:id/reschedule-request',
   authenticate,
-  authorize(Role.CUSTOMER),
+  authorize(Role.APPOINTMENT_AGENT, Role.ADMIN),
   validate(rescheduleRequestSchema),
   ctrl.requestReschedule,
 );
