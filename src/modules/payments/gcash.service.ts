@@ -79,15 +79,15 @@ export async function submitGcash(input: SubmitGcashInput, customerId: string) {
     const [created] = await Payment.create([{
       bookingId: scope.booking?._id, projectId: scope.project?._id, projectItemId: scope.plan?.projectItemId,
       customerId, stageId: scope.stageId, method: PaymentMethod.GCASH,
-      amountRequired: scope.amount, amountPaid: input.amountPaid, referenceNumber: input.referenceNumber,
+      amountRequired: scope.amount, amountPaid: scope.amount, referenceNumber: input.referenceNumber,
       // A flagged duplicate must not contend with the original reference or active submission.
       ...(reusedReference ? { duplicateReference: true, rejectionReason: 'Duplicate reference number',
         declineReason: 'Duplicate reference number', rejectedAt: new Date(), rejectedBy: null, rejectionSource: 'system' }
         : { gcashReferenceNumber: input.referenceNumber, activeSubmissionKey: scope.key }),
-      paymentDate: new Date(input.paymentDate), proofKey: input.proofKey,
+      paymentDate: new Date(), proofKey: input.proofKey,
       paymentStatus: reusedReference ? 'rejected' : 'pending_verification', status,
       evidenceTrail: [{ version: 1, source: reusedReference ? 'system_duplicate_reference_rejection' : 'customer_gcash_submission', status,
-        method: PaymentMethod.GCASH, amountPaid: input.amountPaid, referenceNumber: input.referenceNumber,
+        method: PaymentMethod.GCASH, amountPaid: scope.amount, referenceNumber: input.referenceNumber,
         proofKey: input.proofKey, actorId: customerId, capturedAt: new Date(),
         ...(reusedReference ? { note: 'Duplicate reference number' } : {}) }],
     }], { session });
@@ -111,7 +111,7 @@ export async function submitGcash(input: SubmitGcashInput, customerId: string) {
     }
     await AuditLog.create([{ action: reusedReference ? AuditAction.PAYMENT_DECLINED : AuditAction.PAYMENT_PROOF_SUBMITTED,
       actorId: customerId, targetType: 'payment', targetId: created!._id,
-      details: { method: 'gcash', amountRequired: scope.amount, amountSubmitted: input.amountPaid,
+      details: { method: 'gcash', amountRequired: scope.amount, amountSubmitted: scope.amount,
         ...(reusedReference ? { reason: 'Duplicate reference number', rejectionSource: 'system' } : {}) } }], { session });
   };
   try {

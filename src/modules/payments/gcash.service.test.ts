@@ -44,7 +44,7 @@ function payment(overrides = {}) {
     evidenceTrail: [{ version: 1, source: 'customer_gcash_submission' }],
     save: vi.fn().mockResolvedValue(undefined), $session: vi.fn(), ...overrides };
 }
-const submission = { bookingId, referenceNumber: '1234567890123', amountPaid: 1250, paymentDate: '2026-01-02T02:00:00.000Z' };
+const submission = { bookingId, referenceNumber: '1234567890123' };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -65,12 +65,9 @@ describe('GCash request validation', () => {
     expect(gcashTargetSchema.safeParse({ bookingId, stageId: 'stage-1' }).success).toBe(false);
     expect(submitGcashSchema.safeParse(submission).success).toBe(true);
     expect(submitGcashSchema.safeParse({ ...submission, referenceNumber: '' }).success).toBe(false);
-    expect(submitGcashSchema.safeParse({ ...submission, paymentDate: '' }).success).toBe(false);
-    expect(submitGcashSchema.safeParse({ ...submission, amountPaid: 12.345 }).success).toBe(false);
-    expect(submitGcashSchema.safeParse({ ...submission, paymentDate: '2999-01-01T00:00:00Z' }).success).toBe(false);
   });
-  it('removes client-supplied payment status and amount required', () => {
-    expect(submitGcashSchema.parse({ ...submission, paymentStatus: 'paid', amountRequired: 1 })).toEqual(submission);
+  it('removes client-supplied payment status, amounts and payment date', () => {
+    expect(submitGcashSchema.parse({ ...submission, paymentStatus: 'paid', amountRequired: 1, amountPaid: 1, paymentDate: '2020-01-01T00:00:00Z' })).toEqual(submission);
   });
 });
 
@@ -94,10 +91,12 @@ describe('GCash ownership and submission', () => {
     db.config.mockResolvedValue({ accountName: '', accountNumber: '', qrCodeKey: '' });
     await expect(submitGcash(submission, customerId)).rejects.toThrow('not been configured');
   });
-  it('records an optional-proof submission as pending, using the backend fee', async () => {
+  it('records an optional-proof submission as pending, using the backend fee and today as the payment date', async () => {
     const appointment = booking(); db.appointment.mockReturnValue(query(appointment));
-    const result = await submitGcash({ ...submission, amountPaid: 100 }, customerId);
-    expect(result).toMatchObject({ amountRequired: 1250, amountPaid: 100, paymentStatus: 'pending_verification', status: 'proof_submitted' });
+    const before = Date.now();
+    const result = await submitGcash(submission, customerId);
+    expect(result.paymentDate.getTime()).toBeGreaterThanOrEqual(before);
+    expect(result).toMatchObject({ amountRequired: 1250, amountPaid: 1250, paymentStatus: 'pending_verification', status: 'proof_submitted' });
     expect(appointment).toMatchObject({ ocularFeePaid: false, paymentStatus: 'pending_verification', bookingStatus: 'pending_payment', status: 'requested' });
     expect(appointment.save).toHaveBeenCalledWith({ session: db.session });
     expect(db.receipt).not.toHaveBeenCalled();

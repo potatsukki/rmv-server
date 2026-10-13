@@ -155,15 +155,14 @@ describe('API security through real HTTP routes', () => {
     user();
     const response = await request('/payments/gcash/submit', {
       method: 'POST', headers: mutationHeaders(token()), body: JSON.stringify({
-        bookingId: userId, referenceNumber: '123', amountPaid: -1,
-        paymentDate: '2999-01-01T00:00:00Z',
+        bookingId: userId, referenceNumber: '123',
       }),
     });
     expect(response.status).toBe(400);
     const body = await response.json();
     expect(body.error.code).toBe('VALIDATION_ERROR');
     expect(body.error.details.errors.map((error: { path: string }) => error.path)).toEqual(
-      expect.arrayContaining(['referenceNumber', 'amountPaid', 'paymentDate']),
+      expect.arrayContaining(['referenceNumber']),
     );
   });
 

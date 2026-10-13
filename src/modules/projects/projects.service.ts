@@ -1407,6 +1407,10 @@ async function hasRequiredInitialFabricationPayment(projectId: string) {
     return Boolean(plan?.stages[0]?.status === PaymentStageStatus.VERIFIED);
   }
 
+  // A combined project-level plan covers every item at once.
+  const combinedPlan = await PaymentPlan.findOne(itemScopedQuery(projectId));
+  if (combinedPlan) return combinedPlan.stages[0]?.status === PaymentStageStatus.VERIFIED;
+
   const plans = await PaymentPlan.find({
     projectId,
     projectItemId: { $in: items.map((item) => item._id) },
@@ -1575,6 +1579,25 @@ function buildAggregateContractData(
   };
 }
 
+// One project-level plan (no projectItemId) whose stages add up every item's matching stage.
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function buildCombinedPlan(projectId: unknown, builds: BuiltPaymentStages[], createdBy: string) {
+  const first = builds[0]!;
+  return {
+    projectId,
+    totalAmount: roundMoney(builds.reduce((sum, built) => sum + built.totalAmount, 0)),
+    isPayInFull: first.isPayInFull,
+    stages: first.stages.map((stage, index) => {
+      const amount = roundMoney(builds.reduce((sum, built) => sum + (built.stages[index]?.amount || 0), 0));
+      return { ...stage, stageId: uuidv4(), amount, remainingBalance: amount };
+    }),
+    createdBy,
+  };
+}
+
 export async function selectPaymentPlan(
   projectId: string,
   input: SelectPaymentPlanInput,
@@ -1592,11 +1615,9 @@ export async function selectPaymentPlan(
   }
 
   const projectItems = await getActiveProjectItems(projectId);
-  const hasMultipleItems = projectItems.length > 1;
-
-  if (hasMultipleItems && !input.projectItemId) {
-    throw AppError.badRequest('Select a project item before choosing a payment plan');
-  }
+  // A project with several items is billed and paid once: one combined plan for all items,
+  // instead of the customer choosing and paying for each item separately.
+  const isCombinedPlan = projectItems.length > 1;
 
   const selectedItem = input.projectItemId
     ? projectItems.find((item) => item._id.toString() === input.projectItemId)
@@ -1606,9 +1627,11 @@ export async function selectPaymentPlan(
     throw AppError.notFound('Project item not found');
   }
 
-  const paymentTargets = selectedItem
-    ? [{ item: selectedItem, projectItemId: selectedItem._id.toString() }]
-    : [{ item: undefined, projectItemId: input.projectItemId }];
+  const paymentTargets = isCombinedPlan
+    ? projectItems.map((item) => ({ item, projectItemId: item._id.toString() }))
+    : selectedItem
+      ? [{ item: selectedItem, projectItemId: selectedItem._id.toString() }]
+      : [{ item: undefined, projectItemId: input.projectItemId }];
 
   const selectedItemAllowsPayment = selectedItem
     ? [ProjectStatus.APPROVED, ProjectStatus.PAYMENT_PENDING].includes(selectedItem.status)
@@ -1618,29 +1641,40 @@ export async function selectPaymentPlan(
   if (!projectAllowsPayment && !selectedItemAllowsPayment) {
     throw AppError.badRequest('Payment plan selection is only available after blueprint approval');
   }
+  if (isCombinedPlan && !projectItems.every((item) => [ProjectStatus.APPROVED, ProjectStatus.PAYMENT_PENDING].includes(item.status))) {
+    throw AppError.badRequest('Payment is available once the blueprint and costing of every item are approved');
+  }
 
+  // Throws for any item whose approved quotation has not been sent to the customer yet.
   const itemBuilds = await Promise.all(paymentTargets.map(async (target) => ({
     item: target.item,
     projectItemId: target.projectItemId,
     built: await buildPaymentStages(projectId, input.paymentType, target.projectItemId),
   })));
 
-  const existingPlans = await Promise.all(
-    paymentTargets.map((target) => PaymentPlan.findOne(itemScopedQuery(String(project._id), target.projectItemId))),
-  );
+  const existingPlans = isCombinedPlan
+    ? await PaymentPlan.find({ projectId: project._id })
+    : await Promise.all(
+      paymentTargets.map((target) => PaymentPlan.findOne(itemScopedQuery(String(project._id), target.projectItemId))),
+    );
 
   if (existingPlans.some(Boolean)) {
-    throw AppError.conflict('A payment plan already exists for this item', ErrorCode.DUPLICATE_ENTRY);
+    throw AppError.conflict(
+      isCombinedPlan ? 'A payment plan already exists for this project' : 'A payment plan already exists for this item',
+      ErrorCode.DUPLICATE_ENTRY,
+    );
   }
 
-  const plans = await PaymentPlan.insertMany(itemBuilds.map(({ projectItemId, built }) => ({
-    projectId: project._id,
-    projectItemId,
-    totalAmount: built.totalAmount,
-    isPayInFull: built.isPayInFull,
-    stages: built.stages,
-    createdBy: actorId,
-  })));
+  const plans = await PaymentPlan.insertMany(isCombinedPlan
+    ? [buildCombinedPlan(project._id, itemBuilds.map(({ built }) => built), actorId)]
+    : itemBuilds.map(({ projectItemId, built }) => ({
+      projectId: project._id,
+      projectItemId,
+      totalAmount: built.totalAmount,
+      isPayInFull: built.isPayInFull,
+      stages: built.stages,
+      createdBy: actorId,
+    })));
 
   if (project.status === ProjectStatus.APPROVED) {
     projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
@@ -1681,7 +1715,7 @@ export async function selectPaymentPlan(
       paymentType: input.paymentType,
       totalAmount: itemBuilds.reduce((sum, entry) => sum + entry.built.totalAmount, 0),
       surchargePercent: itemBuilds[0]?.built.surchargePercent || 0,
-      itemCount: plans.length,
+      itemCount: itemBuilds.length,
     },
     ipAddress: ip,
     userAgent: ua,

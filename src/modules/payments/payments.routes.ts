@@ -7,7 +7,7 @@ import { Role } from '../../utils/constants.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { gcashTargetSchema, submitGcashSchema } from './gcash.validation.js';
 import { getGcashContext, submitGcash, reviewGcash, selectCash } from './gcash.service.js';
-import { listPendingPayments } from './payments.service.js';
+import { listGcashPayments, listPendingPayments, type GcashQueueFilter } from './payments.service.js';
 import {
   createPaymentPlanSchema,
   updatePaymentPlanSchema,
@@ -20,6 +20,11 @@ import {
 const router = Router();
 router.get('/gcash/flagged', authenticate, authorize(Role.CASHIER), asyncHandler(async (req, res) => {
   res.json({ success: true, data: await listPendingPayments(req.query as { page?: string; limit?: string }, true) });
+}));
+const GCASH_QUEUE_FILTERS: GcashQueueFilter[] = ['all', 'pending', 'verified', 'rejected', 'flagged'];
+router.get('/gcash/queue', authenticate, authorize(Role.CASHIER), asyncHandler(async (req, res) => {
+  const filter = GCASH_QUEUE_FILTERS.find((value) => value === req.query.filter) ?? 'pending';
+  res.json({ success: true, data: await listGcashPayments(filter, req.query as { page?: string; limit?: string }) });
 }));
 router.post('/gcash/cash', authenticate, authorize(Role.CUSTOMER), validate(gcashTargetSchema), asyncHandler(async (req, res) => {
   res.json({ success: true, data: await selectCash(req.body, req.userId!) });
