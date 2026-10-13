@@ -1965,7 +1965,7 @@ export async function getProjectById(
     if (project.customerId._id?.toString() !== actorId) {
       throw AppError.forbidden('Access denied');
     }
-    if (project.status === ProjectStatus.DRAFT && project.contractStatus !== ContractStatus.UPLOADED) {
+    if (project.status === ProjectStatus.DRAFT && project.contractStatus !== ContractStatus.UPLOADED && !project.ocularAppointmentId) {
       throw AppError.notFound('Project not found');
     }
   }
@@ -2016,6 +2016,8 @@ export async function listProjects(
         $or: [
           { contractStatus: ContractStatus.UPLOADED },
           { contractStatus: { $exists: false }, status: { $ne: ProjectStatus.DRAFT } },
+          // A project waiting on its ocular visit has no contract yet, but the customer can see it.
+          { status: ProjectStatus.DRAFT, ocularAppointmentId: { $exists: true, $ne: null } },
         ],
       },
     ];
