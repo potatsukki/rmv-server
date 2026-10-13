@@ -8,10 +8,12 @@ const {
   mockAppointmentCountDocuments,
   mockAuditCreate,
   mockNotifyRole,
+  mockNotifyBookingAgent,
   mockAssertTransition,
   mockHolidayFindOne,
   mockBlockedSlotExists,
   mockUserFind,
+  mockUserFindOne,
   mockAvailabilitySessionFind,
   mockSalesAvailabilityFind,
   mockAutoCreateDraft,
@@ -24,10 +26,12 @@ const {
   mockAppointmentCountDocuments: vi.fn(),
   mockAuditCreate: vi.fn(),
   mockNotifyRole: vi.fn(),
+  mockNotifyBookingAgent: vi.fn(),
   mockAssertTransition: vi.fn(),
   mockHolidayFindOne: vi.fn(),
   mockBlockedSlotExists: vi.fn(),
   mockUserFind: vi.fn(),
+  mockUserFindOne: vi.fn(),
   mockAvailabilitySessionFind: vi.fn(),
   mockSalesAvailabilityFind: vi.fn(),
   mockAutoCreateDraft: vi.fn(),
@@ -45,6 +49,7 @@ vi.mock('../../models/index.js', () => ({
   SlotLock: {},
   User: {
     find: mockUserFind,
+    findOne: mockUserFindOne,
   },
   AvailabilitySession: {
     find: mockAvailabilitySessionFind,
@@ -76,9 +81,16 @@ vi.mock('../../utils/stateMachine.js', () => ({
   },
 }));
 
+vi.mock('../users/availability-session.service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../users/availability-session.service.js')>()),
+  evaluateSalesAssignmentEligibility: vi.fn().mockResolvedValue({ assignmentEligible: true }),
+  getOpenAvailabilitySession: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(),
   notifyRole: mockNotifyRole,
+  notifyBookingAgentAppointmentSuccessful: mockNotifyBookingAgent,
 }));
 
 vi.mock('../notifications/email.service.js', () => ({
@@ -110,6 +122,7 @@ import {
   completeAppointment,
   prepareProjectOcularSchedule,
   getAvailableSlots,
+  reassignAppointmentSales,
   requestAppointment,
   requestReschedule,
   submitSiteDetails,
@@ -196,6 +209,42 @@ describe('completeAppointment', () => {
       AppointmentStatus.CONFIRMED,
       AppointmentStatus.COMPLETED,
     );
+    expect(mockNotifyBookingAgent).toHaveBeenCalledExactlyOnceWith(appointment);
+  });
+});
+
+describe('reassignAppointmentSales', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('confirms a requested office appointment immediately when sales staff is assigned', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.REQUESTED,
+      slotCode: '09:00',
+      salesStaffId: undefined,
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+    mockUserFindOne.mockImplementation(() => ({
+      select: vi.fn().mockResolvedValue({ _id: 'sales-1', availabilityStatus: StaffAvailabilityStatus.AVAILABLE }),
+    }));
+    mockUserFindOne.mockResolvedValueOnce({ _id: 'sales-1', firstName: 'Sam', lastName: 'Cruz' });
+
+    const result = await reassignAppointmentSales(
+      'appointment-1',
+      { salesStaffId: 'sales-1' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
+    );
+
+    expect(result.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(result.confirmedBy).toBe('agent-1');
+    expect(mockAssertTransition).toHaveBeenCalledExactlyOnceWith(
+      AppointmentStatus.REQUESTED,
+      AppointmentStatus.CONFIRMED,
+    );
+    expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      action: AuditAction.APPOINTMENT_CONFIRMED,
+    }));
   });
 });
 
@@ -451,48 +500,119 @@ describe('requestAppointment', () => {
 
 describe('requestReschedule', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
-  it('updates an already requested reschedule without re-triggering the transition guard', async () => {
-    const appointment = createAppointment();
+  function mockAvailableSlot() {
+    mockHolidayFindOne.mockResolvedValueOnce(null);
+    mockBlockedSlotExists.mockResolvedValueOnce(false);
+    mockUserFind.mockReturnValueOnce(selectLeanResult([{
+      _id: 'sales-1',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    }]));
+    mockAvailabilitySessionFind.mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([{
+        _id: { toString: () => 'session-sales-1' },
+        userId: { toString: () => 'sales-1' },
+        availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+        shiftStartAt: new Date('2026-08-24T00:00:00.000Z'),
+      }]),
+    });
+    mockSalesAvailabilityFind.mockReturnValueOnce(selectLeanResult([]));
+    mockAppointmentFind.mockReturnValueOnce(selectLeanResult([]));
+  }
+
+  it('applies an agent-initiated reschedule immediately without a pending/agent-review status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    const appointment = createAppointment({
+      status: AppointmentStatus.REQUESTED,
+      type: AppointmentType.OFFICE,
+      salesStaffId: undefined,
+    });
     mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockAvailableSlot();
     mockAuditCreate.mockResolvedValueOnce({});
 
     const result = await requestReschedule(
       'appointment-1',
-      { reason: 'Need a later schedule' },
-      'customer-1',
+      { reason: 'Need a later schedule', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
       '127.0.0.1',
       'vitest-agent',
     );
 
     expect(mockAssertTransition).not.toHaveBeenCalled();
-    expect(appointment.status).toBe(AppointmentStatus.RESCHEDULE_REQUESTED);
+    expect(appointment.status).toBe(AppointmentStatus.REQUESTED);
+    expect(appointment.date).toBe('2026-09-01');
+    expect(appointment.slotCode).toBe('09:00');
     expect(appointment.rescheduleReason).toBe('Need a later schedule');
     expect(appointment.save).toHaveBeenCalledTimes(1);
     expect(mockAuditCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: AuditAction.APPOINTMENT_RESCHEDULE_REQUESTED,
-        actorId: 'customer-1',
-        targetType: 'appointment',
-        targetId: 'appointment-1',
-        details: {
-          reason: 'Need a later schedule',
-          count: 1,
-        },
-        ipAddress: '127.0.0.1',
-        userAgent: 'vitest-agent',
+        action: AuditAction.APPOINTMENT_RESCHEDULED,
+        actorId: 'agent-1',
       }),
     );
-    expect(mockNotifyRole).toHaveBeenCalledWith(
-      'appointment_agent',
-      expect.anything(),
-      'Reschedule Request Updated',
-      'Customer updated the reschedule request for appointment on 2026-08-15. New reason: Need a later schedule',
-      '/appointments/appointment-1',
-    );
     expect(result).toBe(appointment);
+  });
+
+  it('lets an admin reschedule a confirmed appointment and keeps its assigned sales staff', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    const appointment = createAppointment({
+      status: AppointmentStatus.CONFIRMED,
+      type: AppointmentType.OFFICE,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockAvailableSlot();
+    mockUserFindOne.mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue({ _id: 'sales-1', availabilityStatus: StaffAvailabilityStatus.AVAILABLE }),
+    });
+    mockAuditCreate.mockResolvedValueOnce({});
+
+    const result = await requestReschedule(
+      'appointment-1',
+      { reason: 'Staff conflict', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'admin-1',
+      [Role.ADMIN],
+    );
+
+    expect(result.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(result.date).toBe('2026-09-01');
+    expect(result.salesStaffId).toEqual({ toString: expect.any(Function) });
+    expect(mockAuditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditAction.APPOINTMENT_RESCHEDULED, actorId: 'admin-1' }),
+    );
+  });
+
+  it('rejects reschedule attempts from the customer or the assigned sales staff', async () => {
+    const appointment = createAppointment({
+      status: AppointmentStatus.CONFIRMED,
+      type: AppointmentType.OFFICE,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+
+    await expect(requestReschedule(
+      'appointment-1',
+      { reason: 'Staff conflict', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'sales-1',
+      [Role.SALES_STAFF],
+    )).rejects.toThrow('Only an appointment agent or admin can reschedule this appointment');
+
+    await expect(requestReschedule(
+      'appointment-1',
+      { reason: 'Need a later schedule', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'customer-1',
+      [Role.CUSTOMER],
+    )).rejects.toThrow('Only an appointment agent or admin can reschedule this appointment');
   });
 });
 

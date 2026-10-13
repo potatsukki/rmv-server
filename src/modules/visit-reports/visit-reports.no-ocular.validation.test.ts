@@ -6,16 +6,27 @@ const mocks = vi.hoisted(() => ({
   projectCreate: vi.fn(), projectFindOne: vi.fn(), projectFindById: vi.fn(),
   projectItemFindOneAndUpdate: vi.fn(),
   auditCreate: vi.fn(), releaseSlot: vi.fn(),
+  userFindById: vi.fn(),
+  sendOcularAddressNeededEmail: vi.fn(),
+  sendOcularFeeDueEmail: vi.fn(),
+  sendOcularVisitScheduledEmail: vi.fn(),
 }));
 vi.mock('../../models/index.js', () => ({
   VisitReport: { findById: mocks.reportFindById, find: mocks.reportFind },
   Appointment: { findById: mocks.appointmentFindById, findOne: mocks.appointmentFindOne, create: mocks.appointmentCreate },
   Project: { create: mocks.projectCreate, findOne: mocks.projectFindOne, findById: mocks.projectFindById },
-  ProjectItem: { findOneAndUpdate: mocks.projectItemFindOneAndUpdate }, User: {}, AuditLog: { create: mocks.auditCreate },
+  ProjectItem: { findOneAndUpdate: mocks.projectItemFindOneAndUpdate },
+  User: { findById: mocks.userFindById },
+  AuditLog: { create: mocks.auditCreate },
   SlotLock: { deleteOne: mocks.releaseSlot },
 }));
 vi.mock('../notifications/socket.service.js', () => ({
-  createAndSendNotification: vi.fn(), notifyRole: vi.fn(),
+  createAndSendNotification: vi.fn(), notifyRole: vi.fn(), notifyBookingAgentAppointmentSuccessful: vi.fn(),
+}));
+vi.mock('../notifications/email.service.js', () => ({
+  sendOcularAddressNeededEmail: mocks.sendOcularAddressNeededEmail,
+  sendOcularFeeDueEmail: mocks.sendOcularFeeDueEmail,
+  sendOcularVisitScheduledEmail: mocks.sendOcularVisitScheduledEmail,
 }));
 vi.mock('../appointments/appointments.service.js', () => ({ resolveOcularVisitData: vi.fn() }));
 vi.mock('../appointments/consultation-attendance-automation.js', () => ({
@@ -149,14 +160,24 @@ describe('appointment report submission without project creation', () => {
       then: (resolve: (value: unknown) => unknown) => Promise.resolve([]).then(resolve),
       sort: vi.fn().mockResolvedValue(filter.appointmentId === 'appointment-1' ? [report] : []),
     }));
+    mocks.userFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ email: 'customer@example.com' }) });
     await submitReport('report-1', 'sales-1');
     expect(appointment.status).toBe('completed');
     expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
       type: 'ocular', date: '2026-09-18', slotCode: '09:00', sourceConsultationAppointmentId: 'appointment-1',
+      // The recommending sales staff already owns it — created confirmed, no separate confirmation step.
+      status: 'confirmed', confirmedBy: 'sales-1', salesStaffId: 'sales-1',
     }));
     expect(report.visitType).toBe('ocular');
     expect(report.appointmentId).toBe('ocular-1');
     expect(report.status).toBe('draft');
+    // No site address yet on the new ocular appointment, so the customer is emailed to submit one.
+    expect(mocks.sendOcularAddressNeededEmail).toHaveBeenCalledWith('customer@example.com', expect.objectContaining({
+      date: '2026-09-18',
+      appointmentId: 'ocular-1',
+    }));
+    expect(mocks.sendOcularFeeDueEmail).not.toHaveBeenCalled();
+    expect(mocks.sendOcularVisitScheduledEmail).not.toHaveBeenCalled();
     expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.projectFindOne).not.toHaveBeenCalled();
   });
