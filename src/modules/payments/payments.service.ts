@@ -647,11 +647,12 @@ export async function listPendingPayments(query: {
 
 export type GcashQueueFilter = 'all' | 'pending' | 'verified' | 'rejected' | 'flagged';
 
-// Cashier GCash history: pending, verified, rejected (cashier or system) and flagged duplicate attempts.
+// Cashier GCash list: `pending` is the work queue; `all` is the reviewed history (verified and
+// rejected, including flagged duplicates) so pending payments never mix with it.
 export async function listGcashPayments(filter: GcashQueueFilter, query: { page?: string; limit?: string }) {
   const gcash = { method: PaymentMethod.GCASH };
   const filters: Record<GcashQueueFilter, Record<string, unknown>> = {
-    all: { ...gcash, paymentStatus: { $in: ['pending_verification', 'paid', 'rejected'] } },
+    all: { ...gcash, paymentStatus: { $in: ['paid', 'rejected'] } },
     pending: { ...gcash, paymentStatus: 'pending_verification' },
     verified: { ...gcash, paymentStatus: 'paid' },
     rejected: { ...gcash, paymentStatus: 'rejected', duplicateReference: { $ne: true } },
