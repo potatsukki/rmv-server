@@ -193,7 +193,13 @@ export async function updateUser(userId: string, input: UpdateUserInput, adminId
 
   if (input.firstName) user.firstName = input.firstName;
   if (input.lastName) user.lastName = input.lastName;
-  if (input.phone) user.phone = input.phone;
+  if (input.phone !== undefined) user.set('phone', input.phone ?? undefined);
+  const emailChanged = Boolean(input.email) && input.email !== user.email;
+  if (emailChanged) {
+    const taken = await User.exists({ email: input.email, _id: { $ne: user._id } });
+    if (taken) throw AppError.conflict('Email already registered', ErrorCode.DUPLICATE_ENTRY);
+    user.email = input.email!;
+  }
   if (input.roles) user.roles = input.roles;
   const nextRoles = input.roles ?? user.roles;
   const targetsInternalRole = hasInternalAvailabilityRole(nextRoles);
@@ -265,7 +271,8 @@ export async function updateUser(userId: string, input: UpdateUserInput, adminId
 
   await user.save();
 
-  if (input.isActive === false || isPasswordReset) {
+  // A changed email or password ends the user's existing sessions.
+  if (input.isActive === false || isPasswordReset || emailChanged) {
     await RefreshToken.deleteMany({ userId: user._id });
   }
 

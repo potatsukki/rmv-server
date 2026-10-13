@@ -36,7 +36,9 @@ export const createUserSchema = z.object({
 export const updateUserSchema = z.object({
   firstName: z.string().min(1).max(50).regex(nameRegex, 'Name contains invalid characters').trim().optional(),
   lastName: z.string().min(1).max(50).regex(nameRegex, 'Name contains invalid characters').trim().optional(),
-  phone: z.string().regex(phoneRegex).optional(),
+  email: z.string().trim().toLowerCase().email().optional(),
+  // null removes the phone number.
+  phone: z.string().regex(phoneRegex).nullable().optional(),
   roles: z.array(z.nativeEnum(Role)).min(1).optional(),
   password: z.string().min(8).optional(),
   isActive: z.boolean().optional(),
