@@ -25,7 +25,7 @@ import {
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
 } from '../users/availability-session.service.js';
-import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
+import { synchronizeConsultationAttendanceByTime, TESTING_BYPASS_REASON } from './consultation-attendance-automation.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -1984,13 +1984,15 @@ export async function updateConsultationAttendance(
       );
     }
 
+    // The bypass skips the scheduled slot, so the consultation is recorded as completed now.
     const now = new Date();
-    appointment.attendanceStatus = AppointmentAttendanceStatus.IN_PROGRESS;
+    appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
     appointment.actualArrivalAt ||= now;
     appointment.consultationStartedAt = now;
+    appointment.consultationCompletedAt = now;
     appointment.attendanceUpdatedBy = actorId as unknown as Types.ObjectId;
     appointment.attendanceUpdatedAt = now;
-    appointment.attendanceOverrideReason = 'Temporary testing bypass';
+    appointment.attendanceOverrideReason = TESTING_BYPASS_REASON;
     await appointment.save();
 
     await AuditLog.create({
@@ -2001,8 +2003,8 @@ export async function updateConsultationAttendance(
       details: {
         action: input.action,
         previousAttendanceStatus: currentStatus,
-        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
-        overrideReason: 'Temporary testing bypass',
+        attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
+        overrideReason: TESTING_BYPASS_REASON,
       },
       ipAddress: ip,
       userAgent: ua,

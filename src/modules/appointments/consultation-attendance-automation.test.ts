@@ -49,6 +49,22 @@ describe('consultation attendance automation', () => {
     expect(record.save).toHaveBeenCalledTimes(1);
   });
 
+  it('completes a testing-bypass consultation before its scheduled slot', async () => {
+    const record = appointment({
+      date: '2026-10-16',
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      consultationStartedAt: new Date('2026-10-13T06:35:00.000Z'),
+      attendanceOverrideReason: 'Temporary testing bypass',
+    });
+    const now = new Date('2026-10-13T06:40:00.000Z');
+
+    await expect(synchronizeConsultationAttendanceByTime(record, now)).resolves.toBe(true);
+
+    expect(record.attendanceStatus).toBe(AppointmentAttendanceStatus.COMPLETED);
+    expect(record.consultationStartedAt).toEqual(new Date('2026-10-13T06:35:00.000Z'));
+    expect(record.consultationCompletedAt).toEqual(now);
+  });
+
   it('changes the consultation to Completed at the end of its one-hour slot', async () => {
     const record = appointment({ attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS });
     const now = new Date('2026-09-10T02:00:00.000Z');

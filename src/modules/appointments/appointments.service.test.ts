@@ -586,9 +586,10 @@ describe('updateConsultationAttendance testing bypass', () => {
       'vitest-agent',
     );
 
-    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.IN_PROGRESS);
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.COMPLETED);
     expect(appointment.actualArrivalAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
     expect(appointment.consultationStartedAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
+    expect(appointment.consultationCompletedAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
     expect(appointment.attendanceOverrideReason).toBe('Temporary testing bypass');
     expect(appointment.save).toHaveBeenCalledTimes(1);
     expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -596,7 +597,7 @@ describe('updateConsultationAttendance testing bypass', () => {
       actorId: 'sales-1',
       details: expect.objectContaining({
         action: 'test_start',
-        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+        attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
       }),
     }));
 
