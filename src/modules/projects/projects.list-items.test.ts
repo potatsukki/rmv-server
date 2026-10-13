@@ -142,4 +142,22 @@ describe('listProjects project-item fallback', () => {
     expect(mocks.appointmentFind).toHaveBeenCalledOnce();
     expect(mocks.appointmentFind).toHaveBeenCalledWith({ _id: { $in: ['ocular-1', 'ocular-2'] } });
   });
+
+  it('lets a customer see their project that is still waiting on its ocular visit', async () => {
+    mocks.projectFind.mockReturnValue(queryChain([]));
+    mocks.projectCountDocuments.mockResolvedValue(0);
+    mocks.projectItemFind.mockReturnValue(queryChain([]));
+    mocks.blueprintAggregate.mockResolvedValue([]);
+    mocks.appointmentFind.mockReturnValue(queryChain([]));
+
+    await listProjects({ status: 'draft' }, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mocks.projectFind).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      status: 'draft',
+      $and: [{ $or: expect.arrayContaining([
+        { status: ProjectStatus.DRAFT, ocularAppointmentId: { $exists: true, $ne: null } },
+      ]) }],
+    }));
+  });
 });
