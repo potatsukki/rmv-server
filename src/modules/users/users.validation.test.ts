@@ -89,3 +89,15 @@ describe('users.validation sales staff lookup query', () => {
     });
   });
 });
+
+describe('users.validation admin edit of contact details', () => {
+  it('accepts a changed email (normalized to lowercase) and rejects an invalid one', () => {
+    expect(updateUserSchema.parse({ email: '  New.Staff@Gmail.com ' }).email).toBe('new.staff@gmail.com');
+    expect(updateUserSchema.safeParse({ email: 'not-an-email' }).success).toBe(false);
+  });
+
+  it('allows clearing the phone number with null', () => {
+    expect(updateUserSchema.parse({ phone: null }).phone).toBeNull();
+    expect(updateUserSchema.safeParse({ phone: '12345' }).success).toBe(false);
+  });
+});
