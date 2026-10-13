@@ -1129,7 +1129,8 @@ async function assertBlueprintProjectAccess(
     .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds status');
   if (!project) throw AppError.notFound('Project not found');
 
-  if (actorRoles.includes(Role.ADMIN)) return;
+  // The cashier reads every project's billing summary and quotation for payment records.
+  if (actorRoles.includes(Role.ADMIN) || actorRoles.includes(Role.CASHIER)) return;
 
   if (actorRoles.includes(Role.CUSTOMER) && project.customerId.toString() === actorId) return;
   if (actorRoles.includes(Role.SALES_STAFF) && project.salesStaffId?.toString() === actorId) return;
