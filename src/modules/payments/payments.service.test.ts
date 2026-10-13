@@ -128,10 +128,10 @@ describe('GCash verification history filters', () => {
     expect(cursor.sort).toHaveBeenCalledWith({ createdAt: direction });
     expect(cursor.populate).toHaveBeenCalledWith('verifiedBy', 'firstName lastName');
   });
-  it('all filter covers pending, verified and rejected GCash payments, including flagged duplicates', async () => {
+  it('all filter is the reviewed history: verified and rejected (incl. flagged), never pending', async () => {
     cursorWith();
     await listGcashPayments('all', {});
-    expect(mockPaymentFind).toHaveBeenCalledWith({ method: 'gcash', paymentStatus: { $in: ['pending_verification', 'paid', 'rejected'] } });
+    expect(mockPaymentFind).toHaveBeenCalledWith({ method: 'gcash', paymentStatus: { $in: ['paid', 'rejected'] } });
   });
 });
 
