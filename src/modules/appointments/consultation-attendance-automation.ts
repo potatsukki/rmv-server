@@ -9,6 +9,7 @@ import {
 
 const TIME_ZONE = 'Asia/Manila';
 const CONSULTATION_DURATION_MS = 60 * 60 * 1000;
+export const TESTING_BYPASS_REASON = 'Temporary testing bypass';
 const AUTOMATABLE_ATTENDANCE_STATUSES = [
   AppointmentAttendanceStatus.SCHEDULED,
   AppointmentAttendanceStatus.ON_TIME,
@@ -31,6 +32,7 @@ type ConsultationAppointment = {
   consultationStartedAt?: Date;
   consultationCompletedAt?: Date;
   attendanceUpdatedAt?: Date;
+  attendanceOverrideReason?: string;
   save: () => Promise<unknown>;
 };
 
@@ -58,7 +60,14 @@ export async function synchronizeConsultationAttendanceByTime(
   const window = getConsultationAttendanceWindow(appointment.date, appointment.slotCode);
   if (Number.isNaN(window.start.getTime())) return false;
 
-  if (now >= window.end) {
+  // A testing bypass skips the scheduled slot, so it completes right away.
+  const isTestingBypass = appointment.attendanceOverrideReason === TESTING_BYPASS_REASON
+    && currentStatus === AppointmentAttendanceStatus.IN_PROGRESS;
+  if (isTestingBypass) {
+    appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
+    appointment.consultationStartedAt ||= now;
+    appointment.consultationCompletedAt = now;
+  } else if (now >= window.end) {
     appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
     appointment.consultationStartedAt ||= window.start;
     appointment.consultationCompletedAt = window.end;
@@ -82,10 +91,13 @@ export async function processAutomatedConsultationAttendance(
   const appointments = await Appointment.find({
     type: AppointmentType.OFFICE,
     status: { $in: AUTOMATABLE_APPOINTMENT_STATUSES },
-    date: { $lte: localDate },
     attendanceStatus: { $in: AUTOMATABLE_ATTENDANCE_STATUSES },
+    $or: [
+      { date: { $lte: localDate } },
+      { attendanceOverrideReason: TESTING_BYPASS_REASON },
+    ],
   }).select(
-    'type status date slotCode attendanceStatus consultationStartedAt consultationCompletedAt attendanceUpdatedAt',
+    'type status date slotCode attendanceStatus consultationStartedAt consultationCompletedAt attendanceUpdatedAt attendanceOverrideReason',
   );
 
   let updatedCount = 0;
