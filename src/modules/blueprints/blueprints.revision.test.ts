@@ -212,6 +212,16 @@ describe('customer visibility of inherited costing', () => {
     expect(bp.save).not.toHaveBeenCalled();
   });
 
+  it('lets the cashier load any project blueprint, but not an unrelated customer', async () => {
+    mocks.projectFindById.mockImplementation(() => {
+      const project = { _id: 'project-1', title: 'Railings', customerId: 'customer-1', engineerIds: [], status: ProjectStatus.BLUEPRINT };
+      return Object.assign(Promise.resolve(project), { select: vi.fn().mockResolvedValue(project) });
+    });
+    mocks.blueprintFindOne.mockReturnValue(query(latest()));
+    await expect(getLatestBlueprint('project-1', 'cashier-1', [Role.CASHIER])).resolves.toMatchObject({ quotation: { total: 3000 } });
+    await expect(getLatestBlueprint('project-1', 'customer-2', [Role.CUSTOMER])).rejects.toThrow('Access denied');
+  });
+
   it('normalizes history responses so the summary remains visible in the customer costing tab', async () => {
     const bp = latest();
     mocks.blueprintFind.mockReturnValue({ populate: () => ({ sort: async () => [bp] }) });
