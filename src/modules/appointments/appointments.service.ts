@@ -10,7 +10,7 @@ import {
   NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
+import { createAndSendNotification, emitRoleEvent, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
 import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
 import { computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
@@ -2525,7 +2525,6 @@ export async function createOcularFeeCheckout(
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
   if (appointment.ocularFeeStatus === 'proof_submitted') throw AppError.conflict('A payment is awaiting verification');
-  if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) throw AppError.badRequest('GCash payments must be reviewed in the cashier payment verification queue');
 
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You can only pay for your own appointments');
@@ -2681,14 +2680,17 @@ export async function verifyOcularFeeCheckout(appointmentId: string, customerId:
     throw AppError.forbidden('You can only verify your own appointments');
   }
 
-  // Already verified
+  // Already verified, or already waiting for the cashier
   if (appointment.ocularFeePaid && appointment.ocularFeeStatus === 'verified') {
-    return { verified: true, appointment };
+    return { verified: true, awaitingVerification: false, appointment };
+  }
+  if (appointment.ocularFeeStatus === 'proof_submitted' && appointment.ocularFeePaymentMethod === PaymentMethod.QRPH) {
+    return { verified: false, awaitingVerification: true, appointment };
   }
 
   // No checkout session to check
   if (!appointment.paymongoCheckoutSessionId) {
-    return { verified: false, appointment };
+    return { verified: false, awaitingVerification: false, appointment };
   }
 
   // Actively query PayMongo for the checkout session status
@@ -2702,46 +2704,52 @@ export async function verifyOcularFeeCheckout(appointmentId: string, customerId:
     );
 
     if (hasPaid) {
-      // Mark as verified — same logic as webhook handler
-      appointment.ocularFeePaid = true;
-      appointment.ocularFeeStatus = 'verified';
-      appointment.ocularFeeDeclineReason = undefined;
-      await appointment.save();
-
-      await AuditLog.create({
-        action: AuditAction.PAYMENT_VERIFIED,
-        actorId: appointment.customerId._id ?? appointment.customerId,
-        targetType: 'appointment',
-        targetId: appointment._id,
-        details: { ocularFee: appointment.ocularFee, verifiedVia: 'paymongo_polling' },
-      });
-
-      await createAndSendNotification(
-        appointment.customerId._id ?? appointment.customerId,
-        NotificationCategory.PAYMENT,
-        'Ocular Fee Payment Confirmed',
-        `Your ocular fee payment of ₱${appointment.ocularFee?.toLocaleString()} has been confirmed via PayMongo. Your assigned sales staff can now finalize your ocular visit.`,
-        `/appointments/${appointment._id}`,
-      );
-
-      if (appointment.salesStaffId) {
-        await createAndSendNotification(
-          appointment.salesStaffId.toString(),
-          NotificationCategory.PAYMENT,
-          'Ocular Fee Payment Received',
-          `Customer has paid the ocular fee of ₱${appointment.ocularFee?.toLocaleString()} for appointment on ${appointment.date}. You can now finalize this ocular visit.`,
-          `/appointments/${appointment._id}`,
-        );
-      }
-
-      return { verified: true, appointment };
+      await markOcularFeePaidViaPaymongo(appointment);
+      return { verified: false, awaitingVerification: true, appointment };
     }
 
-    return { verified: false, appointment };
+    return { verified: false, awaitingVerification: false, appointment };
   } catch (err) {
     console.error('[Verify Ocular Fee] Polling failed:', err);
-    return { verified: false, appointment };
+    return { verified: false, awaitingVerification: false, appointment };
   }
+}
+
+// A QR Ph payment confirmed by PayMongo still goes to the cashier, who verifies it in the
+// Ocular Fees queue (same rule as project stage payments). Safe to call more than once.
+async function markOcularFeePaidViaPaymongo(appointment: import('../../models/Appointment.js').IAppointment) {
+  if (appointment.ocularFeePaid || appointment.ocularFeeStatus === 'proof_submitted') return;
+
+  appointment.ocularFeeStatus = 'proof_submitted';
+  appointment.ocularFeePaymentMethod = PaymentMethod.QRPH;
+  appointment.ocularFeeDeclineReason = undefined;
+  await appointment.save();
+
+  const customerId = (appointment.customerId as unknown as { _id?: Types.ObjectId })._id ?? appointment.customerId;
+  const amount = formatCurrency(appointment.ocularFee ?? appointment.ocularFeeBreakdown?.total ?? 0);
+  await AuditLog.create({
+    action: AuditAction.PAYMENT_PROOF_SUBMITTED,
+    actorId: customerId,
+    targetType: 'appointment',
+    targetId: appointment._id,
+    details: { ocularFee: appointment.ocularFee, method: PaymentMethod.QRPH, via: 'paymongo' },
+  });
+
+  await createAndSendNotification(
+    customerId.toString(),
+    NotificationCategory.PAYMENT,
+    'Ocular Fee Payment Received',
+    `We received your QR Ph payment of ${amount}. The cashier will verify it shortly.`,
+    `/appointments/${appointment._id}/pay-ocular-fee`,
+  );
+  await notifyRole(
+    Role.CASHIER,
+    NotificationCategory.PAYMENT,
+    'Ocular Fee Paid via QR Ph',
+    `${appointment.appointmentNumber || 'A booking'} paid ${amount} through PayMongo QR Ph. Verify it in Ocular Fees.`,
+    '/payments?tab=ocular-fees',
+  );
+  emitRoleEvent(Role.CASHIER, 'payments:queue-updated', { type: 'ocular_fee_qrph_paid', appointmentId: appointment._id.toString() });
 }
 
 // ── Handle PayMongo Webhook: Payment Paid ──
@@ -2757,51 +2765,7 @@ export async function handlePaymongoPayment(checkoutSessionId: string) {
   }
 
   if (appointment.ocularFeePaymentMethod === PaymentMethod.GCASH) return appointment;
-  if (appointment.ocularFeePaid) {
-    // Already verified — idempotent
-    return appointment;
-  }
-
-  appointment.ocularFeePaid = true;
-  appointment.ocularFeeStatus = 'verified';
-  appointment.ocularFeeDeclineReason = undefined;
-  await appointment.save();
-
-  await AuditLog.create({
-    action: AuditAction.PAYMENT_VERIFIED,
-    actorId: appointment.customerId._id ?? appointment.customerId,
-    targetType: 'appointment',
-    targetId: appointment._id,
-    details: { ocularFee: appointment.ocularFee, verifiedVia: 'paymongo_webhook' },
-  });
-
-  // Notify customer
-  await createAndSendNotification(
-    appointment.customerId._id ?? appointment.customerId,
-    NotificationCategory.PAYMENT,
-    'Ocular Fee Payment Confirmed',
-    `Your ocular fee payment of ₱${appointment.ocularFee?.toLocaleString()} has been confirmed via PayMongo. Your assigned sales staff can now finalize your ocular visit.`,
-    `/appointments/${appointment._id}`,
-  );
-
-  if (appointment.salesStaffId) {
-    await createAndSendNotification(
-      appointment.salesStaffId.toString(),
-      NotificationCategory.APPOINTMENT,
-      'Ocular Fee Paid — Ready to Finalize',
-      `Ocular fee for appointment on ${appointment.date} has been paid via PayMongo. You can now finalize this ocular visit.`,
-      `/appointments/${appointment._id}`,
-    );
-  }
-
-  // Notify cashiers (for their records)
-  await notifyRole(
-    Role.CASHIER,
-    NotificationCategory.PAYMENT,
-    'Ocular Fee Auto-Verified',
-    `Ocular fee payment for appointment on ${appointment.date} was automatically verified via PayMongo.`,
-    `/ocular-fee-queue`,
-  );
+  await markOcularFeePaidViaPaymongo(appointment);
 
   return appointment;
 }
@@ -2967,7 +2931,7 @@ export async function listPendingOcularFees() {
   const appointments = await Appointment.find({
     ocularFeePaymentMethod: { $ne: PaymentMethod.GCASH },
     type: AppointmentType.OCULAR,
-    'ocularFeeBreakdown.isWithinNCR': false,
+    ocularFee: { $gt: 0 },
     ocularFeeStatus: { $in: ['proof_submitted', 'pending', 'declined', 'cash_pending'] },
     status: { $ne: AppointmentStatus.CANCELLED },
   })

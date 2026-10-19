@@ -90,6 +90,7 @@ vi.mock('../users/availability-session.service.js', async (importOriginal) => ({
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(),
   notifyRole: mockNotifyRole,
+  emitRoleEvent: vi.fn(),
   notifyBookingAgentAppointmentSuccessful: mockNotifyBookingAgent,
 }));
 
@@ -128,6 +129,8 @@ import {
   submitSiteDetails,
   updateConsultationAttendance,
   getCustomerQueueStatus,
+  handlePaymongoPayment,
+  listPendingOcularFees,
 } from './appointments.service.js';
 import {
   AppointmentAttendanceStatus,
@@ -759,4 +762,52 @@ describe('updateConsultationAttendance testing bypass', () => {
     vi.useRealTimers();
   });
 
+});
+
+describe('ocular fee paid through PayMongo QR Ph', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('waits for the cashier instead of marking the fee paid', async () => {
+    const appointment = createAppointment({
+      appointmentNumber: 'APT-20261022-0003',
+      ocularFee: 658,
+      ocularFeePaid: false,
+      ocularFeeStatus: 'pending',
+      ocularFeePaymentMethod: 'qrph',
+    });
+    mockAppointmentFindOne.mockReturnValue({ populate: vi.fn().mockResolvedValue(appointment) });
+
+    await handlePaymongoPayment('cs_123');
+
+    expect(appointment).toMatchObject({ ocularFeePaid: false, ocularFeeStatus: 'proof_submitted', ocularFeePaymentMethod: 'qrph' });
+    expect(appointment.save).toHaveBeenCalledTimes(1);
+    expect(mockNotifyRole).toHaveBeenCalledWith(
+      Role.CASHIER,
+      expect.anything(),
+      'Ocular Fee Paid via QR Ph',
+      expect.stringContaining('APT-20261022-0003'),
+      '/payments?tab=ocular-fees',
+    );
+  });
+
+  it('does nothing when the payment is already waiting for the cashier', async () => {
+    const appointment = createAppointment({ ocularFee: 658, ocularFeePaid: false, ocularFeeStatus: 'proof_submitted', ocularFeePaymentMethod: 'qrph' });
+    mockAppointmentFindOne.mockReturnValue({ populate: vi.fn().mockResolvedValue(appointment) });
+
+    await handlePaymongoPayment('cs_123');
+
+    expect(appointment.save).not.toHaveBeenCalled();
+    expect(mockNotifyRole).not.toHaveBeenCalled();
+  });
+
+  it('lists every unpaid ocular booking that has a fee in the cashier queue', async () => {
+    const sort = vi.fn().mockResolvedValue([]);
+    mockAppointmentFind.mockReturnValue({ populate: vi.fn().mockReturnValue({ sort }) });
+
+    await listPendingOcularFees();
+
+    const filter = mockAppointmentFind.mock.calls[0]![0];
+    expect(filter).toMatchObject({ ocularFee: { $gt: 0 }, type: AppointmentType.OCULAR });
+    expect(filter).not.toHaveProperty('ocularFeeBreakdown.isWithinNCR');
+  });
 });
