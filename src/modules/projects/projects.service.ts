@@ -578,8 +578,11 @@ export async function createProject(
     ...appointmentReports.map((report) => report.serviceType).filter(Boolean),
   ])];
   const serviceType = input.serviceType || primaryReport?.serviceType || linkedServiceTypes[0] || ServiceType.CUSTOM;
-  const serviceTypes = input.serviceTypes?.length
-    ? [...new Set([serviceType, ...input.serviceTypes])]
+  const requestedServiceTypes = input.additionalItems?.length
+    ? input.additionalItems.map((item) => item.serviceType)
+    : input.serviceTypes;
+  const serviceTypes = requestedServiceTypes?.length
+    ? [...new Set([serviceType, ...requestedServiceTypes])]
     : linkedServiceTypes.length ? linkedServiceTypes : [serviceType];
   const photoKeys = preferProjectInput(input.photoKeys, primaryReport?.photoKeys) || [];
   const videoKeys = preferProjectInput(input.videoKeys, primaryReport?.videoKeys) || [];
@@ -648,6 +651,28 @@ export async function createProject(
         : appointment?.selectedDesignTemplates?.find((template) => template.serviceType === serviceType);
       await ProjectItem.create(buildFallbackProjectItem(project, serviceType, design));
     }
+  }
+
+  // Sales filled each secondary item on the create form; that wins over report/appointment prefill.
+  for (const { serviceType: itemServiceType, ...details } of input.additionalItems || []) {
+    if (itemServiceType === project.serviceType) continue;
+    const attachmentKeys = [
+      ...(details.photoKeys || []),
+      ...(details.videoKeys || []),
+      ...(details.sketchKeys || []),
+      ...(details.referenceImageKeys || []),
+    ];
+    await ProjectItem.findOneAndUpdate(
+      { projectId: project._id, serviceType: itemServiceType },
+      {
+        $set: {
+          ...details,
+          ...(attachmentKeys.length && { mediaKeys: [...new Set(attachmentKeys)] }),
+          ...(details.initialDesignKeys?.length && { designReviewStatus: 'pending' }),
+        },
+      },
+      { new: true },
+    );
   }
 
   if (input.ocularVisit) {

@@ -53,6 +53,10 @@ export interface IProjectItem extends Document {
   designReviewNotes?: string;
   installationConfirmedAt?: Date;
   mediaKeys: string[];
+  photoKeys: string[];
+  videoKeys: string[];
+  sketchKeys: string[];
+  referenceImageKeys: string[];
   deletedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -118,6 +122,10 @@ const projectItemSchema = new Schema<IProjectItem>(
     designReviewNotes: String,
     installationConfirmedAt: { type: Date, default: null },
     mediaKeys: [{ type: String }],
+    photoKeys: [{ type: String }],
+    videoKeys: [{ type: String }],
+    sketchKeys: [{ type: String }],
+    referenceImageKeys: [{ type: String }],
     deletedAt: { type: Date, default: null },
   },
   { timestamps: true },

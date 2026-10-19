@@ -20,6 +20,12 @@ const projectDetailsSchema = updateVisitReportSchema.pick({
   referenceImageKeys: true,
 });
 
+const additionalProjectItemSchema = projectDetailsSchema.omit({ initialDesignNotes: true }).extend({
+  serviceType: z.string().trim().min(1).max(100),
+  materials: z.string().trim().max(1000).optional(),
+  finishes: z.string().trim().max(500).optional(),
+});
+
 const signedContractFileKeySchema = z.string()
   .min(1, 'Contract file is required')
   .refine((key) => key.startsWith('contracts/'), 'Contract file must be uploaded to the contracts folder')
@@ -35,6 +41,7 @@ export const createProjectSchema = z.object({
   title: z.string().trim().min(1).max(100).optional(),
   serviceType: z.string().trim().min(1).max(100).optional(),
   serviceTypes: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  additionalItems: z.array(additionalProjectItemSchema).max(20).optional(),
   deliveryType: z.nativeEnum(DeliveryType).optional(),
   description: z.string().trim().max(2000).optional(),
   siteAddress: z.string().trim().min(1).max(500).optional(),
