@@ -448,6 +448,39 @@ describe('createProject', () => {
     expect(fallbackItem).not.toHaveProperty('notes');
   });
 
+  it('gives a secondary item the customer-selected design for its service', async () => {
+    mocks.appointmentFindById.mockResolvedValue(appointment({
+      serviceTypes: ['railings', 'custom'],
+      selectedDesignTemplates: [
+        { id: 'rail-1', name: 'Commercial Stainless Guardrail', imageUrl: '/rail.jpg', serviceId: 'railings', serviceLabel: 'Railings', serviceType: 'railings' },
+        { id: 'cart-1', name: 'Food Cart Kiosk Frame', imageUrl: '/cart.jpg', serviceId: 'custom', serviceLabel: 'Custom', serviceType: 'custom' },
+      ],
+    }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+
+    await createProject({ ...input, appointmentId, serviceType: 'railings' }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemCreate).toHaveBeenCalledTimes(2);
+    const custom = mocks.projectItemCreate.mock.calls.map((call) => call[0]).find((item) => item.serviceType === 'custom');
+    expect(custom).toMatchObject({ selectedDesignTemplateId: 'cart-1', selectedDesignTemplateName: 'Food Cart Kiosk Frame' });
+  });
+
+  it('creates items only for the services the sales staff kept', async () => {
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['railings', 'custom'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+
+    await createProject({ ...input, appointmentId, serviceType: 'railings', serviceTypes: ['railings'] }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemCreate).toHaveBeenCalledTimes(1);
+    expect(mocks.projectItemCreate.mock.calls[0]![0]).toMatchObject({ serviceType: 'railings' });
+  });
+
+  it('creates every chosen item for a walk-in project with no appointment', async () => {
+    await createProject({ ...input, serviceType: 'gates', serviceTypes: ['gates', 'railings'] }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemCreate.mock.calls.map((call) => call[0].serviceType)).toEqual(['gates', 'railings']);
+  });
+
   it('attaches a form-uploaded initial design only to the matching primary item', async () => {
     const canopyReport = {
       _id: 'report-canopy',
