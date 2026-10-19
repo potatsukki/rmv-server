@@ -131,6 +131,23 @@ describe('finalizeOcularProject', () => {
     expect(draft.save).not.toHaveBeenCalled();
   });
 
+  it('saves the details sales entered for the other ocular items', async () => {
+    reports.push({ _id: 'report-2', serviceType: 'kitchen_cabinet', visitType: 'ocular', status: 'submitted', linkedProjectId: 'project-1', save: vi.fn() });
+
+    await finalizeOcularProject('project-1', {
+      ...input,
+      serviceType: 'gates',
+      additionalItems: [{ serviceType: 'kitchen_cabinet', materials: 'SS 304', photoKeys: ['visit-photos/cabinet.jpg'] }],
+    }, actorId, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
+      { projectId: 'project-1', serviceType: 'kitchen_cabinet' },
+      { $set: expect.objectContaining({ materials: 'SS 304', mediaKeys: ['visit-photos/cabinet.jpg'] }) },
+      { new: true },
+    );
+    expect(draft).not.toHaveProperty('additionalItems');
+  });
+
   it('requires every ocular report to be submitted', async () => {
     reports.push({ _id: 'report-2', serviceType: 'railings', status: 'draft' });
     await expect(finalizeOcularProject('project-1', input, actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit all ocular reports');

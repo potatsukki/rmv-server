@@ -507,6 +507,30 @@ async function attachProjectItems(project: any) {
   return projectObject;
 }
 
+// Sales fills each secondary item on the create form; that wins over report/appointment prefill.
+async function applyAdditionalItemDetails(project: any, additionalItems: CreateProjectInput['additionalItems']) {
+  for (const { serviceType: itemServiceType, ...details } of additionalItems || []) {
+    if (itemServiceType === project.serviceType) continue;
+    const attachmentKeys = [
+      ...(details.photoKeys || []),
+      ...(details.videoKeys || []),
+      ...(details.sketchKeys || []),
+      ...(details.referenceImageKeys || []),
+    ];
+    await ProjectItem.findOneAndUpdate(
+      { projectId: project._id, serviceType: itemServiceType },
+      {
+        $set: {
+          ...details,
+          ...(attachmentKeys.length && { mediaKeys: [...new Set(attachmentKeys)] }),
+          ...(details.initialDesignKeys?.length && { designReviewStatus: 'pending' }),
+        },
+      },
+      { new: true },
+    );
+  }
+}
+
 // ── Create Project (optionally linked to a completed appointment) ──
 
 export async function createProject(
@@ -653,27 +677,7 @@ export async function createProject(
     }
   }
 
-  // Sales filled each secondary item on the create form; that wins over report/appointment prefill.
-  for (const { serviceType: itemServiceType, ...details } of input.additionalItems || []) {
-    if (itemServiceType === project.serviceType) continue;
-    const attachmentKeys = [
-      ...(details.photoKeys || []),
-      ...(details.videoKeys || []),
-      ...(details.sketchKeys || []),
-      ...(details.referenceImageKeys || []),
-    ];
-    await ProjectItem.findOneAndUpdate(
-      { projectId: project._id, serviceType: itemServiceType },
-      {
-        $set: {
-          ...details,
-          ...(attachmentKeys.length && { mediaKeys: [...new Set(attachmentKeys)] }),
-          ...(details.initialDesignKeys?.length && { designReviewStatus: 'pending' }),
-        },
-      },
-      { new: true },
-    );
-  }
+  await applyAdditionalItemDetails(project, input.additionalItems);
 
   if (input.ocularVisit) {
     // prepareProjectOcularSchedule already validated the slot and sales staff, so this
@@ -815,7 +819,7 @@ export async function finalizeOcularProject(
     throw AppError.badRequest('Uploaded contract file could not be verified. Please upload the file again.');
   }
 
-  const { customerId: _customerId, appointmentId: _appointmentId, ocularVisit: _ocularVisit, ...details } = input;
+  const { customerId: _customerId, appointmentId: _appointmentId, ocularVisit: _ocularVisit, additionalItems, serviceTypes: _serviceTypes, ...details } = input;
   if (details.initialDesignNotes !== undefined) details.initialDesignNotes = cleanSalesNotes(details.initialDesignNotes);
   Object.assign(project, details);
   project.serviceTypes = [...new Set([input.serviceType, ...reports.map((report) => report.serviceType).filter(Boolean)])];
@@ -856,6 +860,7 @@ export async function finalizeOcularProject(
     { $set: { ...buildFallbackProjectItem(project, project.serviceType), appointmentId: ocular._id } },
     { upsert: true, new: true },
   );
+  await applyAdditionalItemDetails(project, additionalItems);
   await ProjectItem.updateMany({ projectId: project._id, status: ProjectStatus.DRAFT }, { $set: { status: ProjectStatus.SUBMITTED } });
   if (input.initialDesignNotes !== undefined) {
     await syncAppointmentSalesNotes(String(ocular._id), input.initialDesignNotes);
