@@ -160,8 +160,16 @@ export async function selectCash(target: GcashTarget, customerId: string) {
 }
 
 export async function recordBookingCash(bookingId: string, cashierId: string, roles: Role[]) {
-  const payment = await Payment.findOne({ bookingId, method: PaymentMethod.CASH, paymentStatus: 'unpaid' });
-  if (!payment) throw AppError.notFound('Cash payment selection not found');
+  let payment = await Payment.findOne({ bookingId, method: PaymentMethod.CASH, paymentStatus: 'unpaid' });
+  if (!payment) {
+    // Walk-in: the customer paid cash at the office without choosing cash online first.
+    const booking = await Appointment.findById(bookingId);
+    if (!booking) throw AppError.notFound('Booking not found');
+    if (booking.ocularFeeStatus === 'proof_submitted') throw AppError.conflict('An online payment is waiting for verification. Verify or decline it first.');
+    await selectCash({ bookingId }, booking.customerId.toString());
+    payment = await Payment.findOne({ bookingId, method: PaymentMethod.CASH, paymentStatus: 'unpaid' });
+    if (!payment) throw AppError.notFound('Cash payment selection not found');
+  }
   return reviewGcash(payment._id.toString(), cashierId, roles, 'paid', undefined, undefined, true);
 }
 

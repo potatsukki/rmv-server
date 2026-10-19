@@ -83,7 +83,7 @@ router.post('/paymongo', async (req: Request, res: Response) => {
       const appointment = await handlePaymongoPayment(sessionId);
 
       if (appointment) {
-        logger.info(`PayMongo webhook: ocular fee verified for appointment ${appointment._id}`);
+        logger.info(`PayMongo webhook: ocular fee paid, awaiting cashier verification, for appointment ${appointment._id}`);
       } else {
         // Try project stage payment
         const stagePlan = await handleStagePaymongoPayment(sessionId);

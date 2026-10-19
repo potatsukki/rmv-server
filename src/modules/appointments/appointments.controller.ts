@@ -254,7 +254,7 @@ export const verifyOcularFeeCheckout = asyncHandler(async (req: Request, res: Re
     req.params.id as string,
     req.userId!,
   );
-  res.json({ success: true, data: { verified: result.verified, appointment: result.appointment } });
+  res.json({ success: true, data: { verified: result.verified, awaitingVerification: result.awaitingVerification, appointment: result.appointment } });
 });
 
 // ── Customer: Create PayMongo Checkout for Ocular Fee ──

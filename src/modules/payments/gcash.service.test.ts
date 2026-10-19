@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const db = vi.hoisted(() => ({
   appointment: vi.fn(), plan: vi.fn(), project: vi.fn(), paymentById: vi.fn(), create: vi.fn(),
   audit: vi.fn(), config: vi.fn(), image: vi.fn(), lockFind: vi.fn(), lockCreate: vi.fn(),
-  ready: vi.fn(), receipt: vi.fn(), exists: vi.fn(), find: vi.fn(), transaction: vi.fn(), session: { id: 'test-session' },
+  ready: vi.fn(), receipt: vi.fn(), exists: vi.fn(), find: vi.fn(), findOne: vi.fn(), transaction: vi.fn(), session: { id: 'test-session' },
 }));
 vi.mock('mongoose', async (importOriginal) => {
   const actual = await importOriginal<typeof import('mongoose')>();
@@ -11,7 +11,7 @@ vi.mock('mongoose', async (importOriginal) => {
 });
 vi.mock('../../models/index.js', () => ({
   Appointment: { findById: db.appointment }, PaymentPlan: { findOne: db.plan }, Project: { findById: db.project },
-  Payment: { findById: db.paymentById, create: db.create, exists: db.exists, find: db.find, init: vi.fn() }, AuditLog: { create: db.audit },
+  Payment: { findById: db.paymentById, findOne: db.findOne, create: db.create, exists: db.exists, find: db.find, init: vi.fn() }, AuditLog: { create: db.audit },
   SlotLock: { findOne: db.lockFind, create: db.lockCreate },
 }));
 vi.mock('../config/config.service.js', () => ({ getConfigValue: db.config }));
@@ -20,7 +20,7 @@ vi.mock('../appointments/appointments.service.js', () => ({ assertBookingReadyFo
 vi.mock('./payments.service.js', () => ({ handleInitialFabricationPaymentVerified: vi.fn(), issueGcashReceipt: db.receipt }));
 vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: vi.fn(), emitRoleEvent: vi.fn(), emitUserEvent: vi.fn() }));
 
-import { resolveGcashTarget, submitGcash, reviewGcash, getGcashContext } from './gcash.service.js';
+import { resolveGcashTarget, submitGcash, reviewGcash, getGcashContext, recordBookingCash } from './gcash.service.js';
 import { gcashTargetSchema, submitGcashSchema } from './gcash.validation.js';
 import { Role, PaymentMethod, PaymentStageStatus, AppointmentStatus } from '../../utils/constants.js';
 import { authorize } from '../../middleware/rbac.js';
@@ -30,6 +30,8 @@ const bookingId = '222222222222222222222222';
 const cashierId = '333333333333333333333333';
 const paymentId = '444444444444444444444444';
 const query = (value: unknown) => ({ session: vi.fn().mockResolvedValue(value) });
+// A query that can be awaited directly or through .session().
+const awaitableQuery = (value: unknown) => Object.assign(Promise.resolve(value), query(value));
 function booking(overrides = {}) {
   return { _id: bookingId, customerId, type: 'ocular', status: AppointmentStatus.REQUESTED, ocularFee: 1250,
     ocularFeePaid: false, ocularFeeStatus: 'pending', appointmentNumber: 'RMV-APPT-101',
@@ -280,5 +282,29 @@ describe('cashier API authorization', () => {
     next.mockClear();
     authorize(Role.CASHIER)({ user: {}, userRoles: [Role.CASHIER] } as never, {} as never, next);
     expect(next).toHaveBeenCalledWith();
+  });
+});
+
+describe('walk-in cash at the office', () => {
+  it('records cash for a booking whose customer never chose cash online', async () => {
+    const appointment = booking({ ocularFeeStatus: 'pending', paymentStatus: 'unpaid' });
+    const cashAttempt = payment({ method: PaymentMethod.CASH, paymentStatus: 'unpaid', amountPaid: 0 });
+    db.appointment.mockImplementation(() => awaitableQuery(appointment));
+    db.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(cashAttempt);
+    db.paymentById.mockReturnValue(query(cashAttempt));
+
+    await recordBookingCash(bookingId, cashierId, [Role.CASHIER]);
+
+    expect(db.create).toHaveBeenCalledWith([expect.objectContaining({ bookingId, method: PaymentMethod.CASH, paymentStatus: 'unpaid' })], { session: db.session });
+    expect(cashAttempt.paymentStatus).toBe('paid');
+    expect(appointment.ocularFeePaid).toBe(true);
+  });
+
+  it('refuses while an online payment is waiting for verification', async () => {
+    db.appointment.mockImplementation(() => awaitableQuery(booking({ ocularFeeStatus: 'proof_submitted' })));
+    db.findOne.mockResolvedValue(null);
+
+    await expect(recordBookingCash(bookingId, cashierId, [Role.CASHIER])).rejects.toThrow('waiting for verification');
+    expect(db.create).not.toHaveBeenCalled();
   });
 });
