@@ -375,10 +375,15 @@ async function syncProjectItemFromReport(project: any, report: any, relatedRepor
   return item;
 }
 
-function buildFallbackProjectItem(project: any, serviceType: string) {
+function buildFallbackProjectItem(project: any, serviceType: string, design?: { id: string; name: string; imageUrl: string }) {
   const isPrimaryService = serviceType === project.serviceType;
 
   return {
+    ...(design && {
+      selectedDesignTemplateId: design.id,
+      selectedDesignTemplateName: design.name,
+      selectedDesignTemplateImageUrl: design.imageUrl,
+    }),
     projectId: project._id,
     appointmentId: project.appointmentId,
     serviceType,
@@ -573,7 +578,9 @@ export async function createProject(
     ...appointmentReports.map((report) => report.serviceType).filter(Boolean),
   ])];
   const serviceType = input.serviceType || primaryReport?.serviceType || linkedServiceTypes[0] || ServiceType.CUSTOM;
-  const serviceTypes = linkedServiceTypes.length ? linkedServiceTypes : [serviceType];
+  const serviceTypes = input.serviceTypes?.length
+    ? [...new Set([serviceType, ...input.serviceTypes])]
+    : linkedServiceTypes.length ? linkedServiceTypes : [serviceType];
   const photoKeys = preferProjectInput(input.photoKeys, primaryReport?.photoKeys) || [];
   const videoKeys = preferProjectInput(input.videoKeys, primaryReport?.videoKeys) || [];
   const sketchKeys = preferProjectInput(input.sketchKeys, primaryReport?.sketchKeys) || [];
@@ -628,15 +635,18 @@ export async function createProject(
   });
 
   for (const report of appointmentReports) {
-    if (report.serviceType) await syncProjectItemFromReport(project, report, appointmentReports);
+    if (report.serviceType && serviceTypes.includes(report.serviceType)) {
+      await syncProjectItemFromReport(project, report, appointmentReports);
+    }
   }
 
-  if (appointment) {
-    const reportServiceTypes = new Set(appointmentReports.map((report) => report.serviceType).filter(Boolean));
-    for (const serviceType of serviceTypes) {
-      if (!reportServiceTypes.has(serviceType)) {
-        await ProjectItem.create(buildFallbackProjectItem(project, serviceType));
-      }
+  const reportServiceTypes = new Set(appointmentReports.map((report) => report.serviceType).filter(Boolean));
+  for (const serviceType of serviceTypes) {
+    if (!reportServiceTypes.has(serviceType)) {
+      const design = serviceType === project.serviceType
+        ? undefined
+        : appointment?.selectedDesignTemplates?.find((template) => template.serviceType === serviceType);
+      await ProjectItem.create(buildFallbackProjectItem(project, serviceType, design));
     }
   }
 

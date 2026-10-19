@@ -34,6 +34,7 @@ export const createProjectSchema = z.object({
   appointmentId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid appointment ID').optional(),
   title: z.string().trim().min(1).max(100).optional(),
   serviceType: z.string().trim().min(1).max(100).optional(),
+  serviceTypes: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
   deliveryType: z.nativeEnum(DeliveryType).optional(),
   description: z.string().trim().max(2000).optional(),
   siteAddress: z.string().trim().min(1).max(500).optional(),
