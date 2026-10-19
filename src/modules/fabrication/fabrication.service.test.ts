@@ -272,6 +272,27 @@ describe('createFabricationUpdate', () => {
     }));
   });
 
+  it('gates an item on the combined project plan when the item has no plan of its own', async () => {
+    setUpOnSiteProject(FabricationStatus.FINISHING);
+    mockProjectItemFindOne.mockResolvedValue({
+      _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
+    });
+    mockPaymentPlanFindOne.mockReset();
+    mockPaymentPlanFindOne
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ stages: [
+        { label: 'Down Payment', status: PaymentStageStatus.VERIFIED },
+        { label: 'Final Payment', status: PaymentStageStatus.PENDING },
+      ] });
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.QUALITY_CHECK, notes: 'Checking.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_PAYMENT_GATE });
+    expect(mockPaymentPlanFindOne).toHaveBeenLastCalledWith({ projectId: 'project-1', projectItemId: { $exists: false } });
+  });
+
   it('requires the selected item to be confirmed at Done even if its parent is confirmed', async () => {
     setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
     mockProjectItemFindOne.mockResolvedValue({

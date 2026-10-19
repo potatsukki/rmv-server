@@ -66,6 +66,12 @@ function itemScopedQuery(projectId: string, projectItemId?: string) {
     : { projectId, projectItemId: { $exists: false } };
 }
 
+// Multi-item projects pay through one combined project-level plan, so an item without its own plan uses that one.
+async function findScopedPaymentPlan(projectId: string, projectItemId?: string) {
+  return await PaymentPlan.findOne(itemScopedQuery(projectId, projectItemId))
+    ?? (projectItemId ? PaymentPlan.findOne(itemScopedQuery(projectId)) : null);
+}
+
 // ── Fabrication Staff: Create Update ──
 
 export async function createFabricationUpdate(
@@ -117,7 +123,7 @@ export async function createFabricationUpdate(
   getFabricationStateMachine(deliveryType).assertTransition(currentStatus, input.status);
 
   // Per-stage payment gate: require proportional payment stages to be verified
-  const plan = await PaymentPlan.findOne(itemScopedQuery(input.projectId, input.projectItemId));
+  const plan = await findScopedPaymentPlan(input.projectId, input.projectItemId);
   if (plan && plan.stages.length > 0) {
     const requiredPaid = getRequiredPaidStages(input.status, plan.stages.length, deliveryType);
     const actualPaid = plan.stages.filter(s => s.status === PaymentStageStatus.VERIFIED).length;
@@ -588,7 +594,7 @@ export async function getLatestFabricationStatus(
     .populate('updatedBy', 'firstName lastName');
 
   // Check payment gate — per-stage info
-  const plan = await PaymentPlan.findOne(itemScopedQuery(projectId, projectItemId));
+  const plan = await findScopedPaymentPlan(projectId, projectItemId);
   const totalStages = plan ? plan.stages.length : 0;
   const paidCount = plan ? plan.stages.filter(s => s.status === PaymentStageStatus.VERIFIED).length : 0;
   const allPaid = totalStages > 0 && paidCount === totalStages;
