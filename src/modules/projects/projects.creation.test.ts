@@ -481,6 +481,36 @@ describe('createProject', () => {
     expect(mocks.projectItemCreate.mock.calls.map((call) => call[0].serviceType)).toEqual(['gates', 'railings']);
   });
 
+  it('saves the details sales entered for each additional item', async () => {
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['railings', 'custom'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+
+    await createProject({
+      ...input,
+      appointmentId,
+      serviceType: 'railings',
+      additionalItems: [{
+        serviceType: 'custom',
+        selectedDesignTemplateId: 'cart-1',
+        materials: 'SS 304',
+        initialDesignKeys: ['projects/initial-design/cart.jpg'],
+        photoKeys: ['projects/photos/cart.jpg'],
+      }],
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    expect(mocks.projectItemCreate.mock.calls.map((call) => call[0].serviceType)).toEqual(['railings', 'custom']);
+    expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
+      { projectId: 'project-1', serviceType: 'custom' },
+      { $set: expect.objectContaining({
+        selectedDesignTemplateId: 'cart-1',
+        materials: 'SS 304',
+        mediaKeys: ['projects/photos/cart.jpg'],
+        designReviewStatus: 'pending',
+      }) },
+      { new: true },
+    );
+  });
+
   it('attaches a form-uploaded initial design only to the matching primary item', async () => {
     const canopyReport = {
       _id: 'report-canopy',
