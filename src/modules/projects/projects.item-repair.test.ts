@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   projectItemCreate: vi.fn(),
   projectItemUpdateMany: vi.fn(),
   visitReportFind: vi.fn(),
+  appointmentFindById: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -15,7 +16,7 @@ vi.mock('../../models/index.js', () => ({
     create: mocks.projectItemCreate,
     updateMany: mocks.projectItemUpdateMany,
   },
-  Appointment: {},
+  Appointment: { findById: mocks.appointmentFindById },
   User: {},
   AuditLog: {},
   VisitReport: { find: mocks.visitReportFind, findOne: vi.fn() },
@@ -164,5 +165,45 @@ describe('getProjectById project-item repair', () => {
 
     expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
     expect(result.items).toEqual(items);
+  });
+
+  it('shows the ocular visit pin as the project site address', async () => {
+    const project = {
+      _id: 'project-1',
+      customerId: { _id: 'customer-1' },
+      serviceType: 'railings',
+      serviceTypes: ['railings', 'gates'],
+      status: ProjectStatus.FABRICATION,
+      visitReportId: { _id: 'report-railings' },
+      ocularAppointmentId: 'ocular-1',
+      siteAddress: undefined as string | undefined,
+      save: vi.fn().mockResolvedValue(undefined),
+      toObject: vi.fn().mockReturnValue({
+        _id: 'project-1',
+        customerId: { _id: 'customer-1' },
+        serviceType: 'railings',
+        serviceTypes: ['railings', 'gates'],
+        status: ProjectStatus.FABRICATION,
+      }),
+    };
+    const items = [
+      { _id: 'item-railings', projectId: 'project-1', serviceType: 'railings', ocularVisitReportId: 'report-railings' },
+      { _id: 'item-gates', projectId: 'project-1', serviceType: 'gates', ocularVisitReportId: 'report-gates' },
+    ];
+
+    mocks.projectFindById.mockReturnValue(thenablePopulate(project));
+    mocks.appointmentFindById.mockReturnValue({
+      select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue({ formattedAddress: 'Paco-Santa Mesa Road, Manila' }) }),
+    });
+    mocks.visitReportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    mocks.projectItemFind
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue(items) })
+      .mockReturnValueOnce(populatedItems(items));
+
+    await getProjectById('project-1', 'admin-1', [Role.ADMIN]);
+
+    expect(mocks.appointmentFindById).toHaveBeenCalledWith('ocular-1');
+    expect(project.siteAddress).toBe('Paco-Santa Mesa Road, Manila');
+    expect(project.save).toHaveBeenCalledOnce();
   });
 });

@@ -108,10 +108,6 @@ export const updateProjectSchema = z.object({
   estimatedCompletionDate: z.string().datetime().optional(),
 });
 
-export const updateProjectSiteAddressSchema = z.object({
-  siteAddress: z.string().trim().min(1).max(500),
-}).strict();
-
 export const assignEngineersSchema = z.object({
   engineerIds: z.array(z.string().min(1)).min(1),
 });
@@ -198,7 +194,6 @@ export const skipProjectReviewSchema = z.object({
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
-export type UpdateProjectSiteAddressInput = z.infer<typeof updateProjectSiteAddressSchema>;
 export type AssignEngineersInput = z.infer<typeof assignEngineersSchema>;
 export type ReassignProjectSalesInput = z.infer<typeof reassignProjectSalesSchema>;
 export type AssignFabricationInput = z.infer<typeof assignFabricationSchema>;
