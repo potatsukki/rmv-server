@@ -64,6 +64,12 @@ export const createProjectSchema = z.object({
   ocularVisit: z.object({
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid ocular visit date'),
     slotCode: z.enum(SLOT_CODES),
+    // Sales staff pins the project site during the office visit.
+    customerLocation: z.object({
+      lat: z.number().min(4.5, 'Location must be within the Philippines').max(21.5, 'Location must be within the Philippines'),
+      lng: z.number().min(116, 'Location must be within the Philippines').max(127, 'Location must be within the Philippines'),
+    }),
+    formattedAddress: z.string().trim().max(500).optional(),
   }).optional(),
 }).refine((input) => Boolean(input.customerId || input.appointmentId), {
   message: 'Select a customer for the project',

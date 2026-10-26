@@ -21,6 +21,7 @@ import { normalizeUserAddress, requirePinnedAddress } from '../../utils/userAddr
 import { visitReportStatusCondition } from './visit-reports.list-policy.js';
 import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 import { cleanSalesNotes } from '../../utils/salesNotes.js';
+import { generateProjectNumber } from '../../utils/projectNumber.js';
 
 function isNonEmptyString(value?: string | null) {
   return Boolean(value?.trim());
@@ -1679,9 +1680,11 @@ export async function submitReport(
   }
 
   if (report.visitType === 'ocular' && appt.status !== AppointmentStatus.COMPLETED) {
+    // Visits saved as "arrived" before arrival auto-started the visit count as started.
+    if (appt.status === AppointmentStatus.ARRIVED_AT_SITE) appt.status = AppointmentStatus.IN_PROGRESS;
     if (appt.status !== AppointmentStatus.IN_PROGRESS) {
       throw AppError.badRequest(
-        'Start the site visit first before submitting the final ocular report.',
+        'Mark Arrived at Site first before submitting the final ocular report.',
         ErrorCode.VALIDATION_ERROR,
       );
     }
@@ -2035,10 +2038,27 @@ export async function submitReport(
       await submitSiblingConsultationReports(report, appt, salesStaffId, ip, ua);
     }
   } else {
-    // Preserve updates for explicitly linked legacy projects only.
-    const linkedProject = report.linkedProjectId
+    // Use the linked project, or the pending ocular draft for this appointment. Ocular visits
+    // booked from a consultation have no project yet, so save a draft the sales staff can return to.
+    const linkedProject = (report.linkedProjectId
       ? await Project.findById(report.linkedProjectId)
-      : await Project.findOne({ visitReportId: report._id, customerId: report.customerId });
+      : await Project.findOne({ visitReportId: report._id, customerId: report.customerId }))
+      || await Project.findOne({ ocularAppointmentId: appt._id })
+      || await Project.create({
+        appointmentId: appt.sourceConsultationAppointmentId,
+        visitReportId: report._id,
+        projectNumber: await generateProjectNumber(),
+        customerId: report.customerId,
+        salesStaffId: appt.salesStaffId || salesStaffId,
+        title: `${readableServiceTitle(report.serviceType, report.serviceTypeCustom)} Project`,
+        serviceType: report.serviceType || ServiceType.CUSTOM,
+        serviceTypes: appt.serviceTypes?.length ? appt.serviceTypes : [report.serviceType || ServiceType.CUSTOM],
+        serviceTypeCustom: report.serviceTypeCustom,
+        siteAddress: appt.formattedAddress,
+        status: ProjectStatus.DRAFT,
+        contractStatus: ContractStatus.MISSING,
+        ocularAppointmentId: appt._id,
+      });
 
     if (linkedProject) {
       // Update project with ocular data

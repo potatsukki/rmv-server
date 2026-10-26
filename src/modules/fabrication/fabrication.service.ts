@@ -43,8 +43,9 @@ function normalizeFabricationUpdate(update: IFabricationUpdate, deliveryType?: s
 
 /**
  * For a given target fabrication status and total number of payment stages,
- * return the minimum number of payment stages that must be verified.
- * Uses proportional distribution across the fabrication pipeline.
+ * return the minimum number of payment stages that must be verified:
+ * the down payment unlocks fabrication, the second payment is needed before
+ * Installation (Ready for Delivery for shop work), and every stage before Done.
  */
 function getRequiredPaidStages(targetStatus: FabricationStatus, totalPaymentStages: number, deliveryType?: string): number {
   if (totalPaymentStages <= 0) return 0;
@@ -52,12 +53,12 @@ function getRequiredPaidStages(targetStatus: FabricationStatus, totalPaymentStag
   const stageOrder = getFabricationStageOrder(deliveryType);
   const targetIdx = stageOrder.indexOf(targetStatus);
   if (targetIdx === -1) return 0;
+  if (targetStatus === FabricationStatus.DONE) return totalPaymentStages;
 
-  const totalFabStages = stageOrder.length;
-  return Math.min(
-    totalPaymentStages,
-    Math.ceil(((targetIdx + 1) / totalFabStages) * totalPaymentStages),
-  );
+  const secondPaymentIdx = stageOrder.indexOf(deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? FabricationStatus.INSTALLATION
+    : FabricationStatus.READY_FOR_DELIVERY);
+  return Math.min(totalPaymentStages, targetIdx >= secondPaymentIdx ? 2 : 1);
 }
 
 function itemScopedQuery(projectId: string, projectItemId?: string) {
@@ -206,7 +207,7 @@ export async function createFabricationUpdate(
       [FabricationStatus.CUTTING]: 'Cutting',
       [FabricationStatus.WELDING]: 'Welding',
       [FabricationStatus.ASSEMBLY]: 'Assembly',
-      [FabricationStatus.FABRICATION]: 'Fabrication',
+      [FabricationStatus.FABRICATION]: 'Preparing Materials',
       [FabricationStatus.WELDING_ASSEMBLY]: 'Welding / Assembly',
       [FabricationStatus.INSTALLATION]: 'Installation',
       [FabricationStatus.FINISHING]: 'Finishing',

@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   paymentPlanInsertMany: vi.fn(),
   generateProjectNumber: vi.fn(),
   prepareOcularSchedule: vi.fn(),
+  resolveOcularVisitData: vi.fn(),
   syncSalesNotes: vi.fn(),
 }));
 
@@ -50,7 +51,10 @@ vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn(
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
-vi.mock('../appointments/appointments.service.js', () => ({ prepareProjectOcularSchedule: mocks.prepareOcularSchedule }));
+vi.mock('../appointments/appointments.service.js', () => ({
+  prepareProjectOcularSchedule: mocks.prepareOcularSchedule,
+  resolveOcularVisitData: mocks.resolveOcularVisitData,
+}));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
 import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject, updateProjectSiteAddress } from './projects.service.js';
@@ -58,6 +62,16 @@ import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+const site = { lat: 14.2, lng: 121.1 };
+const siteData = {
+  latitude: site.lat,
+  longitude: site.lng,
+  formattedAddress: 'Calamba, Laguna',
+  customerLocation: site,
+  distanceKm: 40,
+  ocularFee: 900,
+  ocularFeeBreakdown: { isWithinNCR: false, total: 900 },
+};
 const appointmentId = 'bbbbbbbbbbbbbbbbbbbbbbbb';
 const actorId = 'cccccccccccccccccccccccc';
 const input = {
@@ -224,7 +238,25 @@ describe('createProject', () => {
       save: vi.fn().mockResolvedValue(undefined),
     }));
     mocks.auditCreate.mockResolvedValue({});
+    mocks.resolveOcularVisitData.mockResolvedValue(siteData);
     vi.mocked(verifyFileExists).mockResolvedValue(true);
+  });
+
+  it('saves the sales-pinned site and pending fee on the ocular appointment', async () => {
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    await createProject({
+      customerId,
+      quantity: 1,
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site, formattedAddress: 'Calamba, Laguna' },
+    }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+    expect(mocks.resolveOcularVisitData).toHaveBeenCalledWith('ocular', 'Calamba, Laguna', site);
+    expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      customerLocation: site,
+      formattedAddress: 'Calamba, Laguna',
+      ocularFee: 900,
+      ocularFeeStatus: 'pending',
+      bookingStatus: 'pending_payment',
+    }));
   });
 
   it.each([undefined, appointmentId])('saves an ocular draft without a signed contract (appointment: %s)', async (sourceAppointmentId) => {
@@ -233,7 +265,7 @@ describe('createProject', () => {
       customerId,
       appointmentId: sourceAppointmentId,
       quantity: 1,
-      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site },
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
     expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING, ocularAppointmentId: 'ocular-appointment-1' });
     expect(verifyFileExists).not.toHaveBeenCalled();
@@ -247,7 +279,7 @@ describe('createProject', () => {
 
   it('does not persist a draft or appointment when the ocular schedule is unavailable', async () => {
     mocks.prepareOcularSchedule.mockRejectedValue(new Error('Slot unavailable'));
-    await expect(createProject({ ...input, ocularVisit: { date: '2026-10-08', slotCode: '09:00' } }, actorId, undefined, undefined, [Role.SALES_STAFF])).rejects.toThrow('Slot unavailable');
+    await expect(createProject({ ...input, ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site } }, actorId, undefined, undefined, [Role.SALES_STAFF])).rejects.toThrow('Slot unavailable');
     expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.appointmentCreate).not.toHaveBeenCalled();
   });
@@ -276,16 +308,16 @@ describe('createProject', () => {
     }));
   });
 
-  it.each([false, true])('creates a project without a site address with ocular selected: %s', async (withOcular) => {
+  it.each([false, true])('creates a project without a typed site address with ocular selected: %s', async (withOcular) => {
     const { siteAddress: _siteAddress, ...withoutAddress } = input;
     const report = { _id: 'report-1', serviceType: 'gates', save: vi.fn() };
     mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([report]) });
     const project = await createProject({
       ...withoutAddress,
       appointmentId,
-      ocularVisit: withOcular ? { date: '2026-10-08', slotCode: '09:00' } : undefined,
+      ocularVisit: withOcular ? { date: '2026-10-08', slotCode: '09:00', customerLocation: site } : undefined,
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
-    expect(project.siteAddress).toBeUndefined();
+    expect(project.siteAddress).toBe(withOcular ? siteData.formattedAddress : undefined);
     expect(project.status).toBe(withOcular ? ProjectStatus.DRAFT : ProjectStatus.SUBMITTED);
   });
 
@@ -399,7 +431,7 @@ describe('createProject', () => {
       ...input,
       appointmentId,
       serviceType: 'gates',
-      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site },
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
 
     expect(project.status).toBe(ProjectStatus.DRAFT);

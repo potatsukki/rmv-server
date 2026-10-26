@@ -4,7 +4,7 @@ import {
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   BlueprintStatus, BlueprintComponent, ProjectStatus,
-  AuditAction, NotificationCategory, Role, PaymentStageStatus,
+  AuditAction, NotificationCategory, Role, PaymentStageStatus, DeliveryType,
 } from '../../utils/constants.js';
 import { blueprintStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
@@ -106,7 +106,17 @@ function normalizeInternalCostStrings(
   }, {} as Record<typeof INTERNAL_COST_KEYS[number], string>);
 }
 
-function buildDefaultPaymentMilestones(total: number, paymentOption: 'full' | 'milestone') {
+/** Installment stage 2 and 3 texts; the 2nd payment gates Installation, or Ready for Delivery for shop work. */
+export function installmentMilestoneTexts(deliveryType?: string) {
+  return {
+    second: deliveryType === DeliveryType.ON_SITE_INSTALLATION
+      ? { label: 'During Installation', description: '40% payable before installation starts.', trigger: 'before installation' }
+      : { label: 'Before Delivery', description: '40% payable before the order is ready for delivery.', trigger: 'before delivery' },
+    final: { label: 'Upon Completion', description: '30% payable before the project is marked done.', trigger: 'before done' },
+  };
+}
+
+function buildDefaultPaymentMilestones(total: number, paymentOption: 'full' | 'milestone', deliveryType?: string) {
   if (paymentOption === 'full') {
     return [{
       label: 'Full Payment',
@@ -117,6 +127,7 @@ function buildDefaultPaymentMilestones(total: number, paymentOption: 'full' | 'm
     }];
   }
 
+  const { second, final } = installmentMilestoneTexts(deliveryType);
   return [
     {
       label: 'Down Payment',
@@ -126,18 +137,14 @@ function buildDefaultPaymentMilestones(total: number, paymentOption: 'full' | 'm
       trigger: 'quotation approved / payment plan selected',
     },
     {
-      label: 'During Fabrication',
-      description: '40% payable when fabrication starts.',
+      ...second,
       percentage: 40,
       amount: Math.round(total * 0.40 * 100) / 100,
-      trigger: 'fabrication started',
     },
     {
-      label: 'Upon Completion',
-      description: '30% payable when fabrication is completed.',
+      ...final,
       percentage: 30,
       amount: Math.round(total * 0.30 * 100) / 100,
-      trigger: 'fabrication completed',
     },
   ];
 }
@@ -208,7 +215,7 @@ function getDraftFileKeys(files?: {
     .filter((value): value is string => Boolean(value));
 }
 
-function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput) {
+function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliveryType?: string) {
   const internalCostValues = normalizeInternalCostStrings(quotation?.internalCosts);
   const hasInternalCostValues = Boolean(internalCostValues)
     && INTERNAL_COST_KEYS.some((key) => asMoney(internalCostValues?.[key]) > 0);
@@ -224,7 +231,7 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput) {
     if (subtotal <= 0) return undefined;
 
     const paymentOption: 'full' | 'milestone' = quotation?.paymentOption === 'full' ? 'full' : 'milestone';
-    const paymentMilestones = buildDefaultPaymentMilestones(total, paymentOption);
+    const paymentMilestones = buildDefaultPaymentMilestones(total, paymentOption, deliveryType);
     const estimatedDuration = quotation?.adjustedEstimatedDuration?.trim()
       || quotation?.estimatedDuration?.trim()
       || quotation?.systemEstimatedDuration?.trim()
@@ -315,12 +322,12 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput) {
     engineerNotes: quotation?.engineerNotes?.trim() || undefined,
     paymentMilestones: validMilestones.length > 0
       ? validMilestones
-      : buildDefaultPaymentMilestones(total, 'milestone'),
+      : buildDefaultPaymentMilestones(total, 'milestone', deliveryType),
   };
 }
 
 async function assertAssignedEngineerForProject(projectId: string, actorId: string) {
-  const project = await Project.findById(projectId).select('engineerIds status');
+  const project = await Project.findById(projectId).select('engineerIds status deliveryType');
   if (!project) throw AppError.notFound('Project not found');
 
   const isAssignedEngineer = project.engineerIds.some((id) => id.toString() === actorId);
@@ -561,9 +568,10 @@ export async function uploadBlueprint(
     uploadedBy,
     quotation: input.quotation,
     quotationReviewStatus: input.quotation ? 'sent_to_customer' : 'draft',
-    // Billing is approved automatically once the quotation is sent — the customer no
-    // longer has to click a separate "Approve Billing" step. They can still Request
-    // Revision if the pricing looks wrong. The blueprint design still needs approval.
+    // Billing and design are approved automatically once the quotation is sent — the customer
+    // no longer reviews the design or clicks "Approve Billing". They can still Request
+    // Revision if the pricing looks wrong.
+    blueprintApproved: Boolean(input.quotation),
     costingApproved: Boolean(input.quotation),
   });
 
@@ -574,6 +582,9 @@ export async function uploadBlueprint(
   }
   if (input.projectItemId) {
     await ProjectItem.findByIdAndUpdate(input.projectItemId, { $set: { status: ProjectStatus.BLUEPRINT } });
+  }
+  if (input.quotation) {
+    await saveBlueprintAndSyncIfFullyApproved(blueprint, project);
   }
 
   await AuditLog.create({
@@ -677,7 +688,7 @@ export async function uploadRevision(
     blueprintKey,
     designKey,
     costingKey: isCostingRevision ? input.costingKey ?? currentBlueprint.costingKey : currentBlueprint.costingKey,
-    blueprintApproved: isCostingRevision ? currentBlueprint.blueprintApproved : false,
+    blueprintApproved: hasNewQuotation || (isCostingRevision ? currentBlueprint.blueprintApproved : false),
     // A new quotation is approved automatically on send (see uploadBlueprint); a
     // costing revision without a new quotation still needs re-approval.
     costingApproved: hasNewQuotation ? true : (isCostingRevision ? false : currentBlueprint.costingApproved),
@@ -1054,7 +1065,7 @@ export async function finalizeBlueprintDraft(
   ua?: string,
   projectItemId?: string,
 ) {
-  await assertAssignedEngineerForProject(projectId, actorId);
+  const project = await assertAssignedEngineerForProject(projectId, actorId);
 
   const draft = await BlueprintDraft.findOne(itemScopedQuery(projectId, projectItemId));
   if (!draft) throw AppError.notFound('Blueprint draft not found');
@@ -1067,7 +1078,7 @@ export async function finalizeBlueprintDraft(
     throw AppError.badRequest('Blueprint and design files are required before finalizing the draft');
   }
 
-  const quotation = buildQuotationFromDraft(draft.quotation);
+  const quotation = buildQuotationFromDraft(draft.quotation, project.deliveryType);
 
   if (draft.mode === 'revision' && !draft.sourceBlueprintId) {
     throw AppError.badRequest('Revision draft is missing its source blueprint reference');
@@ -1212,7 +1223,8 @@ export async function approveAndSendQuotation(
   blueprint.quotationReviewedBy = adminId as any;
   blueprint.quotationReviewedAt = new Date();
   blueprint.quotationSentAt = new Date();
-  // Billing is approved automatically once the quotation is sent to the customer.
+  // Billing and design are approved automatically once the quotation is sent to the customer.
+  blueprint.blueprintApproved = true;
   blueprint.costingApproved = true;
   await saveBlueprintAndSyncIfFullyApproved(blueprint, project);
 

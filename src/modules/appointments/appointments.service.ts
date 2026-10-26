@@ -1870,7 +1870,8 @@ export async function updateVisitStatus(
 
   appointmentStateMachine.assertTransition(appointment.status, newStatus);
 
-  appointment.status = newStatus;
+  // Arriving at the site starts the visit; there is no separate "Start Site Visit" step.
+  appointment.status = newStatus === AppointmentStatus.ARRIVED_AT_SITE ? AppointmentStatus.IN_PROGRESS : newStatus;
   await appointment.save();
 
   const statusMeta: Record<
@@ -1890,7 +1891,7 @@ export async function updateVisitStatus(
     [AppointmentStatus.ARRIVED_AT_SITE]: {
       action: AuditAction.APPOINTMENT_ARRIVED_AT_SITE,
       title: 'Staff Arrived at Site',
-      statusLabel: 'arrived at your site',
+      statusLabel: 'at your site and has started the visit',
     },
     [AppointmentStatus.IN_PROGRESS]: {
       action: AuditAction.APPOINTMENT_IN_PROGRESS,
