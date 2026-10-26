@@ -8,7 +8,6 @@ import {
   createProjectSchema,
   finalizeOcularProjectSchema,
   updateProjectSchema,
-  updateProjectSiteAddressSchema,
   assignEngineersSchema,
   reassignProjectSalesSchema,
   assignFabricationSchema,
@@ -47,14 +46,6 @@ router.post(
   authorize(Role.SALES_STAFF, Role.ADMIN),
   validate(finalizeOcularProjectSchema),
   ctrl.finalizeOcularProject,
-);
-
-router.patch(
-  '/:id/site-address',
-  authenticate,
-  authorize(Role.FABRICATION_STAFF, Role.ADMIN),
-  validate(updateProjectSiteAddressSchema),
-  ctrl.updateProjectSiteAddress,
 );
 
 // ── Assignments ──
