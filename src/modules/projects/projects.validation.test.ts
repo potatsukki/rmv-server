@@ -49,7 +49,7 @@ describe('createProjectSchema', () => {
   });
 
   it('accepts an ocular visit schedule from either project entry point', () => {
-    const ocularVisit = { date: '2026-10-08', slotCode: '09:00' };
+    const ocularVisit = { date: '2026-10-08', slotCode: '09:00', customerLocation: { lat: 14.6, lng: 121 } };
 
     expect(createProjectSchema.safeParse({ ...details, customerId, appointmentId, ocularVisit }).success).toBe(true);
     expect(createProjectSchema.safeParse({ ...details, customerId, ocularVisit }).success).toBe(true);
@@ -65,7 +65,7 @@ describe('createProjectSchema', () => {
     const parsed = createProjectSchema.parse({
       customerId,
       appointmentId: sourceAppointmentId,
-      ocularVisit: { date: '2026-10-08', slotCode: '09:00' },
+      ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: { lat: 14.6, lng: 121 } },
     });
     expect(parsed.contractFileKey).toBeUndefined();
     expect(parsed.serviceType).toBeUndefined();

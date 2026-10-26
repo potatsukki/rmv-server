@@ -39,7 +39,7 @@ import { PaymentStageStatus } from '../../utils/constants.js';
 import { getInstallmentConfig } from '../config/config.service.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
-import { prepareProjectOcularSchedule } from '../appointments/appointments.service.js';
+import { prepareProjectOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
 import {
   activeProjectStatusesForRoles,
   maskProjectTotalCostForActor,
@@ -584,6 +584,11 @@ export async function createProject(
         || (actorRoles.includes(Role.SALES_STAFF) ? actorId : undefined),
     })
     : appointment?.salesStaffId || actorId;
+  // Resolve the site and fee before creating anything so a routing failure leaves no partial project.
+  const ocularSite = input.ocularVisit
+    ? await resolveOcularVisitData(AppointmentType.OCULAR, input.ocularVisit.formattedAddress, input.ocularVisit.customerLocation)
+    : null;
+  const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);
 
   const projectNumber = await generateProjectNumber();
   const contractUploadedAt = input.contractFileKey ? new Date() : undefined;
@@ -628,7 +633,7 @@ export async function createProject(
     serviceTypes,
     deliveryType: input.deliveryType || DeliveryType.SHOP_FABRICATED,
     description: input.description,
-    siteAddress: input.siteAddress,
+    siteAddress: input.siteAddress || ocularSite?.formattedAddress,
     measurements: preferProjectInput(input.measurements, primaryReport?.measurements),
     materialType: preferProjectInput(input.materialType, primaryReport?.materials),
     finishColor: preferProjectInput(input.finishColor, primaryReport?.finishes),
@@ -704,6 +709,21 @@ export async function createProject(
         serviceTypeCustom: input.serviceTypeCustom || appointment?.serviceTypeCustom,
       },
       customerNotes: `Ocular visit scheduled for pending project ${project.projectNumber}`,
+      ...(ocularSite && {
+        latitude: ocularSite.latitude,
+        longitude: ocularSite.longitude,
+        formattedAddress: ocularSite.formattedAddress,
+        customerAddress: ocularSite.formattedAddress,
+        customerLocation: ocularSite.customerLocation,
+        distanceKm: ocularSite.distanceKm,
+        ocularFee: ocularSite.ocularFee,
+        ocularFeeBreakdown: ocularSite.ocularFeeBreakdown,
+      }),
+      ...(ocularFeePending && {
+        ocularFeeStatus: 'pending',
+        paymentStatus: 'unpaid',
+        bookingStatus: 'pending_payment',
+      }),
     });
 
     project.ocularAppointmentId = ocularAppointment._id;
@@ -751,7 +771,7 @@ export async function createProject(
       customerId,
       NotificationCategory.APPOINTMENT,
       'Ocular Visit Scheduled',
-      `Your ocular visit for project "${project.title}" is scheduled for ${readableDate} at ${readableSlot}. Open the appointment to submit the project site pin and address.`,
+      `Your ocular visit for project "${project.title}" is scheduled for ${readableDate} at ${readableSlot} at ${ocularSite?.formattedAddress || 'your project site'}.${ocularFeePending ? ' Open the appointment to pay the ocular visit fee.' : ''}`,
       `/appointments/${ocularAppointment._id}`,
     );
   }

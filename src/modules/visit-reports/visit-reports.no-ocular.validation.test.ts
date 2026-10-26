@@ -29,11 +29,20 @@ vi.mock('../notifications/email.service.js', () => ({
   sendOcularVisitScheduledEmail: mocks.sendOcularVisitScheduledEmail,
 }));
 vi.mock('../appointments/appointments.service.js', () => ({ resolveOcularVisitData: vi.fn() }));
+vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: vi.fn().mockResolvedValue('PRJ-2026-0001') }));
 vi.mock('../appointments/consultation-attendance-automation.js', () => ({
   synchronizeConsultationAttendanceByTime: vi.fn(),
 }));
 
 import { submitReport } from './visit-reports.service.js';
+
+/** Ocular visits booked from a consultation have no project yet, so submitting saves a draft. */
+function expectDraftProjectSaved() {
+  const draft = { _id: 'draft-1', status: 'draft', ocularAppointmentId: 'appointment-1', contractStatus: 'missing', save: vi.fn() };
+  mocks.projectCreate.mockResolvedValue(draft);
+  mocks.projectItemFindOneAndUpdate.mockResolvedValue({ _id: 'item-1', save: vi.fn() });
+  return draft;
+}
 
 function setupReport(reportFields: Record<string, unknown>, appointmentFields: Record<string, unknown> = {}) {
   const report = {
@@ -76,20 +85,23 @@ describe('appointment report submission without project creation', () => {
     expect(mocks.projectCreate).not.toHaveBeenCalled();
   });
 
-  it('completes a standalone ocular report without selecting another project for the customer', async () => {
+  it('completes a standalone ocular report and saves a draft project for the sales staff', async () => {
     const { report, appointment } = setupReport({
       visitType: 'ocular', actualVisitDateTime: new Date('2026-09-17T01:00:00Z'),
       measurements: { length: 20, width: 10, height: 30, thickness: 2, area: 200, raw: 'Measured on site' },
       siteConditions: { environment: 'outdoor', floorType: 'Concrete', wallMaterial: 'Concrete', accessNotes: 'Street access', obstaclesOrConstraints: 'None' },
       materials: 'Steel', finishes: 'Paint', preferredDesign: 'Simple', photoKeys: ['site/photo.jpg'],
-      initialDesignKeys: ['site/sketch.jpg'],
+      initialDesignKeys: ['site/sketch.jpg'], sketchKeys: [], referenceImageKeys: [],
     }, { status: 'in_progress', ocularFee: 0 });
+    expectDraftProjectSaved();
     await submitReport('report-1', 'sales-1');
     expect(report.status).toBe('submitted');
     expect(appointment.status).toBe('completed');
     expect(mocks.releaseSlot).toHaveBeenCalled();
-    expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.projectFindOne).toHaveBeenCalledWith({ visitReportId: 'report-1', customerId: 'customer-1' });
+    expect(mocks.projectCreate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'draft', contractStatus: 'missing', ocularAppointmentId: 'appointment-1', customerId: 'customer-1',
+    }));
   });
 
   it('accepts site measurements and conditions without project design information', async () => {
@@ -99,12 +111,13 @@ describe('appointment report submission without project creation', () => {
         measurements: { height: 180, width: 300, quantity: 1 },
         siteConditions: { environment: 'outdoor', access: 'Street access' },
       },
-      photoKeys: ['site/photo.jpg'],
+      photoKeys: ['site/photo.jpg'], sketchKeys: [], referenceImageKeys: [],
     }, { status: 'in_progress', ocularFee: 0 });
+    expectDraftProjectSaved();
     await submitReport('report-1', 'sales-1');
     expect(report.status).toBe('submitted');
     expect(appointment.status).toBe('completed');
-    expect(mocks.projectCreate).not.toHaveBeenCalled();
+    expect(mocks.projectCreate).toHaveBeenCalledOnce();
   });
 
   it('submits the linked draft project after its ocular report is finalized', async () => {

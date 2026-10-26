@@ -28,6 +28,22 @@ const DAHLIA_EXT_PLUS_CODE_COORDS = {
   lng: 121.053703125,
 };
 
+// Installment stages: the 2nd payment is due before Installation (Ready for Delivery for shop work)
+// and the final payment before Done, matching the fabrication payment gates.
+const INSTALLMENT_STAGE_LABELS = ['Down Payment', 'During Installation', 'Upon Completion'];
+const INSTALLMENT_STAGE_DESCRIPTIONS = ['Initial payment before fabrication', 'Due before installation starts', 'Due before the project is marked done'];
+// `assembly` maps to Welding / Assembly for on-site work, the step right before Installation.
+const PAYMENT_ACTIVATION_MAP = [null, 'assembly', 'quality_check'];
+const PAYMENT_HEADSUP_MAP = [null, 'material_prep', 'finishing'];
+
+/** Previously seeded defaults, replaced at startup only if an admin never changed them. */
+const SUPERSEDED_CONFIG_DEFAULTS: Array<[key: string, oldValue: unknown[], newValue: unknown[]]> = [
+  ['installment_stage_labels', ['Down Payment', 'Mid-Project', 'Final Payment'], INSTALLMENT_STAGE_LABELS],
+  ['installment_stage_descriptions', ['Initial payment before fabrication', 'Due when fabrication is complete', 'Due after installation & acceptance'], INSTALLMENT_STAGE_DESCRIPTIONS],
+  ['payment_activation_map', [null, 'quality_check', 'done'], PAYMENT_ACTIVATION_MAP],
+  ['payment_headsup_map', [null, 'finishing', 'ready_for_delivery'], PAYMENT_HEADSUP_MAP],
+];
+
 const HIGH_RISK_CONFIG_KEYS = new Set([
   'maintenance_mode',
   'feature_lifecycle_mismatch_analytics',
@@ -65,8 +81,8 @@ export async function getInstallmentConfig() {
   const [surcharge, split, labels, descriptions] = await Promise.all([
     getConfigValue<number>('installment_surcharge_percent', 10),
     getConfigValue<number[]>('installment_split', [30, 40, 30]),
-    getConfigValue<string[]>('installment_stage_labels', ['Down Payment', 'Mid-Project', 'Final Payment']),
-    getConfigValue<string[]>('installment_stage_descriptions', ['Initial payment before fabrication', 'Due when fabrication is complete', 'Due after installation & acceptance']),
+    getConfigValue<string[]>('installment_stage_labels', INSTALLMENT_STAGE_LABELS),
+    getConfigValue<string[]>('installment_stage_descriptions', INSTALLMENT_STAGE_DESCRIPTIONS),
   ]);
   return { surchargePercent: surcharge, split, stageLabels: labels, stageDescriptions: descriptions };
 }
@@ -81,8 +97,8 @@ export async function getInstallmentConfig() {
  */
 export async function getPaymentActivationConfig() {
   const [activationMap, headsUpMap, graceDays, intervalDays, escalationCount] = await Promise.all([
-    getConfigValue<(string | null)[]>('payment_activation_map', [null, 'quality_check', 'done']),
-    getConfigValue<(string | null)[]>('payment_headsup_map', [null, 'finishing', 'ready_for_delivery']),
+    getConfigValue<(string | null)[]>('payment_activation_map', PAYMENT_ACTIVATION_MAP),
+    getConfigValue<(string | null)[]>('payment_headsup_map', PAYMENT_HEADSUP_MAP),
     getConfigValue<number>('payment_reminder_grace_days', 3),
     getConfigValue<number>('payment_reminder_interval_days', 2),
     getConfigValue<number>('payment_escalation_after_reminders', 3),
@@ -619,19 +635,19 @@ export async function seedDefaultConfigs(): Promise<void> {
       description: 'Installment split percentages for each stage (must sum to 100)',
     },
     installment_stage_labels: {
-      value: ['Down Payment', 'Mid-Project', 'Final Payment'],
+      value: INSTALLMENT_STAGE_LABELS,
       description: 'Labels for each installment stage corresponding to installment_split',
     },
     installment_stage_descriptions: {
-      value: ['Initial payment before fabrication', 'Due when fabrication is complete', 'Due after installation & acceptance'],
+      value: INSTALLMENT_STAGE_DESCRIPTIONS,
       description: 'Default milestone descriptions for each installment stage',
     },
     payment_activation_map: {
-      value: [null, 'quality_check', 'done'],
+      value: PAYMENT_ACTIVATION_MAP,
       description: 'Fabrication status that activates (makes due) each payment stage. null = activate immediately. Array index corresponds to stage index.',
     },
     payment_headsup_map: {
-      value: [null, 'finishing', 'ready_for_delivery'],
+      value: PAYMENT_HEADSUP_MAP,
       description: 'Fabrication status that sends an advance "prepare your payment" notice. null = no heads-up.',
     },
     payment_reminder_grace_days: {
@@ -693,6 +709,11 @@ export async function seedDefaultConfigs(): Promise<void> {
       { $setOnInsert: { value, description } },
       { upsert: true },
     );
+  }
+
+  for (const [key, oldValue, newValue] of SUPERSEDED_CONFIG_DEFAULTS) {
+    // $eq keeps the exact-array match; a bare array would be cast to $in and hit customized values.
+    await Config.updateOne({ key, value: { $eq: oldValue } }, { $set: { value: newValue } });
   }
 
   // One-time migration from known previous seeded coordinates to

@@ -10,6 +10,7 @@ import { processAvailabilityShiftReminders } from './jobs/availabilityShiftRemin
 import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
 import { seedDefaultConfigs } from './modules/config/config.service.js';
 import { backfillPublicIdentifiers } from './services/publicIdentifierBackfill.js';
+import { backfillInstallmentStageTexts } from './services/paymentStageBackfill.js';
 import { logger } from './utils/logger.js';
 
 const server = http.createServer(app);
@@ -36,6 +37,11 @@ async function startServer(): Promise<void> {
     // Seed default configs
     await seedDefaultConfigs();
     logger.info('Default configs seeded');
+
+    const relabeledInstallmentRecords = await backfillInstallmentStageTexts();
+    if (relabeledInstallmentRecords > 0) {
+      logger.info(`Installment stage texts updated on ${relabeledInstallmentRecords} payment plans/quotations`);
+    }
 
     // Assign public IDs to legacy records before the API starts accepting requests.
     const publicIdBackfill = await backfillPublicIdentifiers();

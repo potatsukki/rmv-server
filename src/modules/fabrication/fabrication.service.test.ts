@@ -430,13 +430,19 @@ describe('createFabricationUpdate', () => {
     expect(project.save).toHaveBeenCalledTimes(remainingItems ? 0 : 1);
   });
 
+  // Down payment unlocks fabrication, the 2nd payment gates Installation (Ready for Delivery
+  // for shop work), and the final payment gates Done.
   it.each([
-    [FabricationStatus.FABRICATION, FabricationStatus.WELDING_ASSEMBLY, 1, false, 1],
-    [FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.INSTALLATION, 1, true, 2],
-    [FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK, 2, true, 3],
-  ])('applies payment gates for the six-stage on-site pipeline at %s', async (current, next, paidCount, blocked, requiredPaid) => {
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.FABRICATION, FabricationStatus.WELDING_ASSEMBLY, 1, false, 1],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.INSTALLATION, 1, true, 2],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK, 2, false, 2],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.QUALITY_CHECK, FabricationStatus.DONE, 2, true, 3],
+    [DeliveryType.SHOP_FABRICATED, FabricationStatus.CUTTING, FabricationStatus.WELDING, 1, false, 1],
+    [DeliveryType.SHOP_FABRICATED, FabricationStatus.QUALITY_CHECK, FabricationStatus.READY_FOR_DELIVERY, 1, true, 2],
+    [DeliveryType.SHOP_FABRICATED, FabricationStatus.READY_FOR_DELIVERY, FabricationStatus.DONE, 2, true, 3],
+  ])('applies %s payment gates at %s', async (deliveryType, current, next, paidCount, blocked, requiredPaid) => {
     const stored = { status: current };
-    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.ON_SITE_INSTALLATION }) });
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ deliveryType }) });
     mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockReturnValue({ populate: vi.fn().mockResolvedValue(stored) }) });
     mockPaymentPlanFindOne.mockResolvedValue({ stages: Array.from({ length: 3 }, (_, index) => ({ label: `Stage ${index + 1}`, status: index < paidCount ? PaymentStageStatus.VERIFIED : PaymentStageStatus.PENDING })) });
     const result = await getLatestFabricationStatus('project-1', 'admin-1', [Role.ADMIN]);

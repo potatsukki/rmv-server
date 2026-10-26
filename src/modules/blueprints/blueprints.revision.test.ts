@@ -167,15 +167,14 @@ describe('component-scoped blueprint revisions', () => {
     expect(bp.save).toHaveBeenCalled();
   });
 
-  it('auto-approves billing on the initial blueprint upload once a quotation is sent', async () => {
+  it('auto-approves billing and design on the initial blueprint upload once a quotation is sent', async () => {
     mocks.blueprintFindOne.mockResolvedValue(null);
     const result = await uploadBlueprint(uploadBlueprintSchema.parse({
       projectId: 'project-1', blueprintKey: 'blueprint.pdf', designKey: 'design.png',
       quotation: { total: 5000 },
     }), 'engineer-1');
-    // The customer no longer has to click a separate "Approve Billing" step.
-    expect(result).toMatchObject({ costingApproved: true, quotationReviewStatus: 'sent_to_customer' });
-    expect(result.blueprintApproved).not.toBe(true);
+    // The customer no longer reviews the design or clicks a separate "Approve Billing" step.
+    expect(result).toMatchObject({ blueprintApproved: true, costingApproved: true, quotationReviewStatus: 'sent_to_customer' });
   });
 
   it('does not auto-approve billing when no quotation is uploaded yet', async () => {
@@ -183,7 +182,7 @@ describe('component-scoped blueprint revisions', () => {
     const result = await uploadBlueprint(uploadBlueprintSchema.parse({
       projectId: 'project-1', blueprintKey: 'blueprint.pdf', designKey: 'design.png',
     }), 'engineer-1');
-    expect(result).toMatchObject({ costingApproved: false, quotationReviewStatus: 'draft' });
+    expect(result).toMatchObject({ blueprintApproved: false, costingApproved: false, quotationReviewStatus: 'draft' });
   });
 });
 
