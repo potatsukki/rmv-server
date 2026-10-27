@@ -1776,7 +1776,7 @@ export async function assignFabricationStaff(
   }
 
   if (latestBlueprint.status !== 'approved') {
-    throw AppError.badRequest('Fabrication team can only be assigned after the customer approves the blueprint and costing');
+    throw AppError.badRequest('Fabrication team can only be assigned after the quotation is sent to the customer');
   }
 
   const initialPaymentVerified = await hasRequiredInitialFabricationPayment(projectId);

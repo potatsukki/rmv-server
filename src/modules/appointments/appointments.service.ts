@@ -3526,6 +3526,7 @@ export async function listAppointments(query: {
   limit?: string;
   sortBy?: string;
   sortOrder?: string;
+  withoutProject?: string;
 }, actorId: string, actorRoles: Role[]) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
@@ -3590,6 +3591,19 @@ export async function listAppointments(query: {
     filter.date = {};
     if (query.dateFrom) (filter.date as Record<string, string>).$gte = query.dateFrom;
     if (query.dateTo) (filter.date as Record<string, string>).$lte = query.dateTo;
+  }
+
+  // Create Project only offers appointments that no project uses yet.
+  if (query.withoutProject === 'true') {
+    const projectFilter = {
+      status: { $ne: ProjectStatus.CANCELLED },
+      ...(filter.customerId ? { customerId: filter.customerId } : {}),
+    };
+    const [sourceIds, ocularIds] = await Promise.all([
+      Project.distinct('appointmentId', projectFilter),
+      Project.distinct('ocularAppointmentId', projectFilter),
+    ]);
+    appendAndFilter(filter, { _id: { $nin: [...sourceIds, ...ocularIds].filter(Boolean) } });
   }
 
   const sortField = query.sortBy;
