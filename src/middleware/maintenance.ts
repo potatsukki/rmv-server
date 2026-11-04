@@ -3,11 +3,26 @@ import { Config } from '../models/index.js';
 import { AppError, ErrorCode } from '../utils/appError.js';
 import { Role } from '../utils/constants.js';
 
+const AUTHENTICATION_PATHS = [
+  '/auth/login',
+  '/auth/google',
+  '/auth/verify-2fa',
+  '/auth/resend-2fa',
+] as const;
+
 /**
  * Maintenance mode middleware.
  * When maintenance is enabled, only Admin users can access the API.
  */
 export const maintenanceGuard = async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
+  const path = req.path.replace(/\/+$/, '');
+  const isAuthenticationRequest = req.method === 'POST'
+    && AUTHENTICATION_PATHS.some((authPath) => path.endsWith(authPath));
+  if (isAuthenticationRequest) {
+    next();
+    return;
+  }
+
   try {
     const [mode, scheduledAt] = await Promise.all([
       Config.findOne({ key: 'maintenance_mode' }),
@@ -34,8 +49,7 @@ export const maintenanceGuard = async (req: Request, _res: Response, next: NextF
       return;
     }
     next();
-  } catch {
-    next();
+  } catch (error) {
+    next(error);
   }
 };
-
