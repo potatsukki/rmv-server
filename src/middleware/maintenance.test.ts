@@ -33,6 +33,19 @@ describe('maintenanceGuard', () => {
     expect(mockConfigFindOne).not.toHaveBeenCalled();
   });
 
+  it.each(['GET', 'HEAD'])('allows %s health checks through during maintenance', async (method) => {
+    const next = vi.fn<NextFunction>();
+
+    await maintenanceGuard(
+      { method, path: '/api/v1/health' } as Request,
+      {} as Response,
+      next,
+    );
+
+    expect(next).toHaveBeenCalledWith();
+    expect(mockConfigFindOne).not.toHaveBeenCalled();
+  });
+
   it('allows authenticated admins through while maintenance is enabled', async () => {
     mockConfigFindOne
       .mockResolvedValueOnce({ value: true })
