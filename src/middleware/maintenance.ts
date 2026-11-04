@@ -16,9 +16,11 @@ const AUTHENTICATION_PATHS = [
  */
 export const maintenanceGuard = async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
   const path = req.path.replace(/\/+$/, '');
+  const isHealthCheck = (req.method === 'GET' || req.method === 'HEAD')
+    && path.endsWith('/health');
   const isAuthenticationRequest = req.method === 'POST'
     && AUTHENTICATION_PATHS.some((authPath) => path.endsWith(authPath));
-  if (isAuthenticationRequest) {
+  if (isHealthCheck || isAuthenticationRequest) {
     next();
     return;
   }
