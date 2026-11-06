@@ -170,7 +170,7 @@ describe('prepareProjectOcularSchedule', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
     mockAppointmentFindOne.mockResolvedValue(null);
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-06', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('at least 3 days');
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-06', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('at least 2 days');
   });
 
   it('rejects a blocked ocular slot', async () => {
