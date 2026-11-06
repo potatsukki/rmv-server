@@ -6,7 +6,7 @@ import {
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
-  AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, Role, AuditAction,
+  AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, Role, AuditAction, MIN_BOOKING_LEAD_DAYS,
   NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
@@ -434,10 +434,10 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
     throw AppError.badRequest('Cannot book appointments in the past');
   }
 
-  // Enforce 3-day minimum advance booking
-  const minBookingDate = startOfDay(addDays(now, 3));
+  // Enforce the minimum advance booking
+  const minBookingDate = startOfDay(addDays(now, MIN_BOOKING_LEAD_DAYS));
   if (isBefore(target, minBookingDate)) {
-    throw AppError.badRequest('Appointments must be booked at least 3 days in advance');
+    throw AppError.badRequest(`Appointments must be booked at least ${MIN_BOOKING_LEAD_DAYS} days in advance`);
   }
 
   // Bookings are open every day of the week; only holidays are blocked.

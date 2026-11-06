@@ -49,6 +49,9 @@ export enum AppointmentAttendanceStatus {
 
 // ── Slot Codes ──
 export const SLOT_CODES = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'] as const;
+
+// Minimum days between today and a bookable appointment date (temporarily 2 for the Nov 8 demo; was 3).
+export const MIN_BOOKING_LEAD_DAYS = 2;
 export type SlotCode = typeof SLOT_CODES[number];
 
 // ── Project Status ──
