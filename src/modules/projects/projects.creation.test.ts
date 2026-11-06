@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   reportFind: vi.fn(),
   projectItemCreate: vi.fn(),
   projectItemFindOneAndUpdate: vi.fn(),
+  projectItemFindOne: vi.fn(),
   projectItemFind: vi.fn(),
   projectItemUpdateMany: vi.fn(),
   blueprintFindOne: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock('../../models/index.js', () => ({
   ProjectItem: {
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
+    findOne: mocks.projectItemFindOne,
     find: mocks.projectItemFind,
     updateMany: mocks.projectItemUpdateMany,
   },
@@ -57,7 +59,7 @@ vi.mock('../appointments/appointments.service.js', () => ({
 }));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
-import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
+import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -202,8 +204,87 @@ describe('finalizeOcularProject', () => {
     draft.contractStatus = ContractStatus.UPLOADED;
     await expect(assignEngineers('project-1', { engineerIds: ['engineer-1'] }, actorId)).rejects.toThrow('Complete the pending ocular project');
     await expect(transitionProject('project-1', { status: ProjectStatus.SUBMITTED }, actorId)).rejects.toThrow('Complete the pending ocular project');
-    await expect(uploadSignedContract('project-1', { contractFileKey: input.contractFileKey }, actorId, [Role.SALES_STAFF])).rejects.toThrow('Use Complete Project');
     expect(draft.save).not.toHaveBeenCalled();
+  });
+
+  it('uploads the signed contract on a For Ocular project without sending it for review', async () => {
+    draft.ocularAppointmentId = undefined;
+    const chain: any = {
+      sort: () => chain,
+      populate: () => chain,
+      lean: () => Promise.resolve([]),
+      then: (resolve: (value: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
+    };
+    mocks.projectItemFind.mockReturnValue(chain);
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+
+    await uploadSignedContract('project-1', { contractFileKey: input.contractFileKey }, actorId, [Role.SALES_STAFF]);
+
+    expect(draft.status).toBe(ProjectStatus.DRAFT);
+    expect(draft.contractStatus).toBe(ContractStatus.UPLOADED);
+    expect(draft.save).toHaveBeenCalled();
+    expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('markOcularDone', () => {
+  let draft: Record<string, any>;
+  let reports: Record<string, any>[];
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    draft = {
+      _id: 'project-1', customerId, salesStaffId: actorId, title: 'Gate project',
+      ocularAppointmentId: 'ocular-1', status: ProjectStatus.DRAFT, contractStatus: ContractStatus.UPLOADED,
+      serviceType: 'gates', serviceTypes: ['gates'], initialDesignKeys: [], engineerIds: [], save: vi.fn(),
+    };
+    reports = [{ _id: 'report-1', serviceType: 'gates', visitType: 'ocular', status: 'submitted', save: vi.fn() }];
+    mocks.projectFindById.mockResolvedValue(draft);
+    mocks.projectFindOneAndUpdate.mockImplementation(async (_filter, update) => Object.assign(draft, update.$set));
+    mocks.appointmentFindById.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.COMPLETED });
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(reports) });
+    mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
+      _id: 'item-1', ...update.$setOnInsert, ...update.$set, save: vi.fn(),
+    }));
+  });
+
+  it('moves a For Ocular project to For Review after the ocular report is submitted', async () => {
+    const project = await markOcularDone('project-1', actorId, [Role.SALES_STAFF]);
+    expect(project).toMatchObject({ status: ProjectStatus.SUBMITTED, visitReportId: 'report-1' });
+    expect(mocks.projectFindOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'project-1', status: ProjectStatus.DRAFT, ocularAppointmentId: 'ocular-1' },
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mocks.projectItemUpdateMany).toHaveBeenCalledWith(
+      { projectId: 'project-1', status: ProjectStatus.DRAFT },
+      { $set: { status: ProjectStatus.SUBMITTED } },
+    );
+  });
+
+  it('requires the signed contract first', async () => {
+    draft.contractStatus = ContractStatus.MISSING;
+    await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('Upload the signed contract first');
+  });
+
+  it('needs a scheduled ocular visit', async () => {
+    draft.ocularAppointmentId = undefined;
+    await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('An ocular visit is needed');
+  });
+
+  it('needs the ocular visit to be finished', async () => {
+    mocks.appointmentFindById.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.CONFIRMED });
+    await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('An ocular visit is needed');
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('needs every ocular report submitted', async () => {
+    reports[0].status = 'draft';
+    await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit all ocular reports');
+  });
+
+  it('only lets the assigned sales staff mark it done', async () => {
+    await expect(markOcularDone('project-1', 'someone-else', [Role.SALES_STAFF])).rejects.toThrow('Only the assigned sales staff');
   });
 });
 
@@ -291,7 +372,7 @@ describe('createProject', () => {
       ...input,
       projectNumber: 'RMV-2026-0001',
       salesStaffId: actorId,
-      status: ProjectStatus.SUBMITTED,
+      status: ProjectStatus.DRAFT,
       deliveryType: DeliveryType.SHOP_FABRICATED,
       contractStatus: ContractStatus.UPLOADED,
       contractFileKey: input.contractFileKey,
@@ -318,7 +399,62 @@ describe('createProject', () => {
       ocularVisit: withOcular ? { date: '2026-10-08', slotCode: '09:00', customerLocation: site } : undefined,
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
     expect(project.siteAddress).toBe(withOcular ? siteData.formattedAddress : undefined);
-    expect(project.status).toBe(withOcular ? ProjectStatus.DRAFT : ProjectStatus.SUBMITTED);
+    expect(project.status).toBe(ProjectStatus.DRAFT);
+  });
+
+  it('creates a For Ocular project without a contract or ocular schedule', async () => {
+    const { contractFileKey: _contractFileKey, ...withoutContract } = input;
+    const project = await createProject(withoutContract, actorId, undefined, undefined, [Role.SALES_STAFF]);
+    expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING });
+    expect(mocks.appointmentCreate).not.toHaveBeenCalled();
+  });
+
+  it('keeps one project item per selected design, even for the same service', async () => {
+    const designReports = [
+      ['gates', 'gates-double-swing-gate', 'Double Swing Gate'],
+      ['custom', 'custom-stainless-storage-cabinet', 'Stainless Storage Cabinet'],
+      ['custom', 'custom-food-cart-kiosk-frame', 'Food Cart Kiosk Frame'],
+      ['custom', 'custom-utility-frame', 'Utility Frame'],
+    ].map(([serviceType, designId, designName], index) => ({
+      _id: `report-${index}`,
+      appointmentId,
+      visitType: 'consultation',
+      serviceType,
+      selectedDesignTemplateId: designId,
+      selectedDesignTemplateName: designName,
+      photoKeys: [`visit-photos/${designId}.jpg`],
+      save: vi.fn().mockResolvedValue(undefined),
+    }));
+    mocks.appointmentFindById.mockResolvedValue(appointment({ serviceTypes: ['gates', 'custom'] }));
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(designReports) });
+    mocks.projectItemFindOneAndUpdate.mockImplementation(async (filter, update) => ({
+      _id: `item-${filter.selectedDesignTemplateId}`,
+      ...update.$setOnInsert,
+      ...update.$set,
+      save: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    await createProject({ ...input, appointmentId, serviceType: 'gates', visitReportId: undefined }, actorId, undefined, undefined, [Role.SALES_STAFF]);
+
+    const itemCalls = mocks.projectItemFindOneAndUpdate.mock.calls;
+    expect(itemCalls.map(([filter]) => filter)).toEqual([
+      { projectId: 'project-1', serviceType: 'gates', selectedDesignTemplateId: 'gates-double-swing-gate' },
+      { projectId: 'project-1', serviceType: 'custom', selectedDesignTemplateId: 'custom-stainless-storage-cabinet' },
+      { projectId: 'project-1', serviceType: 'custom', selectedDesignTemplateId: 'custom-food-cart-kiosk-frame' },
+      { projectId: 'project-1', serviceType: 'custom', selectedDesignTemplateId: 'custom-utility-frame' },
+    ]);
+    expect(itemCalls[2]![1]).toMatchObject({
+      $set: { mediaKeys: ['visit-photos/custom-food-cart-kiosk-frame.jpg'] },
+      $setOnInsert: { title: 'Food Cart Kiosk Frame' },
+    });
+    expect(designReports.every((report) => report.save.mock.calls.length > 0)).toBe(true);
+  });
+
+  it('rejects a consultation the customer declined', async () => {
+    mocks.appointmentFindById.mockResolvedValue(appointment({ attendanceStatus: 'customer_declined' }));
+    await expect(createProject({ ...input, appointmentId }, actorId, undefined, undefined, [Role.SALES_STAFF]))
+      .rejects.toThrow('customer declined');
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
   });
 
   it('imports every appointment service as a separate project item with its own visit details', async () => {
@@ -374,7 +510,7 @@ describe('createProject', () => {
     expect(mocks.reportFind).toHaveBeenCalledWith({ appointmentId });
     expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledTimes(2);
     expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
-      { projectId: 'project-1', serviceType: 'canopy' },
+      { projectId: 'project-1', serviceType: 'canopy', selectedDesignTemplateId: null },
       expect.objectContaining({
         $set: expect.objectContaining({
           serviceType: 'canopy',
@@ -389,7 +525,7 @@ describe('createProject', () => {
       { upsert: true, new: true },
     );
     expect(mocks.projectItemFindOneAndUpdate).toHaveBeenCalledWith(
-      { projectId: 'project-1', serviceType: 'railings' },
+      { projectId: 'project-1', serviceType: 'railings', selectedDesignTemplateId: null },
       expect.objectContaining({
         $set: expect.objectContaining({
           serviceType: 'railings',
@@ -451,7 +587,7 @@ describe('createProject', () => {
     });
     expect(consultationReport.save).toHaveBeenCalled();
     expect(mocks.projectItemFindOneAndUpdate).toHaveBeenLastCalledWith(
-      { projectId: 'project-1', serviceType: 'gates' },
+      { projectId: 'project-1', serviceType: 'gates', selectedDesignTemplateId: null },
       expect.objectContaining({
         $set: expect.objectContaining({ ocularVisitReportId: 'report-gates' }),
       }),
@@ -859,5 +995,54 @@ describe('selectPaymentPlan for a project with several items', () => {
     mocks.paymentPlanFind.mockResolvedValue([{ _id: 'plan-1' }]);
     mocks.blueprintFindOne.mockImplementation(() => ({ sort: vi.fn().mockResolvedValue(quotation(1000)) }));
     await expect(selectPaymentPlan('project-1', { paymentType: 'full' } as any, actorId)).rejects.toThrow('already exists for this project');
+  });
+});
+
+describe('scheduleProjectOcular', () => {
+  let project: Record<string, any>;
+  const visit = { date: '2026-11-12', slotCode: '09:00' as const, customerLocation: site, formattedAddress: 'Calamba, Laguna' };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = {
+      _id: 'project-1', projectNumber: 'RMV-2026-0001', title: 'Gate project', appointmentId,
+      customerId: { toString: () => customerId }, salesStaffId: { toString: () => actorId },
+      status: ProjectStatus.DRAFT, contractStatus: ContractStatus.UPLOADED,
+      serviceType: 'gates', serviceTypes: ['gates'], save: vi.fn(),
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+    mocks.appointmentFindById.mockResolvedValue(appointment());
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([
+      { _id: 'report-1', serviceType: 'gates', visitType: 'consultation', save: vi.fn() },
+    ]) });
+    mocks.prepareOcularSchedule.mockResolvedValue(actorId);
+    mocks.resolveOcularVisitData.mockResolvedValue(siteData);
+    mocks.appointmentCreate.mockImplementation(async (payload) => ({ _id: 'ocular-appointment-1', ...payload }));
+    mocks.projectItemFindOneAndUpdate.mockImplementation(async (_filter, update) => ({
+      _id: 'item-1', ...update.$setOnInsert, ...update.$set, save: vi.fn(),
+    }));
+  });
+
+  it('is blocked until the signed contract is uploaded', async () => {
+    project.contractStatus = ContractStatus.MISSING;
+    await expect(scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]))
+      .rejects.toThrow('Upload the signed contract first');
+    expect(mocks.appointmentCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates the confirmed ocular appointment once the contract is uploaded', async () => {
+    await scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]);
+    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ customerId, date: '2026-11-12', slotCode: '09:00' }));
+    expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'ocular', status: AppointmentStatus.CONFIRMED, salesStaffId: actorId, sourceConsultationAppointmentId: appointmentId,
+    }));
+    expect(project.ocularAppointmentId).toBe('ocular-appointment-1');
+    expect(project.status).toBe(ProjectStatus.DRAFT);
+  });
+
+  it('refuses to schedule a second ocular visit', async () => {
+    project.ocularAppointmentId = 'ocular-1';
+    await expect(scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]))
+      .rejects.toThrow('already scheduled');
   });
 });

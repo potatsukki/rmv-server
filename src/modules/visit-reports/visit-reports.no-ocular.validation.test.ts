@@ -15,7 +15,7 @@ vi.mock('../../models/index.js', () => ({
   VisitReport: { findById: mocks.reportFindById, find: mocks.reportFind },
   Appointment: { findById: mocks.appointmentFindById, findOne: mocks.appointmentFindOne, create: mocks.appointmentCreate },
   Project: { create: mocks.projectCreate, findOne: mocks.projectFindOne, findById: mocks.projectFindById },
-  ProjectItem: { findOneAndUpdate: mocks.projectItemFindOneAndUpdate },
+  ProjectItem: { findOneAndUpdate: mocks.projectItemFindOneAndUpdate, findOne: vi.fn().mockResolvedValue(null) },
   User: { findById: mocks.userFindById },
   AuditLog: { create: mocks.auditCreate },
   SlotLock: { deleteOne: mocks.releaseSlot },

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Project } from '../../models/Project.js';
 import { ProjectItem } from '../../models/ProjectItem.js';
-import { createProjectSchema } from './projects.validation.js';
+import { createProjectSchema, scheduleProjectOcularSchema } from './projects.validation.js';
 import { DeliveryType } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -71,9 +71,9 @@ describe('createProjectSchema', () => {
     expect(parsed.serviceType).toBeUndefined();
   });
 
-  it.each(['title', 'serviceType', 'contractFileKey'])('still requires %s for a final project', (field) => {
+  it.each(['title', 'serviceType', 'contractFileKey'])('allows a For Ocular project without %s (filled in later)', (field) => {
     const input = { ...details, customerId, [field]: undefined };
-    expect(createProjectSchema.safeParse(input).success).toBe(false);
+    expect(createProjectSchema.safeParse(input).success).toBe(true);
   });
 
   it('preserves every moved project field through validation and model serialization', () => {
@@ -101,10 +101,15 @@ describe('createProjectSchema', () => {
     if (!result.success) expect(result.error.issues[0]?.path).toEqual(['customerId']);
   });
 
-  it('requires a signed contract uploaded to the contracts folder', () => {
-    const { contractFileKey: _contractFileKey, ...withoutContract } = details;
-    expect(createProjectSchema.safeParse({ ...withoutContract, customerId }).success).toBe(false);
+  it('requires a provided signed contract to be uploaded to the contracts folder', () => {
     expect(createProjectSchema.safeParse({ ...details, customerId, contractFileKey: 'projects/contract.pdf' }).success).toBe(false);
+  });
+
+  it('validates the Schedule Ocular Visit payload', () => {
+    const visit = { date: '2026-11-12', slotCode: '09:00', customerLocation: { lat: 14.6, lng: 121.0 } };
+    expect(scheduleProjectOcularSchema.safeParse(visit).success).toBe(true);
+    expect(scheduleProjectOcularSchema.safeParse({ ...visit, date: '11/12/2026' }).success).toBe(false);
+    expect(scheduleProjectOcularSchema.safeParse({ ...visit, customerLocation: undefined }).success).toBe(false);
   });
 
   it.each(['customerId', 'appointmentId'])('rejects a malformed %s', (field) => {

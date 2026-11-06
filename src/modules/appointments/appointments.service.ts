@@ -25,7 +25,7 @@ import {
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
 } from '../users/availability-session.service.js';
-import { synchronizeConsultationAttendanceByTime, TESTING_BYPASS_REASON } from './consultation-attendance-automation.js';
+import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -440,12 +440,7 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
     throw AppError.badRequest('Appointments must be booked at least 3 days in advance');
   }
 
-  // Check it's not a weekend (0 = Sun, 6 = Sat)
-  const day = target.getDay();
-  if (day === 0 || day === 6) {
-    throw AppError.badRequest('Appointments are not available on weekends');
-  }
-
+  // Bookings are open every day of the week; only holidays are blocked.
   // Check it's not a holiday
   const holiday = await Holiday.findOne({ date: dateStr });
   if (holiday) {
@@ -1991,49 +1986,6 @@ export async function updateConsultationAttendance(
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
   }
 
-  if (input.action === 'test_start') {
-    if (appointment.status !== AppointmentStatus.CONFIRMED) {
-      throw AppError.badRequest('Only a confirmed consultation can be started for testing');
-    }
-
-    const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
-    if (![AppointmentAttendanceStatus.SCHEDULED, AppointmentAttendanceStatus.ON_TIME, AppointmentAttendanceStatus.LATE_ARRIVAL]
-      .includes(currentStatus)) {
-      throw AppError.badRequest(
-        `Testing bypass cannot start attendance from ${currentStatus}`,
-        ErrorCode.INVALID_TRANSITION,
-      );
-    }
-
-    // The bypass skips the scheduled slot, so the consultation is recorded as completed now.
-    const now = new Date();
-    appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
-    appointment.actualArrivalAt ||= now;
-    appointment.consultationStartedAt = now;
-    appointment.consultationCompletedAt = now;
-    appointment.attendanceUpdatedBy = actorId as unknown as Types.ObjectId;
-    appointment.attendanceUpdatedAt = now;
-    appointment.attendanceOverrideReason = TESTING_BYPASS_REASON;
-    await appointment.save();
-
-    await AuditLog.create({
-      action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
-      actorId,
-      targetType: 'appointment',
-      targetId: appointment._id,
-      details: {
-        action: input.action,
-        previousAttendanceStatus: currentStatus,
-        attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
-        overrideReason: TESTING_BYPASS_REASON,
-      },
-      ipAddress: ip,
-      userAgent: ua,
-    });
-
-    return appointment;
-  }
-
   await synchronizeConsultationAttendanceByTime(appointment);
   const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
   let nextStatus = currentStatus;
@@ -2069,14 +2021,14 @@ export async function updateConsultationAttendance(
       throw AppError.badRequest('Customer declined attendance requires notes', ErrorCode.VALIDATION_ERROR);
     }
     nextStatus = AppointmentAttendanceStatus.CUSTOMER_DECLINED;
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CANCELLED);
-    appointment.status = AppointmentStatus.CANCELLED;
-    appointment.cancellationReason = input.notes.trim();
-    appointment.cancelledBy = actorId as unknown as Types.ObjectId;
+    // The consultation took place, so it stays on record as completed; the
+    // customer_declined attendance status stops the report/project workflow.
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
+    appointment.status = AppointmentStatus.COMPLETED;
     appointment.internalNotes = input.notes.trim();
     appointment.consultationCompletedAt = now;
-    changes.appointmentStatus = AppointmentStatus.CANCELLED;
-    changes.cancellationReason = input.notes.trim();
+    changes.appointmentStatus = AppointmentStatus.COMPLETED;
+    changes.declineReason = input.notes.trim();
     changes.consultationCompletedAt = now;
   }
 
@@ -3604,6 +3556,8 @@ export async function listAppointments(query: {
       Project.distinct('ocularAppointmentId', projectFilter),
     ]);
     appendAndFilter(filter, { _id: { $nin: [...sourceIds, ...ocularIds].filter(Boolean) } });
+    // A customer-declined consultation is recorded as completed but must not start a project.
+    appendAndFilter(filter, { attendanceStatus: { $ne: AppointmentAttendanceStatus.CUSTOMER_DECLINED } });
   }
 
   const sortField = query.sortBy;

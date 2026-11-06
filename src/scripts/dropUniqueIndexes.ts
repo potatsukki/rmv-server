@@ -110,6 +110,27 @@ async function dropUniqueIndexes(): Promise<void> {
       logger.info('No old unique projectId index found on blueprintdrafts — already clean.');
     }
 
+    // ── ProjectItem: drop old unique projectId + serviceType index ──
+    // Replaced by { projectId, serviceType, selectedDesignTemplateId } so one project can hold
+    // several items of the same service (one per selected design).
+    const projectItemCollection = db.collection('projectitems');
+    const projectItemIndexes = await projectItemCollection.indexes();
+    const projectItemServiceUnique = projectItemIndexes.find(
+      (idx) =>
+        idx.unique &&
+        idx.key &&
+        Object.keys(idx.key).length === 2 &&
+        idx.key.projectId === 1 &&
+        idx.key.serviceType === 1,
+    );
+
+    if (projectItemServiceUnique) {
+      await projectItemCollection.dropIndex(projectItemServiceUnique.name!);
+      logger.info(`Dropped unique index "${projectItemServiceUnique.name}" from projectitems`);
+    } else {
+      logger.info('No old unique projectId/serviceType index found on projectitems — already clean.');
+    }
+
     logger.info('Migration complete.');
     await mongoose.connection.close();
     process.exit(0);

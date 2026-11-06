@@ -131,7 +131,11 @@ const projectItemSchema = new Schema<IProjectItem>(
   { timestamps: true },
 );
 
-projectItemSchema.index({ projectId: 1, serviceType: 1 }, { unique: true, partialFilterExpression: { deletedAt: null } });
+// One item per selected design: several items may share a serviceType when each has its own design.
+projectItemSchema.index(
+  { projectId: 1, serviceType: 1, selectedDesignTemplateId: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
 projectItemSchema.index({ appointmentId: 1 });
 projectItemSchema.index({ consultationVisitReportId: 1 });
 projectItemSchema.index({ ocularVisitReportId: 1 });

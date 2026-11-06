@@ -684,43 +684,42 @@ describe('submitSiteDetails', () => {
   });
 });
 
-describe('updateConsultationAttendance testing bypass', () => {
+describe('updateConsultationAttendance', () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it('starts a confirmed consultation early for its assigned sales staff', async () => {
+  it('records a customer-declined consultation as completed instead of cancelled', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-17T02:00:00.000Z'));
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.CONFIRMED,
-      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+      attendanceStatus: AppointmentAttendanceStatus.ON_TIME,
       salesStaffId: { toString: () => 'sales-1' },
     });
     mockAppointmentFindById.mockResolvedValueOnce(appointment);
 
     await updateConsultationAttendance(
       'appointment-1',
-      { action: 'test_start' },
+      { action: 'customer_declined', notes: 'Customer decided not to proceed' },
       'sales-1',
       [Role.SALES_STAFF],
       '127.0.0.1',
       'vitest-agent',
     );
 
-    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.COMPLETED);
-    expect(appointment.actualArrivalAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
-    expect(appointment.consultationStartedAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
+    expect(appointment.status).toBe(AppointmentStatus.COMPLETED);
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.CUSTOMER_DECLINED);
+    expect(appointment.cancellationReason).toBeUndefined();
+    expect(appointment.cancelledBy).toBeUndefined();
     expect(appointment.consultationCompletedAt).toEqual(new Date('2026-09-17T02:00:00.000Z'));
-    expect(appointment.attendanceOverrideReason).toBe('Temporary testing bypass');
-    expect(appointment.save).toHaveBeenCalledTimes(1);
     expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
       action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
-      actorId: 'sales-1',
       details: expect.objectContaining({
-        action: 'test_start',
-        attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
+        action: 'customer_declined',
+        appointmentStatus: AppointmentStatus.COMPLETED,
+        attendanceStatus: AppointmentAttendanceStatus.CUSTOMER_DECLINED,
       }),
     }));
 
