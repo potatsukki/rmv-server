@@ -7,6 +7,7 @@ import { Role } from '../../utils/constants.js';
 import {
   createProjectSchema,
   finalizeOcularProjectSchema,
+  scheduleProjectOcularSchema,
   updateProjectSchema,
   assignEngineersSchema,
   reassignProjectSalesSchema,
@@ -46,6 +47,21 @@ router.post(
   authorize(Role.SALES_STAFF, Role.ADMIN),
   validate(finalizeOcularProjectSchema),
   ctrl.finalizeOcularProject,
+);
+
+router.post(
+  '/:id/schedule-ocular',
+  authenticate,
+  authorize(Role.SALES_STAFF, Role.ADMIN),
+  validate(scheduleProjectOcularSchema),
+  ctrl.scheduleProjectOcular,
+);
+
+router.post(
+  '/:id/done-ocular',
+  authenticate,
+  authorize(Role.SALES_STAFF, Role.ADMIN),
+  ctrl.markOcularDone,
 );
 
 // ── Assignments ──

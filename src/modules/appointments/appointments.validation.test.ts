@@ -125,13 +125,12 @@ describe('appointmentQueueQuerySchema', () => {
 describe('consultationAttendanceSchema automation contract', () => {
   it('keeps arrival and exception actions available', () => {
     expect(consultationAttendanceSchema.parse({ action: 'check_in' })).toEqual({ action: 'check_in' });
-    expect(consultationAttendanceSchema.parse({ action: 'test_start' })).toEqual({ action: 'test_start' });
     expect(consultationAttendanceSchema.parse({ action: 'customer_declined' })).toEqual({
       action: 'customer_declined',
     });
   });
 
-  it.each(['start', 'complete'])('rejects the removed manual %s action', (action) => {
+  it.each(['start', 'complete', 'test_start'])('rejects the removed manual %s action', (action) => {
     expect(() => consultationAttendanceSchema.parse({ action })).toThrow();
   });
 });

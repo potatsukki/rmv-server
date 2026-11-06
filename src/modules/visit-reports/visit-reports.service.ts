@@ -22,6 +22,8 @@ import { visitReportStatusCondition } from './visit-reports.list-policy.js';
 import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 import { cleanSalesNotes } from '../../utils/salesNotes.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
+import { designItemKey, projectItemFilterForReport } from '../../services/project-item-identity.js';
+import type { ISelectedDesignTemplate } from '../../models/Appointment.js';
 
 function isNonEmptyString(value?: string | null) {
   return Boolean(value?.trim());
@@ -175,13 +177,15 @@ async function upsertProjectItemFromVisitReport(project: any, report: any) {
     ...(report.referenceImageKeys || []),
   ];
 
+  const designTitle = report.selectedDesignTemplateName?.trim();
   const item = await ProjectItem.findOneAndUpdate(
-    { projectId: project._id, serviceType: report.serviceType },
+    await projectItemFilterForReport(project._id, report),
     {
       $set: {
         projectId: project._id,
         appointmentId: project.appointmentId,
-        title: readableServiceTitle(report.serviceType, report.serviceTypeCustom),
+        // A design-backed item is named after its design once, when it is created.
+        ...(designTitle ? {} : { title: readableServiceTitle(report.serviceType, report.serviceTypeCustom) }),
         serviceType: report.serviceType,
         serviceTypeCustom: report.serviceTypeCustom,
         measurements: report.measurements,
@@ -205,6 +209,7 @@ async function upsertProjectItemFromVisitReport(project: any, report: any) {
       },
       $setOnInsert: {
         status: project.status || ProjectStatus.DRAFT,
+        ...(designTitle ? { title: designTitle } : {}),
       },
     },
     { upsert: true, new: true },
@@ -328,15 +333,22 @@ async function ensureAppointmentServiceTypeReports(
   const customServiceTypeLabel = customerSiteDetails?.serviceTypeCustom || serviceTypeCustomOverride;
   const appointmentContext = await Appointment.findById(appointmentId)
     .select(
-      'serviceTypes sourceConsultationAppointmentId initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl',
+      'serviceTypes sourceConsultationAppointmentId initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl selectedDesignTemplates',
     )
     .lean();
   const sourceConsultationContext = appointmentContext?.sourceConsultationAppointmentId
     ? await Appointment.findById(appointmentContext.sourceConsultationAppointmentId)
-      .select('serviceTypes initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl')
+      .select('serviceTypes initialDesignNotes selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl selectedDesignTemplates')
       .lean()
     : undefined;
   const bookingSelectedDesign = selectedDesignSnapshot(appointmentContext, sourceConsultationContext);
+  // Every design the customer picked at booking becomes its own report item.
+  const bookedDesigns = uniqueBookedDesigns(
+    appointmentContext?.selectedDesignTemplates?.length
+      ? appointmentContext.selectedDesignTemplates
+      : sourceConsultationContext?.selectedDesignTemplates,
+    requestedServiceTypes,
+  );
   const selectedDesignServiceType = (
     sourceConsultationContext?.serviceTypes?.[0]
     || appointmentContext?.serviceTypes?.[0]
@@ -364,7 +376,9 @@ async function ensureAppointmentServiceTypeReports(
     preferredReportId,
   );
   if (requestedServiceTypes.length > 0 && !requestedServiceTypes.includes(ServiceType.CUSTOM)) {
-    const placeholderReport = existingReports.find((report) => report.serviceType === ServiceType.CUSTOM);
+    const placeholderReport = existingReports.find((report) => (
+      report.serviceType === ServiceType.CUSTOM && !isNonEmptyString(report.selectedDesignTemplateId)
+    ));
     if (placeholderReport && !existingReports.some((report) => report.serviceType === requestedServiceTypes[0])) {
       placeholderReport.serviceType = requestedServiceTypes[0];
       placeholderReport.serviceTypeCustom = undefined;
@@ -376,8 +390,24 @@ async function ensureAppointmentServiceTypeReports(
   // appointment service list. This prevents add-item regressions where new
   // selections (e.g. Gates/Fences) disappear on the next sync/refetch.
 
+  const designsToCreate = await assignBookedDesignsToReports(
+    existingReports,
+    bookedDesigns,
+    visitType,
+    customServiceTypeLabel,
+  );
+  const designServiceTypes = new Set<string>(designsToCreate.map((design) => design.serviceType));
   const existingServiceTypes = new Set(existingReports.map((report) => report.serviceType));
-  const missingServiceTypes = requestedServiceTypes.filter((serviceType) => !existingServiceTypes.has(serviceType));
+  const missingServiceTypes = requestedServiceTypes.filter((serviceType) => (
+    !existingServiceTypes.has(serviceType) && !designServiceTypes.has(serviceType)
+  ));
+  const claimedDesignIds = new Set(existingReports
+    .map((report) => report.selectedDesignTemplateId)
+    .filter((value): value is string => isNonEmptyString(value)));
+  // Legacy single-design bookings (no selectedDesignTemplates) keep the old behavior: the one
+  // design goes to the first service's report.
+  const applyLegacyBookingDesign = bookedDesigns.length === 0
+    && !(bookingSelectedDesign.selectedDesignTemplateId && claimedDesignIds.has(bookingSelectedDesign.selectedDesignTemplateId));
 
   for (const report of existingReports) {
     if (report.status !== VisitReportStatus.DRAFT) {
@@ -408,7 +438,7 @@ async function ensureAppointmentServiceTypeReports(
       changed = true;
     }
 
-    if (report.serviceType === selectedDesignServiceType) {
+    if (applyLegacyBookingDesign && report.serviceType === selectedDesignServiceType) {
       if (!isNonEmptyString(report.selectedDesignTemplateId) && bookingSelectedDesign.selectedDesignTemplateId) {
         report.selectedDesignTemplateId = bookingSelectedDesign.selectedDesignTemplateId;
         changed = true;
@@ -496,7 +526,7 @@ async function ensureAppointmentServiceTypeReports(
     }
   }
 
-  for (const serviceType of missingServiceTypes) {
+  const createDraftReport = async (serviceType: string, design?: ISelectedDesignTemplate) => {
     const report = await VisitReport.create({
       appointmentId,
       customerId,
@@ -506,7 +536,9 @@ async function ensureAppointmentServiceTypeReports(
       initialDesignNotes: cleanSalesNotes(appointmentContext?.initialDesignNotes ?? sourceConsultationContext?.initialDesignNotes),
       ...(linkedProjectId && { linkedProjectId }),
       serviceType,
-      serviceTypeCustom: serviceType === ServiceType.CUSTOM ? customServiceTypeLabel : undefined,
+      serviceTypeCustom: serviceType === ServiceType.CUSTOM
+        ? customServiceTypeLabel || design?.serviceLabel
+        : undefined,
       measurementUnit: customerSiteDetails?.measurementUnit,
       lineItems: customerSiteDetails?.lineItems || [],
       siteConditions: customerSiteDetails?.siteConditions,
@@ -515,7 +547,13 @@ async function ensureAppointmentServiceTypeReports(
       preferredDesign: customerSiteDetails?.preferredDesign,
       customerRequirements: customerSiteDetails?.customerRequirements,
       notes: customerSiteDetails?.notes,
-      ...(serviceType === selectedDesignServiceType && bookingSelectedDesign),
+      ...(design
+        ? {
+          selectedDesignTemplateId: design.id,
+          selectedDesignTemplateName: design.name,
+          selectedDesignTemplateImageUrl: design.imageUrl,
+        }
+        : applyLegacyBookingDesign && serviceType === selectedDesignServiceType && bookingSelectedDesign),
       photoKeys: customerSiteDetails?.photoKeys || [],
       videoKeys: customerSiteDetails?.videoKeys || [],
       sketchKeys: customerSiteDetails?.sketchKeys || [],
@@ -531,9 +569,88 @@ async function ensureAppointmentServiceTypeReports(
         appointmentId: appointmentId.toString(),
         autoCreated: true,
         serviceType,
+        ...(design && { selectedDesignTemplateId: design.id }),
       },
     });
+  };
+
+  for (const design of designsToCreate) {
+    await createDraftReport(design.serviceType, design);
   }
+  for (const serviceType of missingServiceTypes) {
+    await createDraftReport(serviceType);
+  }
+}
+
+function uniqueBookedDesigns(
+  designs: ISelectedDesignTemplate[] | undefined,
+  requestedServiceTypes: string[],
+): ISelectedDesignTemplate[] {
+  const seen = new Set<string>();
+  return (designs || []).filter((design) => {
+    if (!isNonEmptyString(design?.id) || seen.has(design.id)) return false;
+    if (requestedServiceTypes.length > 0 && !requestedServiceTypes.includes(design.serviceType)) return false;
+    seen.add(design.id);
+    return true;
+  });
+}
+
+/**
+ * Gives each booked design its own report item. A design without a report either takes over the
+ * design-less auto-created draft of its service (consultation drafts with no project yet, so older
+ * merged drafts are split) or is returned so a new draft is created for it. Submitted or
+ * project-linked reports are never split.
+ */
+async function assignBookedDesignsToReports(
+  existingReports: any[],
+  bookedDesigns: ISelectedDesignTemplate[],
+  visitType: string,
+  customServiceTypeLabel?: string,
+): Promise<ISelectedDesignTemplate[]> {
+  const claimed = new Set(existingReports
+    .map((report) => report.selectedDesignTemplateId)
+    .filter((value): value is string => isNonEmptyString(value)));
+  const toCreate: ISelectedDesignTemplate[] = [];
+
+  for (const design of bookedDesigns) {
+    if (claimed.has(design.id)) continue;
+    const sameService = existingReports.filter((report) => report.serviceType === design.serviceType);
+    if (sameService.length === 0) {
+      toCreate.push(design);
+      claimed.add(design.id);
+      continue;
+    }
+
+    const canSplit = visitType === 'consultation' && sameService.every((report) => (
+      report.status === VisitReportStatus.DRAFT && !report.linkedProjectId && !report.projectItemId
+    ));
+    if (!canSplit) continue;
+
+    const adoptable = sameService
+      .filter((report) => !isNonEmptyString(report.selectedDesignTemplateId))
+      // A manually added and renamed item ("Add Item") is not the booking's auto-created draft.
+      .filter((report) => (
+        report.serviceType !== ServiceType.CUSTOM
+        || !isNonEmptyString(report.serviceTypeCustom)
+        || report.serviceTypeCustom === customServiceTypeLabel
+      ))
+      .sort((a, b) => reportCreatedTime(a) - reportCreatedTime(b))[0];
+
+    if (adoptable) {
+      adoptable.selectedDesignTemplateId = design.id;
+      adoptable.selectedDesignTemplateName = design.name;
+      adoptable.selectedDesignTemplateImageUrl = design.imageUrl;
+      if (adoptable.serviceType === ServiceType.CUSTOM && !isNonEmptyString(adoptable.serviceTypeCustom)) {
+        adoptable.serviceTypeCustom = design.serviceLabel;
+      }
+      await adoptable.save();
+    } else {
+      toCreate.push(design);
+    }
+    claimed.add(design.id);
+  }
+
+  return toCreate;
 }
 
 const reportCarryOverFields = [
@@ -623,6 +740,8 @@ function pickCanonicalLifecycleReport(reports: any[]) {
 }
 
 function reportItemIdentity(report: any) {
+  const designKey = designItemKey(report);
+  if (designKey) return designKey;
   const serviceType = String(report.serviceType || '').trim();
   if (!serviceType) return `report:${report._id.toString()}`;
   if (serviceType !== ServiceType.CUSTOM) return serviceType;
@@ -739,15 +858,17 @@ async function transitionConsultationReportsToOcularAppointment(
   if (sourceReports.length === 0 && existingOcularReports.length === 0) return [];
 
   const requestedSet = requestedServiceTypes.length > 0 ? new Set(requestedServiceTypes) : null;
-  const serviceTypes = [...new Set([...sourceReports, ...existingOcularReports]
-    .map((report) => report.serviceType)
-    .filter((serviceType) => serviceType && (!requestedSet || requestedSet.has(serviceType))))];
+  // Each design is its own item; reports without a design still group by service.
+  const promotionKey = (report: any) => designItemKey(report) ?? `type:${report.serviceType}`;
+  const allReports = [...sourceReports, ...existingOcularReports]
+    .filter((report) => report.serviceType && (!requestedSet || requestedSet.has(report.serviceType)));
+  const itemKeys = [...new Set(allReports.map(promotionKey))];
   const canonicalReports: any[] = [];
 
-  for (const serviceType of serviceTypes) {
-    const candidates = [...sourceReports, ...existingOcularReports]
-      .filter((report) => report.serviceType === serviceType);
+  for (const itemKey of itemKeys) {
+    const candidates = allReports.filter((report) => promotionKey(report) === itemKey);
     if (candidates.length === 0) continue;
+    const serviceType = candidates[0].serviceType;
 
     const canonical = preferredReportId
       ? candidates.find((report) => report._id.toString() === preferredReportId.toString()) || pickCanonicalLifecycleReport(candidates)
@@ -1299,6 +1420,7 @@ export async function getVisitReport(reportId: string) {
       const canonicalReport = await VisitReport.findOne({
         appointmentId: canonicalAppointment._id,
         serviceType: report.serviceType,
+        ...(isNonEmptyString(report.selectedDesignTemplateId) && { selectedDesignTemplateId: report.selectedDesignTemplateId }),
       })
         .populate('customerId', 'firstName lastName email phone')
         .populate('salesStaffId', 'firstName lastName email')
@@ -1526,6 +1648,24 @@ export async function updateReport(
       input.recommendedOcularSlot = siblingSchedule.recommendedOcularSlot;
       input.recommendedOcularAddressId = (siblingSchedule as any).recommendedOcularAddressId;
       input.recommendedOcularAddress = (siblingSchedule as any).recommendedOcularAddress;
+    }
+  }
+
+  // Each item is tied to one booked design: never move a design onto another item or swap it.
+  const incomingDesignId = input.selectedDesignTemplateId?.trim();
+  if (incomingDesignId) {
+    const ownsDifferentDesign = isNonEmptyString(report.selectedDesignTemplateId)
+      && report.selectedDesignTemplateId !== incomingDesignId;
+    const siblingOwnsDesign = !ownsDifferentDesign && report.selectedDesignTemplateId !== incomingDesignId
+      && await VisitReport.exists({
+        appointmentId: report.appointmentId,
+        _id: { $ne: report._id },
+        selectedDesignTemplateId: incomingDesignId,
+      });
+    if (ownsDifferentDesign || siblingOwnsDesign) {
+      delete input.selectedDesignTemplateId;
+      delete input.selectedDesignTemplateName;
+      delete input.selectedDesignTemplateImageUrl;
     }
   }
 

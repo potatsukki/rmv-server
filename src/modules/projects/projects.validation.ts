@@ -20,8 +20,12 @@ const projectDetailsSchema = updateVisitReportSchema.pick({
   referenceImageKeys: true,
 });
 
+const objectIdSchema = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid ID');
+
 const additionalProjectItemSchema = projectDetailsSchema.omit({ initialDesignNotes: true }).extend({
   serviceType: z.string().trim().min(1).max(100),
+  // The visit report this item came from (one item per customer-selected design).
+  visitReportId: objectIdSchema.optional(),
   materials: z.string().trim().max(1000).optional(),
   finishes: z.string().trim().max(500).optional(),
 });
@@ -34,10 +38,22 @@ const signedContractFileKeySchema = z.string()
     'Signed contract must be a PDF, JPG, JPEG, or PNG file',
   );
 
+const ocularVisitSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid ocular visit date'),
+  slotCode: z.enum(SLOT_CODES),
+  // Sales staff pins the project site agreed with the customer face-to-face.
+  customerLocation: z.object({
+    lat: z.number().min(4.5, 'Location must be within the Philippines').max(21.5, 'Location must be within the Philippines'),
+    lng: z.number().min(116, 'Location must be within the Philippines').max(127, 'Location must be within the Philippines'),
+  }),
+  formattedAddress: z.string().trim().max(500).optional(),
+});
+
 export const createProjectSchema = z.object({
   ...projectDetailsSchema.shape,
   customerId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid customer ID').optional(),
   appointmentId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid appointment ID').optional(),
+  visitReportId: objectIdSchema.optional(),
   title: z.string().trim().min(1).max(100).optional(),
   serviceType: z.string().trim().min(1).max(100).optional(),
   serviceTypes: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
@@ -61,26 +77,13 @@ export const createProjectSchema = z.object({
   contractFileName: z.string().max(255).trim().optional(),
   contractContentType: z.string().max(100).trim().optional(),
   contractFileSize: z.number().int().positive().optional(),
-  ocularVisit: z.object({
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid ocular visit date'),
-    slotCode: z.enum(SLOT_CODES),
-    // Sales staff pins the project site during the office visit.
-    customerLocation: z.object({
-      lat: z.number().min(4.5, 'Location must be within the Philippines').max(21.5, 'Location must be within the Philippines'),
-      lng: z.number().min(116, 'Location must be within the Philippines').max(127, 'Location must be within the Philippines'),
-    }),
-    formattedAddress: z.string().trim().max(500).optional(),
-  }).optional(),
+  ocularVisit: ocularVisitSchema.optional(),
 }).refine((input) => Boolean(input.customerId || input.appointmentId), {
   message: 'Select a customer for the project',
   path: ['customerId'],
-}).superRefine((input, ctx) => {
-  if (!input.ocularVisit) {
-    for (const field of ['title', 'serviceType', 'contractFileKey'] as const) {
-      if (!input[field]) ctx.addIssue({ code: 'custom', message: 'Required for a final project', path: [field] });
-    }
-  }
 });
+
+export const scheduleProjectOcularSchema = ocularVisitSchema;
 
 export const finalizeOcularProjectSchema = createProjectSchema.refine((input) => !input.ocularVisit, {
   message: 'The ocular visit is already scheduled',
