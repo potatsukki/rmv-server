@@ -1771,17 +1771,8 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (![
-      AppointmentAttendanceStatus.ON_TIME,
-      AppointmentAttendanceStatus.LATE_ARRIVAL,
-      AppointmentAttendanceStatus.IN_PROGRESS,
-      AppointmentAttendanceStatus.COMPLETED,
-    ].includes(attendanceStatus)) {
-      throw AppError.badRequest(
-        'Check in the customer before submitting the consultation report.',
-        ErrorCode.VALIDATION_ERROR,
-      );
-    }
+    // Check-in is no longer required to submit the consultation report (requested bypass);
+    // no-show, rescheduled, and customer-declined consultations are still blocked above.
     if (!consultationOutcome) {
       throw AppError.badRequest(
         'Choose whether to schedule an ocular visit or proceed without ocular before submitting the consultation report.',
