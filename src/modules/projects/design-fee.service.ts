@@ -162,7 +162,7 @@ export async function openDesignFee(projectId: string | Types.ObjectId) {
     project.customerId,
     NotificationCategory.PAYMENT,
     'Design Fee Due',
-    `A non-refundable design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. Pay it from the Payments tab or at the RMV cashier. It is a separate fee and is not deducted from the project cost.`,
+    `A non-refundable design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. Pay it from the Payments tab or at the RMV cashier. It will be deducted from your final payment.`,
     `/projects/${project._id}/payments`,
   );
   await notifyRole(
@@ -493,8 +493,25 @@ type PlanLike = {
   surchargePercent?: number;
   designFeeCredit?: number;
   ocularFeeCredit?: number;
-  stages: Array<{ amount: number; remainingBalance: number; status: string; amountPaid: number }>;
+  stages: Array<{ amount: number; remainingBalance: number; status: string; amountPaid: number; designFeeCredit?: number }>;
 };
+
+/**
+ * The paid design fee comes off the FINAL stage (e.g. the last 30%), so the other stages keep
+ * their percentages of the full total. Returns the amount actually deducted.
+ */
+export function deductCreditFromFinalStage(plan: PlanLike, credit: number) {
+  const last = plan.stages[plan.stages.length - 1];
+  if (!last) return 0;
+  const applied = roundMoney(Math.min(Math.max(credit, 0), last.amount));
+  if (applied <= 0) return 0;
+  last.amount = roundMoney(last.amount - applied);
+  last.remainingBalance = last.amount;
+  last.designFeeCredit = applied;
+  if (last.amount <= 0) last.status = PaymentStageStatus.VERIFIED;
+  plan.totalAmount = roundMoney(plan.totalAmount - applied);
+  return applied;
+}
 
 /** Deducts an amount from a plan total and re-spreads it over the stages proportionally. */
 export function deductCreditFromPlan(plan: PlanLike, deduction: number) {
@@ -552,8 +569,16 @@ export async function applyFeeCreditsToNewPlans<T extends PlanLike>(projectId: s
   first.baseAmount ??= roundMoney(first.totalAmount / multiplier);
 
   const { ocularFeeOnProceed } = await getFeePolicyConfig();
-  // The design fee is a separate payment made before the blueprint; it is no longer deducted
-  // from the project cost. Plans credited before this change keep their designFeeCredit.
+
+  // Design fee: paid before the blueprint, then deducted once from the final payment.
+  const designClaim = await Project.findOneAndUpdate(
+    { _id: projectId, 'designFee.status': 'verified', 'designFee.creditedPlanId': { $exists: false } },
+    { $set: { 'designFee.creditedPlanId': first._id } },
+    { new: true },
+  );
+  if (designClaim?.designFee?.amount) {
+    first.designFeeCredit = deductCreditFromFinalStage(first, designClaim.designFee.amount);
+  }
 
   if (ocularFeeOnProceed === 'credit') {
     const project = await Project.findById(projectId).select('ocularAppointmentId appointmentId ocularFeeCreditedPlanId');
@@ -611,8 +636,8 @@ export async function getProjectFeeSummary(projectId: string) {
   const designAmount = designCharged ? roundMoney(project.designFee?.amount || 0) : 0;
   const designPaid = designStatus === 'verified' ? designAmount : 0;
   const planDesignCredit = roundMoney(plans.reduce((sum, plan) => sum + (plan.designFeeCredit || 0), 0));
-  // Only older plans carry a design fee credit; the fee is now paid separately.
-  const designFeeCredit = planDesignCredit;
+  // Before a plan exists the paid fee is shown as the credit the final payment will receive.
+  const designFeeCredit = plans.length ? planDesignCredit : designPaid;
 
   const ocularAmount = roundMoney(ocular?.ocularFee || 0);
   const ocularApplies = ocularAmount > 0;

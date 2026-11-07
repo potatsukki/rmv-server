@@ -13,6 +13,8 @@ export interface IPaymentStage {
   checkoutSessionId?: string; // PayMongo checkout session ID
   amountPaid: number;
   creditApplied: number;
+  /** Design fee deducted from this stage (the final payment). */
+  designFeeCredit?: number;
   remainingBalance: number;
   // ── Payment Activation (fabrication-driven) ──
   activatedAt?: Date | null; // When stage became due (null = not yet due)
@@ -59,6 +61,7 @@ const paymentStageSchema = new Schema<IPaymentStage>(
     checkoutSessionId: { type: String },
     amountPaid: { type: Number, default: 0 },
     creditApplied: { type: Number, default: 0 },
+    designFeeCredit: { type: Number, min: 0 },
     remainingBalance: { type: Number, default: 0 },
     // Payment activation fields
     activatedAt: { type: Date, default: null },
