@@ -34,7 +34,7 @@ vi.mock('../../models/index.js', () => ({
   AuditLog: { create: mocks.auditCreate },
 }));
 vi.mock('../../models/Payment.js', () => ({
-  Payment: { create: mocks.paymentCreate },
+  Payment: { create: mocks.paymentCreate, exists: async () => null },
   PaymentPlan: { find: () => ({ lean: mocks.planFind }) },
 }));
 vi.mock('../../models/Blueprint.js', () => ({
@@ -69,7 +69,6 @@ import {
   prepareRevisionFee,
   recordDesignFeePayment,
   recordRevisionFeePayment,
-  assertQuotationCoversDesignFee,
 } from './design-fee.service.js';
 import { PaymentMethod } from '../../utils/constants.js';
 
@@ -205,30 +204,14 @@ describe('design fee credit', () => {
     expect(plan.stages.reduce((sum, item) => sum + item.amount, 0)).toBe(54000);
   });
 
-  it('credits ₱1,000 before the 10% installment surcharge: (50,000 − 1,000) × 1.1', async () => {
-    mocks.projectFindOneAndUpdate.mockResolvedValueOnce({ designFee: { amount: 1000, status: 'verified' } });
+  it('no longer deducts the design fee from a new plan (it is paid separately)', async () => {
     const plan = { totalAmount: 55000, baseAmount: 50000, surchargePercent: 10, stages: [stage(16500), stage(22000), stage(16500)] };
 
     await applyFeeCreditsToNewPlans('project-1', [plan] as any);
 
-    expect(plan).toMatchObject({ totalAmount: 53900, baseAmount: 50000, designFeeCredit: 1000 });
-    expect(plan.stages.reduce((sum, item) => sum + item.amount, 0)).toBe(53900);
-  });
-
-  it('credits the verified design fee to the first new plan only once', async () => {
-    mocks.projectFindOneAndUpdate.mockResolvedValueOnce({ designFee: { amount: 1000, status: 'verified' } });
-    const plans = [{ totalAmount: 30000, stages: [stage(30000)] }, { totalAmount: 20000, stages: [stage(20000)] }];
-
-    await applyFeeCreditsToNewPlans('project-1', plans as any);
-
-    expect(plans[0]).toMatchObject({ totalAmount: 29000, baseAmount: 30000, designFeeCredit: 1000 });
-    expect(plans[1]).toMatchObject({ totalAmount: 20000 });
-
-    // Already credited: the atomic claim finds nothing, so no second deduction.
-    mocks.projectFindOneAndUpdate.mockResolvedValueOnce(null);
-    const later = [{ totalAmount: 20000, stages: [stage(20000)] }];
-    await applyFeeCreditsToNewPlans('project-1', later as any);
-    expect(later[0]).toMatchObject({ totalAmount: 20000 });
+    expect(plan).toMatchObject({ totalAmount: 55000, baseAmount: 50000 });
+    expect((plan as { designFeeCredit?: number }).designFeeCredit).toBeUndefined();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
   });
 });
 
@@ -273,8 +256,8 @@ describe('project fee summary', () => {
     const summary = await getProjectFeeSummary('project-1');
 
     expect(summary.revisionFees).toMatchObject({ count: 2, amount: 2000, paid: 1000, pending: 1000 });
-    // 20,000 + 1,000 design + 2,000 revisions − 1,000 credit = 22,000; received 1,000 design + 1,000 revision.
-    expect(summary).toMatchObject({ totalAmountDue: 22000, paymentsReceived: 2000, remainingBalance: 20000 });
+    // 20,000 + 1,000 design + 2,000 revisions (no design credit) = 23,000; received 1,000 design + 1,000 revision.
+    expect(summary).toMatchObject({ designFeeCredit: 0, totalAmountDue: 23000, paymentsReceived: 2000, remainingBalance: 21000 });
   });
 
   it('does not charge the design fee when the customer did not proceed', async () => {
@@ -286,23 +269,5 @@ describe('project fee summary', () => {
     const summary = await getProjectFeeSummary('project-1');
 
     expect(summary).toMatchObject({ projectCost: null, totalAmountDue: 350, paymentsReceived: 350, remainingBalance: 0 });
-  });
-});
-
-describe('assertQuotationCoversDesignFee', () => {
-  const paidFee = { designFee: { status: 'verified', amount: 1000 } };
-
-  it('rejects a quotation lower than the design fee', () => {
-    expect(() => assertQuotationCoversDesignFee(500, paidFee)).toThrow('lower than the ₱1,000.00 design fee');
-  });
-
-  it('allows a quotation at or above the design fee', () => {
-    expect(() => assertQuotationCoversDesignFee(1000, paidFee)).not.toThrow();
-    expect(() => assertQuotationCoversDesignFee(1500, paidFee)).not.toThrow();
-  });
-
-  it('ignores projects without a charged design fee', () => {
-    expect(() => assertQuotationCoversDesignFee(500, {})).not.toThrow();
-    expect(() => assertQuotationCoversDesignFee(500, { designFee: { status: 'not_charged', amount: 1000 } })).not.toThrow();
   });
 });

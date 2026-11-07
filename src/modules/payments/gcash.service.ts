@@ -8,6 +8,7 @@ import { validatePaymentImage } from '../uploads/upload.service.js';
 import { assertBookingReadyForGcashApproval, completePaidOcularBooking } from '../appointments/appointments.service.js';
 import { createAndSendNotification, notifyRole, emitRoleEvent, emitUserEvent } from '../notifications/socket.service.js';
 import { handleInitialFabricationPaymentVerified, issueGcashReceipt } from './payments.service.js';
+import { completeDesignFeeOnlinePayment, DESIGN_FEE_STAGE_PREFIX } from '../projects/design-fee.service.js';
 import type { GcashTarget, SubmitGcashInput } from './gcash.validation.js';
 import { gcashSettingsSchema } from './gcash.validation.js';
 
@@ -24,6 +25,21 @@ export async function resolveGcashTarget(target: GcashTarget, customerId: string
     const amount = booking.ocularFee ?? booking.ocularFeeBreakdown?.total ?? 0;
     if (amount <= 0) throw AppError.badRequest('No payment is required for this booking');
     return { booking, amount, stageId: `ocular-${booking._id}`, key: `booking:${booking._id}`, reference: booking.appointmentNumber || booking._id.toString() };
+  }
+  // Design fee: a separate payment made before the blueprint, keyed "design-fee-<projectId>".
+  if (target.stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX)) {
+    const projectId = target.stageId.slice(DESIGN_FEE_STAGE_PREFIX.length);
+    const project = /^[a-f\d]{24}$/i.test(projectId) ? await Project.findById(projectId).session(session ?? null) : null;
+    if (!project) throw AppError.notFound('Project not found');
+    if (project.customerId.toString() !== customerId) throw AppError.forbidden('You can only pay for your own project');
+    const fee = project.designFee;
+    if (!fee || !['pending', 'verified'].includes(String(fee.status))) throw AppError.badRequest('This project has no design fee to pay');
+    const awaitingReview = Boolean(await Payment.exists({ stageId: target.stageId, paymentStatus: 'pending_verification' }).session(session ?? null));
+    return {
+      project, designFee: fee, designFeePaid: fee.status === 'verified', designFeeAwaitingReview: awaitingReview,
+      amount: fee.status === 'verified' ? 0 : fee.amount, stageId: target.stageId, key: `design-fee:${project._id}`,
+      reference: project.projectNumber || project._id.toString(),
+    };
   }
   const plan = await PaymentPlan.findOne({ 'stages.stageId': target.stageId }).session(session ?? null);
   if (!plan) throw AppError.notFound('Payment stage not found');
@@ -42,8 +58,8 @@ export async function getGcashContext(target: GcashTarget, customerId: string) {
     .populate('verifiedBy', 'firstName lastName').populate('rejectedBy', 'firstName lastName').sort({ createdAt: -1 });
   const rawSettings = await getConfigValue('gcash_payment', { accountName: '', accountNumber: '', qrCodeKey: '' });
   const settings = gcashSettingsSchema.safeParse(rawSettings);
-  const paid = scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED;
-  const pending = scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED;
+  const paid = scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED || scope.designFeePaid;
+  const pending = scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED || scope.designFeeAwaitingReview;
   return {
     reference: scope.reference, amountRequired: scope.amount,
     paymentStatus: paid ? 'paid' : pending ? 'pending_verification' : attempts[0]?.paymentStatus === 'rejected' ? 'rejected' : 'unpaid',
@@ -67,13 +83,19 @@ export async function submitGcash(input: SubmitGcashInput, customerId: string) {
   await Payment.init();
   const recordSubmission = async (session: ClientSession, duplicateFromRace = false) => {
     const scope = await resolveGcashTarget(input, customerId, session);
-    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED) throw AppError.badRequest('Payment is already paid');
+    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED || scope.designFeePaid) throw AppError.badRequest('Payment is already paid');
     if (scope.amount <= 0) throw AppError.badRequest('No payment is required');
+    if (scope.designFee && !scope.designFee.acknowledgedAt) {
+      if (input.acknowledgeNonRefundable !== true) throw AppError.badRequest('Please confirm that the design fee is non-refundable before paying');
+      scope.designFee.acknowledgedAt = new Date();
+      scope.designFee.acknowledgedVia = 'customer';
+      await scope.project!.save({ session });
+    }
     // Rejected attempts also count as used references and stay in the audit history.
     const reusedReference = duplicateFromRace || Boolean(await Payment.exists({ method: PaymentMethod.GCASH,
       $or: [{ referenceNumber: input.referenceNumber }, { gcashReferenceNumber: input.referenceNumber }],
     }).session(session));
-    const awaitingReview = scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED;
+    const awaitingReview = scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED || Boolean(scope.designFeeAwaitingReview);
     if (awaitingReview && !reusedReference) throw AppError.conflict('A payment is already awaiting verification');
     const status = reusedReference ? PaymentStageStatus.DECLINED : PaymentStageStatus.PROOF_SUBMITTED;
     const [created] = await Payment.create([{
@@ -139,8 +161,10 @@ export async function submitGcash(input: SubmitGcashInput, customerId: string) {
 export async function selectCash(target: GcashTarget, customerId: string) {
   await mongoose.connection.transaction(async (session) => {
     const scope = await resolveGcashTarget(target, customerId, session);
-    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED) throw AppError.badRequest('Payment is already paid');
-    if (scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED) throw AppError.conflict('Wait for the cashier to review the submitted payment');
+    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED || scope.designFeePaid) throw AppError.badRequest('Payment is already paid');
+    if (scope.booking?.ocularFeeStatus === 'proof_submitted' || scope.stage?.status === PaymentStageStatus.PROOF_SUBMITTED || scope.designFeeAwaitingReview) throw AppError.conflict('Wait for the cashier to review the submitted payment');
+    // A design fee paid in cash is recorded by the RMV cashier from the Project Fees queue.
+    if (scope.designFee) return;
     if (scope.booking) {
       scope.booking.ocularFeePaymentMethod = PaymentMethod.CASH;
       scope.booking.ocularFeeStatus = 'cash_pending';
@@ -184,7 +208,8 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
     if (payment.paymentStatus !== (recordCash ? 'unpaid' : 'pending_verification')) throw AppError.conflict('This payment has already been reviewed');
     if (decision === 'paid' && payment.duplicateReference) throw AppError.conflict(DUPLICATE_REFERENCE_MESSAGE);
     const scope = await resolveGcashTarget(payment.bookingId ? { bookingId: payment.bookingId.toString() } : { stageId: payment.stageId }, payment.customerId!.toString(), session);
-    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED) throw AppError.conflict('Payment is already paid');
+    if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED || scope.designFeePaid) throw AppError.conflict('Payment is already paid');
+    if (recordCash && scope.designFee) throw AppError.badRequest('Record cash design fees from the Project Fees queue');
     if (recordCash) {
       if (!scope.booking || scope.booking.ocularFeePaymentMethod !== PaymentMethod.CASH || scope.booking.ocularFeeStatus !== 'cash_pending') throw AppError.badRequest('Booking is not awaiting cash collection');
       payment.amountPaid = scope.amount;
@@ -235,6 +260,8 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
         scope.booking.ocularFeeVerifiedBy = new mongoose.Types.ObjectId(cashierId);
       }
       await scope.booking.save({ session });
+    } else if (scope.designFee) {
+      // Marked paid after the transaction, once the receipt number exists.
     } else {
       scope.stage!.status = payment.status;
       if (decision === 'paid') {
@@ -258,7 +285,9 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
       const booking = await Appointment.findById(reviewed!.bookingId);
       if (booking) await completePaidOcularBooking(booking);
     }
-    if (reviewed!.projectId) {
+    if (reviewed!.stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX) && reviewed!.projectId) {
+      await completeDesignFeeOnlinePayment(reviewed!.projectId, reviewed!, cashierId);
+    } else if (reviewed!.projectId) {
       const project = await Project.findById(reviewed!.projectId);
       const plan = await PaymentPlan.findOne({ 'stages.stageId': reviewed!.stageId });
       if (project && plan) await handleInitialFabricationPaymentVerified(project, plan, reviewed!.projectItemId?.toString());
