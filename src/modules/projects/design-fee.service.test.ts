@@ -64,6 +64,7 @@ import {
   applyFeeCreditsToNewPlans,
   assertDesignFeeAllowsBlueprint,
   deductCreditFromPlan,
+  deductCreditFromFinalStage,
   getProjectFeeSummary,
   openDesignFee,
   prepareRevisionFee,
@@ -204,14 +205,35 @@ describe('design fee credit', () => {
     expect(plan.stages.reduce((sum, item) => sum + item.amount, 0)).toBe(54000);
   });
 
-  it('no longer deducts the design fee from a new plan (it is paid separately)', async () => {
+  it('deducts the paid design fee from the final 30% only', async () => {
+    mocks.projectFindOneAndUpdate.mockResolvedValueOnce({ designFee: { amount: 1000, status: 'verified' } });
     const plan = { totalAmount: 55000, baseAmount: 50000, surchargePercent: 10, stages: [stage(16500), stage(22000), stage(16500)] };
 
     await applyFeeCreditsToNewPlans('project-1', [plan] as any);
 
-    expect(plan).toMatchObject({ totalAmount: 55000, baseAmount: 50000 });
-    expect((plan as { designFeeCredit?: number }).designFeeCredit).toBeUndefined();
-    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(plan.stages.map((item) => item.amount)).toEqual([16500, 22000, 15500]);
+    expect(plan.stages[2]).toMatchObject({ remainingBalance: 15500, designFeeCredit: 1000 });
+    expect(plan).toMatchObject({ totalAmount: 54000, designFeeCredit: 1000 });
+  });
+
+  it('deducts it from a full payment and only once', async () => {
+    mocks.projectFindOneAndUpdate.mockResolvedValueOnce({ designFee: { amount: 1000, status: 'verified' } });
+    const full = { totalAmount: 50000, stages: [stage(50000)] };
+    await applyFeeCreditsToNewPlans('project-1', [full] as any);
+    expect(full).toMatchObject({ totalAmount: 49000, designFeeCredit: 1000 });
+
+    mocks.projectFindOneAndUpdate.mockResolvedValueOnce(null);
+    const later = { totalAmount: 20000, stages: [stage(20000)] };
+    await applyFeeCreditsToNewPlans('project-1', [later] as any);
+    expect(later.totalAmount).toBe(20000);
+  });
+
+  it('caps the deduction at the final stage amount', () => {
+    const plan = { totalAmount: 1000, stages: [stage(300), stage(400), stage(300)] };
+    expect(deductCreditFromFinalStage(plan, 1000)).toBe(300);
+    expect(plan.stages.map((item) => item.amount)).toEqual([300, 400, 0]);
+    expect(plan.stages[2]!.status).toBe('verified');
+    expect(plan.totalAmount).toBe(700);
   });
 });
 
@@ -256,8 +278,8 @@ describe('project fee summary', () => {
     const summary = await getProjectFeeSummary('project-1');
 
     expect(summary.revisionFees).toMatchObject({ count: 2, amount: 2000, paid: 1000, pending: 1000 });
-    // 20,000 + 1,000 design + 2,000 revisions (no design credit) = 23,000; received 1,000 design + 1,000 revision.
-    expect(summary).toMatchObject({ designFeeCredit: 0, totalAmountDue: 23000, paymentsReceived: 2000, remainingBalance: 21000 });
+    // 20,000 + 1,000 design + 2,000 revisions − 1,000 upcoming credit = 22,000; received 1,000 design + 1,000 revision.
+    expect(summary).toMatchObject({ designFeeCredit: 1000, totalAmountDue: 22000, paymentsReceived: 2000, remainingBalance: 20000 });
   });
 
   it('does not charge the design fee when the customer did not proceed', async () => {
