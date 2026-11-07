@@ -261,7 +261,12 @@ export const recordDesignFee = asyncHandler(async (req: Request, res: Response) 
   res.json({ success: true, data: result });
 });
 
-export const listPendingDesignFees = asyncHandler(async (_req: Request, res: Response) => {
-  const items = await designFeeService.listPendingDesignFees();
-  res.json({ success: true, data: items });
+export const acknowledgeDesignFee = asyncHandler(async (req: Request, res: Response) => {
+  const project = await designFeeService.acknowledgeDesignFee(req.params.id as string, req.userId!);
+  res.json({ success: true, data: project });
+});
+
+export const listPendingFees = asyncHandler(async (_req: Request, res: Response) => {
+  const fees = await designFeeService.listPendingFees();
+  res.json({ success: true, data: fees });
 });

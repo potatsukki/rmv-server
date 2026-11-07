@@ -76,6 +76,8 @@ export const requestRevisionSchema = z.object({
   component: z.nativeEnum(BlueprintComponent).default(BlueprintComponent.BLUEPRINT),
   notes: z.string().min(1).max(2000).trim(),
   refKeys: z.array(z.string()).max(5).default([]),
+  /** Required once the free revisions are used up: the customer accepts the non-refundable revision fee. */
+  acknowledgeRevisionFee: z.boolean().optional(),
 });
 
 export const acceptBlueprintSchema = z.object({

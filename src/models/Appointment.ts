@@ -87,6 +87,8 @@ export interface IAppointment extends Document {
   ocularFeePaymentMethod?: PaymentMethod;
   ocularFeePaymentChoice?: OcularFeePaymentChoice;
   ocularFeePaid?: boolean;
+  /** When the customer acknowledged that the ocular fee is non-refundable (required before paying online). */
+  ocularFeeNonRefundableAckAt?: Date;
   paymentStatus?: 'unpaid' | 'pending_verification' | 'paid' | 'rejected';
   bookingStatus?: 'pending_payment' | 'confirmed';
   ocularFeeProofKey?: string;
@@ -207,6 +209,7 @@ const appointmentSchema = new Schema<IAppointment>(
     },
     ocularFeePaymentMethod: { type: String, enum: Object.values(PaymentMethod) },
     ocularFeePaymentChoice: { type: String, enum: Object.values(OcularFeePaymentChoice) },
+    ocularFeeNonRefundableAckAt: { type: Date },
     ocularFeePaid: { type: Boolean, default: false },
     paymentStatus: { type: String, enum: ['unpaid', 'pending_verification', 'paid', 'rejected'] },
     bookingStatus: { type: String, enum: ['pending_payment', 'confirmed'] },

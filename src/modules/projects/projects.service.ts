@@ -1740,6 +1740,7 @@ async function buildPaymentStages(projectId: string, paymentType: 'full' | 'inst
 
   return {
     blueprint,
+    baseTotal,
     totalAmount,
     isPayInFull,
     surchargePercent: isPayInFull ? 0 : installmentConfig.surchargePercent,
@@ -1761,6 +1762,7 @@ async function buildContractItemBuildsFromPlans(
         item,
         built: {
           blueprint,
+          baseTotal: plan.baseAmount ?? plan.totalAmount,
           totalAmount: plan.totalAmount,
           isPayInFull: plan.isPayInFull,
           surchargePercent: 0,
@@ -1852,6 +1854,8 @@ function buildCombinedPlan(projectId: unknown, builds: BuiltPaymentStages[], cre
   const first = builds[0]!;
   return {
     projectId,
+    baseAmount: roundMoney(builds.reduce((sum, built) => sum + built.baseTotal, 0)),
+    surchargePercent: first.surchargePercent,
     totalAmount: roundMoney(builds.reduce((sum, built) => sum + built.totalAmount, 0)),
     isPayInFull: first.isPayInFull,
     stages: first.stages.map((stage, index) => {
@@ -1934,6 +1938,8 @@ export async function selectPaymentPlan(
     : itemBuilds.map(({ projectItemId, built }) => ({
       projectId: project._id,
       projectItemId,
+      baseAmount: built.baseTotal,
+      surchargePercent: built.surchargePercent,
       totalAmount: built.totalAmount,
       isPayInFull: built.isPayInFull,
       stages: built.stages,
@@ -2626,6 +2632,7 @@ export async function generateContract(
         item,
         built: {
           blueprint,
+          baseTotal: plan.baseAmount ?? plan.totalAmount,
           totalAmount: plan.totalAmount,
           isPayInFull: plan.isPayInFull,
           surchargePercent: 0,
@@ -2730,6 +2737,7 @@ export async function signContract(
             item,
             built: {
               blueprint,
+              baseTotal: plan.baseAmount ?? plan.totalAmount,
               totalAmount: plan.totalAmount,
               isPayInFull: plan.isPayInFull,
               surchargePercent: 0,

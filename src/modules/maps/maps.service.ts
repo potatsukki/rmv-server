@@ -189,6 +189,31 @@ async function isWithinNcr(customerLocation: LatLng, polygonFilePath: string): P
   );
 }
 
+/** RMV policy: ocular visits are on mainland Luzon only (no ferry, boat, or plane). */
+export const MAINLAND_LUZON_ONLY_MESSAGE = 'Ocular visits are available within mainland Luzon only. Locations that need sea, ferry, or air travel are not accepted.';
+const NO_ROAD_NEAR_PIN_MESSAGE = 'No road was found near this pin. Move it to a road-accessible spot on mainland Luzon.';
+// Matnog, Sorsogon (about 12.58°N) is the southern tip of mainland Luzon. Everything further south
+// (Visayas, Mindanao, Palawan, Masbate) needs sea or air travel. Islands north of it without a road
+// link (Mindoro, Catanduanes, Polillo, Batanes, …) are caught by the ferry-free road route below.
+const MAINLAND_LUZON_MIN_LATITUDE = 12.5;
+// OpenRouteService error codes: 2009 = no route between the points, 2010 = no road near a point.
+const ORS_ROUTE_NOT_FOUND = 2009;
+const ORS_POINT_NOT_FOUND = 2010;
+
+function rejectNonMainlandLocation(): never {
+  throw AppError.badRequest(MAINLAND_LUZON_ONLY_MESSAGE, ErrorCode.FERRY_ROUTE_REJECTED);
+}
+
+export function assertMainlandLuzonLocation(location: LatLng) {
+  if (location.lat < MAINLAND_LUZON_MIN_LATITUDE) rejectNonMainlandLocation();
+}
+
+function orsErrorCode(error: unknown): number | undefined {
+  if (!axios.isAxiosError(error)) return undefined;
+  const code = (error.response?.data as { error?: { code?: unknown } } | undefined)?.error?.code;
+  return typeof code === 'number' ? code : undefined;
+}
+
 async function fetchDirections(origin: LatLng, destination: LatLng): Promise<DirectionsResult> {
   try {
     const response = await axios.post(
@@ -220,12 +245,8 @@ async function fetchDirections(origin: LatLng, destination: LatLng): Promise<Dir
       }>;
     };
 
-    if (!data.routes?.length || !data.routes[0].summary) {
-      throw AppError.badRequest(
-        'Unable to calculate route. Please select a different location.',
-        ErrorCode.NO_ROUTE_FOUND,
-      );
-    }
+    // Ferries are avoided, so "no route" means the place can only be reached by sea or air.
+    if (!data.routes?.length || !data.routes[0].summary) rejectNonMainlandLocation();
 
     const route = data.routes[0];
     const summary = route.summary;
@@ -242,6 +263,9 @@ async function fetchDirections(origin: LatLng, destination: LatLng): Promise<Dir
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const orsCode = orsErrorCode(error);
+    if (orsCode === ORS_ROUTE_NOT_FOUND) rejectNonMainlandLocation();
+    if (orsCode === ORS_POINT_NOT_FOUND) throw AppError.badRequest(NO_ROAD_NEAR_PIN_MESSAGE, ErrorCode.NO_ROUTE_FOUND);
     logger.error('OpenRouteService API error', { error });
     throw AppError.internal('Failed to compute route. Please try again later.');
   }
@@ -298,11 +322,25 @@ export async function computeRoute(customerLocation: LatLng) {
   };
 }
 
-export async function computeOcularFee(customerLocation: LatLng) {
-  // Validate Philippines bounds
+function assertPhilippinesLocation(customerLocation: LatLng) {
   if (customerLocation.lat < 4.5 || customerLocation.lat > 21.5 || customerLocation.lng < 116.0 || customerLocation.lng > 127.0) {
     throw AppError.badRequest('Location must be within the Philippines');
   }
+}
+
+/**
+ * Validates an ocular site before anything is saved: inside the Philippines, on mainland Luzon,
+ * and reachable by road without a ferry. The route is cached, so the fee computation reuses it.
+ */
+export async function assertOcularLocationAccepted(customerLocation: LatLng) {
+  assertPhilippinesLocation(customerLocation);
+  assertMainlandLuzonLocation(customerLocation);
+  await computeRoute(customerLocation);
+}
+
+export async function computeOcularFee(customerLocation: LatLng) {
+  assertPhilippinesLocation(customerLocation);
+  assertMainlandLuzonLocation(customerLocation);
 
   const settings = await getOcularSettings();
   const origin = { lat: settings.shopLatitude, lng: settings.shopLongitude };

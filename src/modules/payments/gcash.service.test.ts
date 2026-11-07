@@ -46,7 +46,7 @@ function payment(overrides = {}) {
     evidenceTrail: [{ version: 1, source: 'customer_gcash_submission' }],
     save: vi.fn().mockResolvedValue(undefined), $session: vi.fn(), ...overrides };
 }
-const submission = { bookingId, referenceNumber: '1234567890123' };
+const submission = { bookingId, referenceNumber: '1234567890123', acknowledgeNonRefundable: true };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -67,6 +67,10 @@ describe('GCash request validation', () => {
     expect(gcashTargetSchema.safeParse({ bookingId, stageId: 'stage-1' }).success).toBe(false);
     expect(submitGcashSchema.safeParse(submission).success).toBe(true);
     expect(submitGcashSchema.safeParse({ ...submission, referenceNumber: '' }).success).toBe(false);
+  });
+  it('requires the non-refundable acknowledgment only for ocular fee (booking) payments', () => {
+    expect(submitGcashSchema.safeParse({ ...submission, acknowledgeNonRefundable: undefined }).success).toBe(false);
+    expect(submitGcashSchema.safeParse({ stageId: 'stage-1', referenceNumber: '1234567890123' }).success).toBe(true);
   });
   it('removes client-supplied payment status, amounts and payment date', () => {
     expect(submitGcashSchema.parse({ ...submission, paymentStatus: 'paid', amountRequired: 1, amountPaid: 1, paymentDate: '2020-01-01T00:00:00Z' })).toEqual(submission);

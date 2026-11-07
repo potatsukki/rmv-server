@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { recordDesignFeeSchema } from '../projects/projects.validation.js';
 import * as ctrl from './blueprints.controller.js';
 import { authenticate } from '../../middleware/auth.js';
 import { authorize } from '../../middleware/rbac.js';
@@ -47,6 +48,15 @@ router.post(
   authorize(Role.CUSTOMER),
   validate(requestRevisionSchema),
   ctrl.requestRevision,
+);
+
+// ── Cashier: record the paid revision fee ──
+router.post(
+  '/:id/revision-fee/record',
+  authenticate,
+  authorize(Role.CASHIER, Role.ADMIN),
+  validate(recordDesignFeeSchema),
+  ctrl.recordRevisionFee,
 );
 
 router.post(

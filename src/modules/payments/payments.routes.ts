@@ -5,7 +5,8 @@ import { authorize } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { Role } from '../../utils/constants.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
-import { gcashTargetSchema, submitGcashSchema } from './gcash.validation.js';
+import { gcashTargetSchema, selectCashSchema, submitGcashSchema } from './gcash.validation.js';
+import { recordOcularFeeNonRefundableAck } from '../appointments/appointments.service.js';
 import { getGcashContext, submitGcash, reviewGcash, selectCash } from './gcash.service.js';
 import { listGcashPayments, listPendingPayments, type GcashQueueFilter } from './payments.service.js';
 import {
@@ -26,13 +27,15 @@ router.get('/gcash/queue', authenticate, authorize(Role.CASHIER), asyncHandler(a
   const filter = GCASH_QUEUE_FILTERS.find((value) => value === req.query.filter) ?? 'pending';
   res.json({ success: true, data: await listGcashPayments(filter, req.query as { page?: string; limit?: string }) });
 }));
-router.post('/gcash/cash', authenticate, authorize(Role.CUSTOMER), validate(gcashTargetSchema), asyncHandler(async (req, res) => {
+router.post('/gcash/cash', authenticate, authorize(Role.CUSTOMER), validate(selectCashSchema), asyncHandler(async (req, res) => {
+  if (req.body.bookingId) await recordOcularFeeNonRefundableAck(req.body.bookingId, req.userId!);
   res.json({ success: true, data: await selectCash(req.body, req.userId!) });
 }));
 router.get('/gcash/context', authenticate, authorize(Role.CUSTOMER), validate(gcashTargetSchema, 'query'), asyncHandler(async (req, res) => {
   res.json({ success: true, data: await getGcashContext(gcashTargetSchema.parse(req.query), req.userId!) });
 }));
 router.post('/gcash/submit', authenticate, authorize(Role.CUSTOMER), validate(submitGcashSchema), asyncHandler(async (req, res) => {
+  if (req.body.bookingId) await recordOcularFeeNonRefundableAck(req.body.bookingId, req.userId!);
   res.status(201).json({ success: true, data: await submitGcash(req.body, req.userId!) });
 }));
 router.post('/gcash/:id/approve', authenticate, authorize(Role.CASHIER), validate(verifyPaymentSchema), asyncHandler(async (req, res) => {

@@ -30,6 +30,19 @@ export interface IBlueprint extends Document {
   revisionNotes?: string; // Customer's revision request notes
   revisionComponent?: 'blueprint' | 'costing';
   revisionRefKeys: string[]; // Customer's reference file attachments
+  /** Paid revision fee for a request beyond the free revisions, set on the version that was revised. */
+  revisionFee?: {
+    amount: number;
+    status: 'pending' | 'verified';
+    revisionNumber: number;
+    acknowledgedAt?: Date;
+    paidAt?: Date;
+    method?: string;
+    referenceNumber?: string;
+    paymentId?: Types.ObjectId;
+    receiptNumber?: string;
+    recordedBy?: Types.ObjectId;
+  };
   quotationReviewStatus: QuotationReviewStatus;
   quotationReviewedBy?: Types.ObjectId;
   quotationReviewedAt?: Date;
@@ -109,6 +122,21 @@ const blueprintSchema = new Schema<IBlueprint>(
     revisionNotes: { type: String },
     revisionComponent: { type: String, enum: ['blueprint', 'costing'] },
     revisionRefKeys: [{ type: String }],
+    revisionFee: {
+      type: new Schema({
+        amount: { type: Number, required: true, min: 0 },
+        status: { type: String, enum: ['pending', 'verified'], required: true },
+        revisionNumber: { type: Number, required: true, min: 1 },
+        acknowledgedAt: Date,
+        paidAt: Date,
+        method: String,
+        referenceNumber: { type: String, trim: true },
+        paymentId: { type: Schema.Types.ObjectId, ref: 'Payment' },
+        receiptNumber: String,
+        recordedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      }, { _id: false }),
+      default: undefined,
+    },
     quotationReviewStatus: {
       type: String,
       enum: ['draft', 'for_review', 'approved', 'sent_to_customer'],
