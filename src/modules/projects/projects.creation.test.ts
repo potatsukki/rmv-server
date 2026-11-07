@@ -286,9 +286,20 @@ describe('markOcularDone', () => {
     expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
-  it('needs every ocular report submitted', async () => {
+  it('needs at least one submitted ocular report', async () => {
     reports[0].status = 'draft';
     await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit all ocular reports');
+  });
+
+  it('ignores untouched draft reports once the ocular report is submitted', async () => {
+    reports.push({ _id: 'report-2', serviceType: 'railings', visitType: 'ocular', status: 'draft', specifications: {}, photoKeys: [], save: vi.fn() });
+    const project = await markOcularDone('project-1', actorId, [Role.SALES_STAFF]);
+    expect(project).toMatchObject({ status: ProjectStatus.SUBMITTED, visitReportId: 'report-1' });
+  });
+
+  it('names a started draft report that still needs submitting', async () => {
+    reports.push({ _id: 'report-2', serviceType: 'railings', visitType: 'ocular', status: 'draft', notes: 'Measured stairs', save: vi.fn() });
+    await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit the remaining ocular report before marking the ocular visit as done: Railings');
   });
 
   it('only lets the assigned sales staff mark it done', async () => {

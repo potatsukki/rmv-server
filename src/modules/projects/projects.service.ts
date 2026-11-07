@@ -1067,6 +1067,26 @@ export async function scheduleProjectOcular(
   return project;
 }
 
+const SERVICE_TYPE_LABEL: Record<string, string> = {
+  railings: 'Railings', grills: 'Grills', gates: 'Gates', fences: 'Fences', kitchen_counter: 'Kitchen Counter',
+  kitchen_cabinet: 'Kitchen Cabinet', table: 'Table', chair: 'Chair', shelving: 'Shelving', door: 'Door',
+  window_frame: 'Window Frame', canopy: 'Canopy', staircase: 'Staircase', balustrade: 'Balustrade', signage: 'Signage',
+};
+
+function hasValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>).some(hasValue);
+  if (typeof value === 'string') return value.trim().length > 0;
+  return value !== undefined && value !== null && value !== false;
+}
+
+/** Whether the sales staff entered anything on a visit report. */
+function reportHasDetails(report: Record<string, any>): boolean {
+  return ['lineItems', 'measurements', 'siteConditions', 'materials', 'finishes', 'preferredDesign', 'customerRequirements',
+    'notes', 'specifications', 'discussionNotes', 'photoKeys', 'videoKeys', 'sketchKeys', 'referenceImageKeys']
+    .some((key) => hasValue(typeof report.toObject === 'function' ? report.toObject()[key] : report[key]));
+}
+
 // ── Done Ocular (sales staff): DRAFT "For Ocular" → SUBMITTED "For Review" ──
 export async function markOcularDone(
   projectId: string,
@@ -1091,8 +1111,17 @@ export async function markOcularDone(
   if (!ocular || ocular.status !== AppointmentStatus.COMPLETED) {
     throw AppError.badRequest('An ocular visit is needed. Finish the ocular visit and submit its report first.');
   }
-  const reports = await VisitReport.find({ appointmentId: ocular._id }).sort({ createdAt: 1 });
-  if (!reports.length || reports.some((report) => ![VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED].includes(report.status))) {
+  const allReports = await VisitReport.find({ appointmentId: ocular._id }).sort({ createdAt: 1 });
+  const isSubmitted = (report: { status: string }) => [VisitReportStatus.SUBMITTED, VisitReportStatus.COMPLETED].includes(report.status as VisitReportStatus);
+  // Untouched drafts (e.g. placeholders the system created per service) don't block Done Ocular;
+  // only drafts the sales staff actually started must be submitted.
+  const pendingReports = allReports.filter((report) => !isSubmitted(report) && reportHasDetails(report));
+  const reports = allReports.filter(isSubmitted);
+  if (pendingReports.length) {
+    const items = [...new Set(pendingReports.map((report) => SERVICE_TYPE_LABEL[report.serviceType as string] || report.serviceTypeCustom || 'Custom'))];
+    throw AppError.badRequest(`Submit the remaining ocular report before marking the ocular visit as done: ${items.join(', ')}`);
+  }
+  if (!reports.length) {
     throw AppError.badRequest('Submit all ocular reports before marking the ocular visit as done');
   }
 
