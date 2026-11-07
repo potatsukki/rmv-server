@@ -1769,10 +1769,14 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (![AppointmentAttendanceStatus.IN_PROGRESS, AppointmentAttendanceStatus.COMPLETED]
-      .includes(attendanceStatus)) {
+    if (![
+      AppointmentAttendanceStatus.ON_TIME,
+      AppointmentAttendanceStatus.LATE_ARRIVAL,
+      AppointmentAttendanceStatus.IN_PROGRESS,
+      AppointmentAttendanceStatus.COMPLETED,
+    ].includes(attendanceStatus)) {
       throw AppError.badRequest(
-        'Wait until the scheduled consultation begins before submitting the consultation report.',
+        'Check in the customer before submitting the consultation report.',
         ErrorCode.VALIDATION_ERROR,
       );
     }
