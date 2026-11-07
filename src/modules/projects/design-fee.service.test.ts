@@ -69,6 +69,7 @@ import {
   prepareRevisionFee,
   recordDesignFeePayment,
   recordRevisionFeePayment,
+  assertQuotationCoversDesignFee,
 } from './design-fee.service.js';
 import { PaymentMethod } from '../../utils/constants.js';
 
@@ -285,5 +286,23 @@ describe('project fee summary', () => {
     const summary = await getProjectFeeSummary('project-1');
 
     expect(summary).toMatchObject({ projectCost: null, totalAmountDue: 350, paymentsReceived: 350, remainingBalance: 0 });
+  });
+});
+
+describe('assertQuotationCoversDesignFee', () => {
+  const paidFee = { designFee: { status: 'verified', amount: 1000 } };
+
+  it('rejects a quotation lower than the design fee', () => {
+    expect(() => assertQuotationCoversDesignFee(500, paidFee)).toThrow('lower than the ₱1,000.00 design fee');
+  });
+
+  it('allows a quotation at or above the design fee', () => {
+    expect(() => assertQuotationCoversDesignFee(1000, paidFee)).not.toThrow();
+    expect(() => assertQuotationCoversDesignFee(1500, paidFee)).not.toThrow();
+  });
+
+  it('ignores projects without a charged design fee', () => {
+    expect(() => assertQuotationCoversDesignFee(500, {})).not.toThrow();
+    expect(() => assertQuotationCoversDesignFee(500, { designFee: { status: 'not_charged', amount: 1000 } })).not.toThrow();
   });
 });

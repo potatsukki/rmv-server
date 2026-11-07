@@ -4,6 +4,7 @@ import {
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   assertDesignFeeAllowsBlueprint, assertRevisionFeeAllowsWork, notifyRevisionFeeDue, prepareRevisionFee,
+  assertQuotationCoversDesignFee,
 } from '../projects/design-fee.service.js';
 import {
   BlueprintStatus, BlueprintComponent, ProjectStatus,
@@ -1226,6 +1227,7 @@ export async function approveAndSendQuotation(
 
   const project = await Project.findById(blueprint.projectId);
   if (!project) throw AppError.notFound('Project not found');
+  assertQuotationCoversDesignFee(Number(blueprint.quotation.total), project);
 
   blueprint.quotationReviewStatus = 'sent_to_customer';
   blueprint.quotationReviewedBy = adminId as any;

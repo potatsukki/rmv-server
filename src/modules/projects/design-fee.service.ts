@@ -192,6 +192,23 @@ export function assertDesignFeeAllowsBlueprint(project: { designFee?: { status?:
   }
 }
 
+const peso = (value: number) => `₱${value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** A quotation below the design fee would be fully covered by the credit, leaving nothing to pay. */
+export function assertQuotationCoversDesignFee(
+  quotationTotal: number,
+  project: { designFee?: { status?: string; amount?: number } | null },
+) {
+  const fee = project.designFee;
+  if (!fee || ['not_required', 'not_charged'].includes(String(fee.status)) || !(Number(fee.amount) > 0)) return;
+  if (quotationTotal < Number(fee.amount)) {
+    throw AppError.badRequest(
+      `The quotation (${peso(quotationTotal)}) is lower than the ${peso(Number(fee.amount))} design fee. Update the costing to at least the design fee before sending it to the customer.`,
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+}
+
 /** Customer confirms in the app that the design fee is non-refundable. */
 export async function acknowledgeDesignFee(projectId: string, customerId: string) {
   const project = await Project.findById(projectId);
