@@ -162,7 +162,7 @@ export async function openDesignFee(projectId: string | Types.ObjectId) {
     project.customerId,
     NotificationCategory.PAYMENT,
     'Design Fee Due',
-    `A non-refundable design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. It will be deducted once from your total project cost.`,
+    `A non-refundable design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. Pay it from the Payments tab or at the RMV cashier. It is a separate fee and is not deducted from the project cost.`,
     `/projects/${project._id}/payments`,
   );
   await notifyRole(
@@ -187,23 +187,6 @@ export function assertDesignFeeAllowsBlueprint(project: { designFee?: { status?:
   if (project.designFee?.status === 'pending') {
     throw AppError.badRequest(
       'The design fee must be paid and verified by the cashier before the blueprint starts',
-      ErrorCode.VALIDATION_ERROR,
-    );
-  }
-}
-
-const peso = (value: number) => `₱${value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-/** A quotation below the design fee would be fully covered by the credit, leaving nothing to pay. */
-export function assertQuotationCoversDesignFee(
-  quotationTotal: number,
-  project: { designFee?: { status?: string; amount?: number } | null },
-) {
-  const fee = project.designFee;
-  if (!fee || ['not_required', 'not_charged'].includes(String(fee.status)) || !(Number(fee.amount) > 0)) return;
-  if (quotationTotal < Number(fee.amount)) {
-    throw AppError.badRequest(
-      `The quotation (${peso(quotationTotal)}) is lower than the ${peso(Number(fee.amount))} design fee. Update the costing to at least the design fee before sending it to the customer.`,
       ErrorCode.VALIDATION_ERROR,
     );
   }
@@ -241,6 +224,9 @@ export async function recordDesignFeePayment(
         : 'This project has no design fee waiting for payment',
       ErrorCode.DUPLICATE_ENTRY,
     );
+  }
+  if (await Payment.exists({ stageId: `${DESIGN_FEE_STAGE_PREFIX}${projectId}`, paymentStatus: 'pending_verification' })) {
+    throw AppError.conflict('The customer sent a GCash payment for this design fee. Verify or reject it in the cashier queue first.');
   }
   const alreadyAcknowledged = Boolean(existing.designFee.acknowledgedAt);
   if (!alreadyAcknowledged && !input.customerAcknowledgedInPerson) {
@@ -293,7 +279,7 @@ export async function recordDesignFeePayment(
     project.customerId,
     NotificationCategory.PAYMENT,
     'Design Fee Received',
-    `Your design fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. It will be deducted from your total project cost.`,
+    `Your design fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. The engineer can now start your blueprint.`,
     `/projects/${project._id}/payments`,
   );
   await notifyRole(
@@ -305,6 +291,38 @@ export async function recordDesignFeePayment(
   );
 
   return { project, payment, receiptNumber };
+}
+
+/** Cashier approved the customer's online (GCash) design fee payment. */
+export async function completeDesignFeeOnlinePayment(
+  projectId: string | Types.ObjectId,
+  payment: { _id: Types.ObjectId; method: string; referenceNumber?: string; receiptNumber?: string; verifiedAt?: Date },
+  cashierId: string,
+) {
+  const project = await Project.findOneAndUpdate(
+    { _id: projectId, 'designFee.status': 'pending' },
+    {
+      $set: {
+        'designFee.status': 'verified',
+        'designFee.paidAt': payment.verifiedAt || new Date(),
+        'designFee.method': payment.method,
+        'designFee.referenceNumber': payment.referenceNumber,
+        'designFee.paymentId': payment._id,
+        'designFee.recordedBy': cashierId,
+        'designFee.receiptNumber': payment.receiptNumber,
+      },
+    },
+    { new: true },
+  );
+  if (!project) return null;
+  await notifyRole(
+    Role.ENGINEER,
+    NotificationCategory.PROJECT,
+    'Design Fee Paid',
+    `The design fee for "${project.title}" is paid. The blueprint can start.`,
+    `/projects/${project._id}`,
+  );
+  return project;
 }
 
 // ── Revision fee: requests beyond the free revisions cost a fee, paid before the engineer revises ──
@@ -534,15 +552,8 @@ export async function applyFeeCreditsToNewPlans<T extends PlanLike>(projectId: s
   first.baseAmount ??= roundMoney(first.totalAmount / multiplier);
 
   const { ocularFeeOnProceed } = await getFeePolicyConfig();
-
-  const designClaim = await Project.findOneAndUpdate(
-    { _id: projectId, 'designFee.status': 'verified', 'designFee.creditedPlanId': { $exists: false } },
-    { $set: { 'designFee.creditedPlanId': first._id } },
-    { new: true },
-  );
-  if (designClaim?.designFee?.amount) {
-    first.designFeeCredit = applyCreditBeforeSurcharge(first, designClaim.designFee.amount);
-  }
+  // The design fee is a separate payment made before the blueprint; it is no longer deducted
+  // from the project cost. Plans credited before this change keep their designFeeCredit.
 
   if (ocularFeeOnProceed === 'credit') {
     const project = await Project.findById(projectId).select('ocularAppointmentId appointmentId ocularFeeCreditedPlanId');
@@ -600,8 +611,8 @@ export async function getProjectFeeSummary(projectId: string) {
   const designAmount = designCharged ? roundMoney(project.designFee?.amount || 0) : 0;
   const designPaid = designStatus === 'verified' ? designAmount : 0;
   const planDesignCredit = roundMoney(plans.reduce((sum, plan) => sum + (plan.designFeeCredit || 0), 0));
-  // Before a plan exists the paid fee is shown as the credit the customer will receive.
-  const designFeeCredit = plans.length ? planDesignCredit : designPaid;
+  // Only older plans carry a design fee credit; the fee is now paid separately.
+  const designFeeCredit = planDesignCredit;
 
   const ocularAmount = roundMoney(ocular?.ocularFee || 0);
   const ocularApplies = ocularAmount > 0;
