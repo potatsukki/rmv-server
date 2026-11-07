@@ -95,6 +95,7 @@ async function issueQueueNumber(appointment: any, issuedAt: Date) {
 const APPOINTMENT_QUEUE_RECENT_DAYS = 14;
 const APPOINTMENT_QUEUE_ACTIONABLE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
+  AppointmentStatus.ASSIGNED,
   AppointmentStatus.CONFIRMED,
   AppointmentStatus.PREPARING,
   AppointmentStatus.ON_THE_WAY,
@@ -110,6 +111,7 @@ const APPOINTMENT_QUEUE_RECENT_STATUSES: AppointmentStatus[] = [
 ];
 const APPOINTMENT_REASSIGNABLE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
+  AppointmentStatus.ASSIGNED,
   AppointmentStatus.CONFIRMED,
   AppointmentStatus.PREPARING,
   AppointmentStatus.ON_THE_WAY,
@@ -121,6 +123,7 @@ const APPOINTMENT_REASSIGNABLE_STATUSES: AppointmentStatus[] = [
 // Matches the window the customer "Reschedule" button is shown in on the frontend.
 const RESCHEDULABLE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
+  AppointmentStatus.ASSIGNED,
   AppointmentStatus.CONFIRMED,
   AppointmentStatus.PREPARING,
 ];
@@ -263,12 +266,19 @@ async function getConfigValue<T>(key: string, defaultVal: T): Promise<T> {
   return config ? (config.value as T) : defaultVal;
 }
 
+// Completed appointments whose consultation did not actually lead anywhere.
+const CLOSED_WITHOUT_CONSULTATION_ATTENDANCE = [
+  AppointmentAttendanceStatus.NO_SHOW,
+  AppointmentAttendanceStatus.CUSTOMER_DECLINED,
+];
+
 async function getLatestEligibleConsultationForOcular(customerId: string) {
   const consultation = await Appointment.findOne({
     customerId,
     type: AppointmentType.OFFICE,
     salesStaffId: { $exists: true },
     status: AppointmentStatus.COMPLETED,
+    attendanceStatus: { $nin: CLOSED_WITHOUT_CONSULTATION_ATTENDANCE },
   }).sort({ createdAt: -1 });
 
   if (!consultation) return null;
@@ -394,7 +404,7 @@ function assertAttendanceTransition(
 async function assertNoActiveAppointment(customerId: string): Promise<void> {
   const active = await Appointment.findOne({
     customerId,
-    status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULE_REQUESTED] },
+    status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.ASSIGNED, AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULE_REQUESTED] },
   });
   if (active) {
     throw AppError.conflict(
@@ -931,24 +941,28 @@ export async function reassignAppointmentSales(
   }
 
   const wasRequested = appointment.status === AppointmentStatus.REQUESTED;
-  // Assigning sales staff to a brand-new office request confirms it immediately —
-  // the sales staff no longer has to separately accept or decline the assignment.
-  const confirmsOfficeAppointment = wasRequested && appointment.type === AppointmentType.OFFICE;
+  // Office flow: Requested -> Assigned (staff assigned) -> Confirmed (staff accepts).
+  // Assigning or reassigning before acceptance keeps the appointment in Assigned.
+  const awaitingSalesAcceptance = appointment.type === AppointmentType.OFFICE
+    && (wasRequested || appointment.status === AppointmentStatus.ASSIGNED);
+  const isFirstAssignment = wasRequested && appointment.type === AppointmentType.OFFICE;
 
   appointment.salesStaffId = nextSalesStaff._id;
-  if (confirmsOfficeAppointment) {
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
-    appointment.status = AppointmentStatus.CONFIRMED;
-    appointment.confirmedBy = actorId as unknown as Types.ObjectId;
+  if (awaitingSalesAcceptance) {
+    if (wasRequested) {
+      appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.ASSIGNED);
+    }
+    appointment.status = AppointmentStatus.ASSIGNED;
+    appointment.assignedBy = actorId as unknown as Types.ObjectId;
   }
   await appointment.save();
 
-  const ownershipSync = wasRequested
+  const ownershipSync = wasRequested || awaitingSalesAcceptance
     ? { draftVisitReportsUpdated: 0, projectsUpdated: 0 }
     : await syncDraftOwnershipForReassignment(appointment._id, nextSalesStaff._id);
 
   await AuditLog.create({
-    action: confirmsOfficeAppointment ? AuditAction.APPOINTMENT_CONFIRMED : AuditAction.SALES_ASSIGNED,
+    action: AuditAction.SALES_ASSIGNED,
     actorId,
     targetType: 'appointment',
     targetId: appointment._id,
@@ -957,21 +971,21 @@ export async function reassignAppointmentSales(
       previousSalesStaffId: previousSalesStaffId || null,
       salesStaffId: input.salesStaffId,
       reason: input.reason || null,
+      status: appointment.status,
       ...ownershipSync,
     },
     ipAddress: ip,
     userAgent: ua,
   });
 
+  const needsReview = awaitingSalesAcceptance || wasRequested;
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
-    confirmsOfficeAppointment ? 'Appointment Assigned' : (wasRequested ? 'Appointment Review Required' : 'Appointment Reassigned'),
-    confirmsOfficeAppointment
-      ? `You have been assigned and confirmed for the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`
-      : wasRequested
-        ? `Please review the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} and accept or decline it.`
-        : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
+    needsReview ? 'Appointment Review Required' : 'Appointment Reassigned',
+    needsReview
+      ? `You have been assigned to the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. Please accept or decline it.`
+      : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
     `/appointments/${appointment._id}`,
   );
 
@@ -986,12 +1000,12 @@ export async function reassignAppointmentSales(
     );
   }
 
-  if (confirmsOfficeAppointment) {
+  if (isFirstAssignment) {
     await createAndSendNotification(
       appointment.customerId,
       NotificationCategory.APPOINTMENT,
-      'Appointment Confirmed',
-      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed.`,
+      'Sales Staff Assigned',
+      `A sales staff has been assigned to your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. You will be notified once it is confirmed.`,
       `/appointments/${appointment._id}`,
     );
   } else if (!wasRequested) {
@@ -1023,11 +1037,16 @@ export async function reviewAssignedAppointment(
     throw AppError.badRequest('Ocular appointments are confirmed through the ocular finalization flow');
   }
 
-  if (appointment.status !== AppointmentStatus.REQUESTED || appointment.salesStaffId?.toString() !== salesStaffId) {
-    throw AppError.forbidden('Only the assigned sales staff can review this pending appointment');
+  if (appointment.salesStaffId?.toString() !== salesStaffId) {
+    throw AppError.forbidden('Only the assigned sales staff can review this appointment');
+  }
+  if (appointment.status !== AppointmentStatus.ASSIGNED) {
+    throw AppError.badRequest('This appointment is not waiting for your confirmation');
   }
 
   if (input.decision === 'decline') {
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.REQUESTED);
+    appointment.status = AppointmentStatus.REQUESTED;
     appointment.salesStaffId = undefined;
     if (input.reason) appointment.internalNotes = input.reason;
     await appointment.save();
@@ -1129,7 +1148,7 @@ export async function submitSiteDetails(
   }
 
   // Customers can finish the custom brief before or shortly after staff confirmation.
-  if (![AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED].includes(appointment.status)) {
+  if (![AppointmentStatus.REQUESTED, AppointmentStatus.ASSIGNED, AppointmentStatus.CONFIRMED].includes(appointment.status)) {
     throw AppError.badRequest('Site details can only be submitted before the consultation begins');
   }
 
@@ -1932,9 +1951,17 @@ export async function markNoShow(
     throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
   }
 
-  appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.NO_SHOW);
-
-  appointment.status = AppointmentStatus.NO_SHOW;
+  if (appointment.type === AppointmentType.OFFICE) {
+    // Office consultations close as completed; attendanceStatus keeps the no-show outcome.
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
+    appointment.status = AppointmentStatus.COMPLETED;
+    appointment.attendanceStatus = AppointmentAttendanceStatus.NO_SHOW;
+    appointment.attendanceUpdatedAt = new Date();
+    appointment.consultationCompletedAt = new Date();
+  } else {
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.NO_SHOW);
+    appointment.status = AppointmentStatus.NO_SHOW;
+  }
   if (internalNotes) appointment.internalNotes = internalNotes;
   await appointment.save();
 
@@ -2012,10 +2039,12 @@ export async function updateConsultationAttendance(
       throw AppError.badRequest('No-show attendance requires notes', ErrorCode.VALIDATION_ERROR);
     }
     nextStatus = AppointmentAttendanceStatus.NO_SHOW;
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.NO_SHOW);
-    appointment.status = AppointmentStatus.NO_SHOW;
+    // The appointment closes as completed; attendanceStatus keeps the no-show outcome.
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
+    appointment.status = AppointmentStatus.COMPLETED;
     appointment.internalNotes = input.notes.trim();
-    changes.appointmentStatus = AppointmentStatus.NO_SHOW;
+    appointment.consultationCompletedAt = now;
+    changes.appointmentStatus = AppointmentStatus.COMPLETED;
   } else if (input.action === 'customer_declined') {
     if (!input.notes?.trim()) {
       throw AppError.badRequest('Customer declined attendance requires notes', ErrorCode.VALIDATION_ERROR);
@@ -3510,15 +3539,23 @@ export async function listAppointments(query: {
   if (query.status) {
     const statuses = query.status.split(',').map((status) => status.trim()).filter(Boolean);
     const includesReadyForOcular = statuses.includes(AppointmentStatus.READY_FOR_OCULAR);
-    const directStatuses = includesReadyForOcular
-      ? statuses.filter((status) => status !== AppointmentStatus.READY_FOR_OCULAR)
-      : statuses;
+    // No-show consultations now close as completed with attendanceStatus no_show.
+    const includesNoShow = statuses.includes(AppointmentStatus.NO_SHOW);
+    const directStatuses = statuses.filter(
+      (status) => status !== AppointmentStatus.READY_FOR_OCULAR && status !== AppointmentStatus.NO_SHOW,
+    );
 
-    if (includesReadyForOcular) {
-      const statusFilters: Record<string, unknown>[] = [
-        { status: AppointmentStatus.READY_FOR_OCULAR },
-        DERIVED_READY_FOR_OCULAR_FILTER,
-      ];
+    if (includesReadyForOcular || includesNoShow) {
+      const statusFilters: Record<string, unknown>[] = [];
+      if (includesReadyForOcular) {
+        statusFilters.push({ status: AppointmentStatus.READY_FOR_OCULAR }, DERIVED_READY_FOR_OCULAR_FILTER);
+      }
+      if (includesNoShow) {
+        statusFilters.push(
+          { status: AppointmentStatus.NO_SHOW },
+          { attendanceStatus: AppointmentAttendanceStatus.NO_SHOW },
+        );
+      }
 
       if (directStatuses.length > 0) {
         statusFilters.push({ status: { $in: directStatuses } });
@@ -3556,8 +3593,8 @@ export async function listAppointments(query: {
       Project.distinct('ocularAppointmentId', projectFilter),
     ]);
     appendAndFilter(filter, { _id: { $nin: [...sourceIds, ...ocularIds].filter(Boolean) } });
-    // A customer-declined consultation is recorded as completed but must not start a project.
-    appendAndFilter(filter, { attendanceStatus: { $ne: AppointmentAttendanceStatus.CUSTOMER_DECLINED } });
+    // No-show and customer-declined consultations are recorded as completed but must not start a project.
+    appendAndFilter(filter, { attendanceStatus: { $nin: CLOSED_WITHOUT_CONSULTATION_ATTENDANCE } });
   }
 
   const sortField = query.sortBy;

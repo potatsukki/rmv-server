@@ -20,6 +20,7 @@ import {
   selectPaymentPlanSchema,
   submitProjectReviewSchema,
   skipProjectReviewSchema,
+  recordDesignFeeSchema,
 } from './projects.validation.js';
 
 const router = Router();
@@ -203,6 +204,28 @@ router.post(
   authorize(Role.CUSTOMER, Role.ADMIN),
   validate(skipProjectReviewSchema),
   ctrl.skipProjectReview,
+);
+
+// ── Fees ──
+router.get(
+  '/design-fees/pending',
+  authenticate,
+  authorize(Role.CASHIER, Role.ADMIN),
+  ctrl.listPendingDesignFees,
+);
+
+router.get(
+  '/:id/fee-summary',
+  authenticate,
+  ctrl.getProjectFeeSummary,
+);
+
+router.post(
+  '/:id/design-fee/record',
+  authenticate,
+  authorize(Role.CASHIER, Role.ADMIN),
+  validate(recordDesignFeeSchema),
+  ctrl.recordDesignFee,
 );
 
 // ── Read ──

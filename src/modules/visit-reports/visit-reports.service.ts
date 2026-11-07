@@ -1877,6 +1877,13 @@ export async function submitReport(
   }
 
   if (isConsultationReport) {
+    // Submitting the consultation report is what finishes the consultation.
+    const finishedAt = new Date();
+    appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
+    appt.consultationStartedAt ||= finishedAt;
+    appt.consultationCompletedAt = finishedAt;
+    appt.attendanceUpdatedAt = finishedAt;
+
     // Record the consultation outcome independently of project creation.
     const serviceLabel = report.serviceTypeCustom || report.serviceType || 'General Fabrication';
     const formatOcularSlot = (slot: string) => {

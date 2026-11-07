@@ -2,6 +2,9 @@ import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as projectsService from './projects.service.js';
 import { maskProjectTotalCostForActor } from './projects.list-policy.js';
+import * as designFeeService from './design-fee.service.js';
+import { Role } from '../../utils/constants.js';
+import { AppError } from '../../utils/appError.js';
 
 function serializeProjectForActor(project: any, req: Request) {
   if (!project || typeof project !== 'object') return project;
@@ -229,4 +232,36 @@ export const skipProjectReview = asyncHandler(async (req: Request, res: Response
     req.get('user-agent'),
   );
   res.json({ success: true, data: serializeProjectForActor(project, req) });
+});
+
+// ── Fees: design fee + ocular fee breakdown ──
+
+const FEE_SUMMARY_STAFF_ROLES = [Role.ADMIN, Role.CASHIER, Role.SALES_STAFF];
+
+export const getProjectFeeSummary = asyncHandler(async (req: Request, res: Response) => {
+  const roles = req.userRoles || [];
+  // Reuses the project access rules (customers only see their own project).
+  const project = await projectsService.getProjectById((req.params.id as string), req.userId!, roles);
+  const isStaff = roles.some((role) => FEE_SUMMARY_STAFF_ROLES.includes(role));
+  const customerId = String((project as any).customerId?._id || (project as any).customerId || '');
+  const isOwner = roles.includes(Role.CUSTOMER) && customerId === req.userId;
+  if (!isStaff && !isOwner) throw AppError.forbidden('Only the customer, cashier, sales staff, or admin can view project fees');
+  const summary = await designFeeService.getProjectFeeSummary(req.params.id as string);
+  res.json({ success: true, data: summary });
+});
+
+export const recordDesignFee = asyncHandler(async (req: Request, res: Response) => {
+  const result = await designFeeService.recordDesignFeePayment(
+    req.params.id as string,
+    req.body,
+    req.userId!,
+    req.ip,
+    req.headers['user-agent'],
+  );
+  res.json({ success: true, data: result });
+});
+
+export const listPendingDesignFees = asyncHandler(async (_req: Request, res: Response) => {
+  const items = await designFeeService.listPendingDesignFees();
+  res.json({ success: true, data: items });
 });

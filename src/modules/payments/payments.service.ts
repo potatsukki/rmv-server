@@ -29,7 +29,7 @@ import type { Types } from 'mongoose';
 
 // ── Receipt PDF helper — generate, upload to R2, return key ──
 
-async function generateAndUploadReceipt(data: ReceiptData): Promise<{ key: string; buffer: Buffer }> {
+export async function generateAndUploadReceipt(data: ReceiptData): Promise<{ key: string; buffer: Buffer }> {
   try {
     const buf = await generateReceiptPdf(data);
     const key = `receipts/${uuidv4()}-${data.receiptNumber}.pdf`;
@@ -845,7 +845,9 @@ export async function getMyPaymentHistory(customerId: string) {
       method: p.method,
       referenceNumber: p.referenceNumber,
       receiptNumber: p.receiptNumber,
-      description: projectMap.get(p.projectId.toString()) || 'Project Payment',
+      description: p.stageId?.startsWith('design-fee-')
+        ? `Design Fee — ${projectMap.get(p.projectId.toString()) || 'Project'}`
+        : projectMap.get(p.projectId.toString()) || 'Project Payment',
       date: (p.createdAt as Date).toISOString(),
       declineReason: p.declineReason,
       rejectionReason: p.rejectionReason, duplicateReference: p.duplicateReference, rejectionSource: p.rejectionSource,
@@ -900,7 +902,7 @@ async function applyExcessCredit(plan: any, excessAmount: number): Promise<void>
   }
 }
 
-async function generateNextReceiptNumber(): Promise<string> {
+export async function generateNextReceiptNumber(): Promise<string> {
   const year = new Date().getFullYear();
   const counter = await ReceiptCounter.findOneAndUpdate(
     { year },

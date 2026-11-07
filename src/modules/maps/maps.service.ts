@@ -40,11 +40,14 @@ interface DirectionsResult {
   polyline?: string;
 }
 
+/** RMV policy: toll fees are shouldered by the company and never added to the ocular fee. */
+export const OCULAR_TOLL_NOTE = 'Toll fees are shouldered by RMV and are not added to the ocular fee.';
+
 const DEFAULT_SETTINGS: OcularSettings = {
   // Exact Plus Code: M3X3+RF4, Dahlia Ext, Quezon City, Metro Manila
   shopLatitude: 14.6995125,
   shopLongitude: 121.053703125,
-  baseCoveredKm: 10,
+  baseCoveredKm: 6,
   baseFee: 350,
   perKmRate: 60,
   maxDistanceKm: 100,
@@ -326,6 +329,7 @@ export async function computeOcularFee(customerLocation: LatLng) {
         additionalDistanceKm: 0,
         additionalFee: 0,
         total: 0,
+        tollNote: OCULAR_TOLL_NOTE,
       },
       config: {
         shopLatitude: settings.shopLatitude,
@@ -353,6 +357,7 @@ export async function computeOcularFee(customerLocation: LatLng) {
       additionalDistanceKm,
       additionalFee,
       total,
+      tollNote: OCULAR_TOLL_NOTE,
     },
     config: {
       shopLatitude: settings.shopLatitude,

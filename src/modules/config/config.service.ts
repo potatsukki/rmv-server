@@ -37,12 +37,39 @@ const PAYMENT_ACTIVATION_MAP = [null, 'assembly', 'quality_check'];
 const PAYMENT_HEADSUP_MAP = [null, 'material_prep', 'finishing'];
 
 /** Previously seeded defaults, replaced at startup only if an admin never changed them. */
-const SUPERSEDED_CONFIG_DEFAULTS: Array<[key: string, oldValue: unknown[], newValue: unknown[]]> = [
+const SUPERSEDED_CONFIG_DEFAULTS: Array<[key: string, oldValue: unknown, newValue: unknown]> = [
   ['installment_stage_labels', ['Down Payment', 'Mid-Project', 'Final Payment'], INSTALLMENT_STAGE_LABELS],
   ['installment_stage_descriptions', ['Initial payment before fabrication', 'Due when fabrication is complete', 'Due after installation & acceptance'], INSTALLMENT_STAGE_DESCRIPTIONS],
   ['payment_activation_map', [null, 'quality_check', 'done'], PAYMENT_ACTIVATION_MAP],
   ['payment_headsup_map', [null, 'finishing', 'ready_for_delivery'], PAYMENT_HEADSUP_MAP],
+  // RMV policy: the ₱350 outside-Metro-Manila minimum covers the first 6 km (was seeded as 10).
+  ['baseCoveredKm', 10, 6],
+  [
+    'ocular_fee_config',
+    { baseFee: 350, baseKm: 10, extraRatePerKm: 60, maxDistanceKm: 100 },
+    { baseFee: 350, baseKm: 6, extraRatePerKm: 60, maxDistanceKm: 100 },
+  ],
 ];
+
+/** Fixed design (layout and blueprint) service fee, credited once to the project cost. */
+export const DEFAULT_DESIGN_FEE_AMOUNT = 1000;
+/** How a paid outside-NCR ocular fee is treated when the project continues. */
+export const OCULAR_FEE_ON_PROCEED_OPTIONS = ['separate', 'credit'] as const;
+export type OcularFeeOnProceed = typeof OCULAR_FEE_ON_PROCEED_OPTIONS[number];
+
+export async function getFeePolicyConfig() {
+  const [designFeeAmount, ocularFeeOnProceed] = await Promise.all([
+    getConfigValue<number>('design_fee_amount', DEFAULT_DESIGN_FEE_AMOUNT),
+    getConfigValue<string>('ocular_fee_on_proceed', 'separate'),
+  ]);
+  const amount = Number(designFeeAmount);
+  return {
+    designFeeAmount: Number.isFinite(amount) && amount >= 0 ? amount : DEFAULT_DESIGN_FEE_AMOUNT,
+    ocularFeeOnProceed: (OCULAR_FEE_ON_PROCEED_OPTIONS as readonly string[]).includes(ocularFeeOnProceed)
+      ? ocularFeeOnProceed as OcularFeeOnProceed
+      : 'separate',
+  };
+}
 
 const HIGH_RISK_CONFIG_KEYS = new Set([
   'maintenance_mode',
@@ -128,6 +155,14 @@ export async function upsertConfig(
     const parsed = gcashSettingsSchema.safeParse(input.value);
     if (!parsed.success) throw AppError.badRequest('Invalid GCash account information');
     input.value = parsed.data;
+  }
+  if (key === 'ocular_fee_on_proceed' && !(OCULAR_FEE_ON_PROCEED_OPTIONS as readonly unknown[]).includes(input.value)) {
+    throw AppError.badRequest(`ocular_fee_on_proceed must be one of: ${OCULAR_FEE_ON_PROCEED_OPTIONS.join(', ')}`);
+  }
+  if (key === 'design_fee_amount') {
+    const amount = Number(input.value);
+    if (!Number.isFinite(amount) || amount < 0) throw AppError.badRequest('Design fee must be a number of 0 or more');
+    input.value = Math.round(amount * 100) / 100;
   }
   const hasPrevious = !!existing;
   const changed = !existing || !valuesEqual(existing.value, input.value) || existing.description !== input.description;
@@ -592,7 +627,7 @@ export async function seedDefaultConfigs(): Promise<void> {
     ocular_fee_config: {
       value: {
         baseFee: 350,
-        baseKm: 10,
+        baseKm: 6,
         extraRatePerKm: 60,
         maxDistanceKm: 100,
       },
@@ -607,7 +642,7 @@ export async function seedDefaultConfigs(): Promise<void> {
       description: 'Shop longitude used as routing origin for ocular visits',
     },
     baseCoveredKm: {
-      value: 10,
+      value: 6,
       description: 'Distance covered by the base ocular fee for outside-NCR visits',
     },
     baseFee: {
@@ -625,6 +660,14 @@ export async function seedDefaultConfigs(): Promise<void> {
     ncrPolygonFile: {
       value: 'src/modules/maps/data/ncr-boundary.json',
       description: 'GeoJSON file path used for NCR point-in-polygon validation',
+    },
+    design_fee_amount: {
+      value: DEFAULT_DESIGN_FEE_AMOUNT,
+      description: 'Design (layout and blueprint) service fee paid before the blueprint starts; credited once to the project cost',
+    },
+    ocular_fee_on_proceed: {
+      value: 'separate',
+      description: "Paid outside-NCR ocular fee when the project continues: 'separate' (charged on its own) or 'credit' (deducted from the amount due)",
     },
     installment_surcharge_percent: {
       value: 10,

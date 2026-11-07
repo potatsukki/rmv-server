@@ -60,18 +60,9 @@ export async function synchronizeConsultationAttendanceByTime(
   const window = getConsultationAttendanceWindow(appointment.date, appointment.slotCode);
   if (Number.isNaN(window.start.getTime())) return false;
 
-  // A testing bypass skips the scheduled slot, so it completes right away.
-  const isTestingBypass = appointment.attendanceOverrideReason === TESTING_BYPASS_REASON
-    && currentStatus === AppointmentAttendanceStatus.IN_PROGRESS;
-  if (isTestingBypass) {
-    appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
-    appointment.consultationStartedAt ||= now;
-    appointment.consultationCompletedAt = now;
-  } else if (now >= window.end) {
-    appointment.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
-    appointment.consultationStartedAt ||= window.start;
-    appointment.consultationCompletedAt = window.end;
-  } else if (now >= window.start && currentStatus !== AppointmentAttendanceStatus.IN_PROGRESS) {
+  // Time only starts a consultation. It is completed when the consultation report is
+  // submitted, never just because the one-hour slot has passed.
+  if (now >= window.start && currentStatus !== AppointmentAttendanceStatus.IN_PROGRESS) {
     appointment.attendanceStatus = AppointmentAttendanceStatus.IN_PROGRESS;
     appointment.consultationStartedAt ||= window.start;
   } else {

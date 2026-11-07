@@ -73,6 +73,8 @@ describe('appointment report submission without project creation', () => {
     await submitReport('report-1', 'sales-1');
     expect(report.status).toBe('submitted');
     expect(appointment.status).toBe('completed');
+    // Submitting the report is what finishes the consultation attendance.
+    expect(appointment).toMatchObject({ attendanceStatus: 'completed', consultationCompletedAt: expect.any(Date) });
     expect(appointment.save).toHaveBeenCalled();
     expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.projectFindOne).not.toHaveBeenCalled();

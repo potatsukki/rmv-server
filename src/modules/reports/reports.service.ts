@@ -4,7 +4,7 @@ import {
 } from '../../models/index.js';
 import {
   DeliveryType, ProjectStatus, PaymentStageStatus, FabricationStatus,
-  AppointmentStatus, AppointmentType, Role, AuditAction,
+  AppointmentStatus, AppointmentAttendanceStatus, AppointmentType, Role, AuditAction,
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
 import { activeProjectStatusesForRoles } from '../projects/projects.list-policy.js';
@@ -624,13 +624,19 @@ export async function getConversionReport(query: {
   const appointments = await Appointment.find(filter);
 
   const totalAppointments = appointments.length;
-  const completed = appointments.filter(a => a.status === AppointmentStatus.COMPLETED).length;
+  // No-show and declined consultations close as completed; attendanceStatus keeps the outcome.
+  const isNoShow = (a: (typeof appointments)[number]) => a.status === AppointmentStatus.NO_SHOW
+    || a.attendanceStatus === AppointmentAttendanceStatus.NO_SHOW;
+  const isHeldConsultation = (a: (typeof appointments)[number]) => a.status === AppointmentStatus.COMPLETED
+    && a.attendanceStatus !== AppointmentAttendanceStatus.NO_SHOW
+    && a.attendanceStatus !== AppointmentAttendanceStatus.CUSTOMER_DECLINED;
+  const completed = appointments.filter(isHeldConsultation).length;
   const cancelled = appointments.filter(a => a.status === AppointmentStatus.CANCELLED).length;
-  const noShow = appointments.filter(a => a.status === AppointmentStatus.NO_SHOW).length;
+  const noShow = appointments.filter(isNoShow).length;
 
   // Count how many completed appointments resulted in projects
   const completedIds = appointments
-    .filter(a => a.status === AppointmentStatus.COMPLETED)
+    .filter(isHeldConsultation)
     .map(a => a._id);
 
   const projectsCreated = await Project.countDocuments({
@@ -757,7 +763,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       Appointment.countDocuments({
         ...appointmentBaseFilter,
         date: todayStr,
-        status: { $in: [AppointmentStatus.CONFIRMED, AppointmentStatus.REQUESTED] },
+        status: { $in: [AppointmentStatus.CONFIRMED, AppointmentStatus.ASSIGNED, AppointmentStatus.REQUESTED] },
       }).exec(),
       Project.countDocuments({
         deletedAt: null,
