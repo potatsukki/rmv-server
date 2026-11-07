@@ -1168,6 +1168,29 @@ export async function markOcularDone(
   return updated;
 }
 
+/**
+ * There is no Done Ocular button: once the ocular visit is finished and its reports are in, a
+ * For Ocular project with a signed contract moves to For Review on its own. Safe to call any time;
+ * it does nothing until those conditions hold. Returns the updated project when it moved.
+ */
+export async function autoSendOcularProjectForReview(ocularAppointmentId: string | Types.ObjectId) {
+  try {
+    const project = await Project.findOne({
+      ocularAppointmentId,
+      status: ProjectStatus.DRAFT,
+      contractStatus: ContractStatus.UPLOADED,
+    });
+    if (!project) return null;
+    const ocular = await Appointment.findById(ocularAppointmentId);
+    if (ocular?.status !== AppointmentStatus.COMPLETED) return null;
+    return await markOcularDone(project._id.toString(), project.salesStaffId.toString(), [Role.SALES_STAFF, Role.ADMIN]);
+  } catch (error) {
+    // e.g. a started report on this visit is still a draft; the next submission runs this again.
+    logger.info(`Project for ocular ${ocularAppointmentId} stays For Ocular: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 // ── Update Project Details ──
 
 export async function updateProject(
@@ -2242,6 +2265,12 @@ export async function getProjectById(
     .populate('visitReportId');
 
   if (!project) throw AppError.notFound('Project not found');
+
+  // Projects stuck in For Ocular after their visit and reports were finished move on now.
+  if (project.status === ProjectStatus.DRAFT && project.ocularAppointmentId && project.contractStatus === ContractStatus.UPLOADED) {
+    const moved = await autoSendOcularProjectForReview(project.ocularAppointmentId);
+    if (moved) project.status = moved.status;
+  }
 
   // Recover the explicit report link for projects created before automatic report linking.
   if (!project.visitReportId) {

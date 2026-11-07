@@ -65,7 +65,7 @@ vi.mock('../appointments/appointments.service.js', () => ({
 }));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
-import { assignEngineers, assignFabricationStaff, createProject, finalizeOcularProject, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
+import { assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -300,6 +300,26 @@ describe('markOcularDone', () => {
   it('names a started draft report that still needs submitting', async () => {
     reports.push({ _id: 'report-2', serviceType: 'railings', visitType: 'ocular', status: 'draft', notes: 'Measured stairs', save: vi.fn() });
     await expect(markOcularDone('project-1', actorId, [Role.SALES_STAFF])).rejects.toThrow('Submit the remaining ocular report before marking the ocular visit as done: Railings');
+  });
+
+  it('sends a finished For Ocular project for review automatically', async () => {
+    mocks.projectFindOne.mockResolvedValue(draft);
+    const moved = await autoSendOcularProjectForReview('ocular-1');
+    expect(moved).toMatchObject({ status: ProjectStatus.SUBMITTED });
+  });
+
+  it('waits while the ocular visit is not finished', async () => {
+    mocks.projectFindOne.mockResolvedValue(draft);
+    mocks.appointmentFindById.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.CONFIRMED });
+    expect(await autoSendOcularProjectForReview('ocular-1')).toBeNull();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('waits quietly while a started report is still a draft', async () => {
+    mocks.projectFindOne.mockResolvedValue(draft);
+    reports.push({ _id: 'report-2', serviceType: 'railings', visitType: 'consultation', status: 'draft', notes: 'Measured', save: vi.fn() });
+    expect(await autoSendOcularProjectForReview('ocular-1')).toBeNull();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
   it('only lets the assigned sales staff mark it done', async () => {
