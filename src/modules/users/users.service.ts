@@ -569,6 +569,7 @@ export async function listByRole(
         slotCode,
         appointmentType,
         appointmentId: assignmentContext.appointmentId,
+        enforceSingleActiveAssignment: true,
       });
 
       return {

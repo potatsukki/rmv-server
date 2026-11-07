@@ -72,7 +72,7 @@ export const reassignAppointmentSalesSchema = z.object({
 });
 
 export const salesAppointmentDecisionSchema = z.object({
-  decision: z.enum(['accept', 'decline']),
+  decision: z.literal('accept', { message: 'Assigned appointments can no longer be declined.' }),
   reason: z.string().max(500).trim().optional(),
 });
 
