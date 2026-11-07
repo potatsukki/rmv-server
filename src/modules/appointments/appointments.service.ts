@@ -13,7 +13,7 @@ import { appointmentStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, emitRoleEvent, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
 import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
-import { computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
+import { assertOcularLocationAccepted, computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
 import { createCheckoutSession, retrieveCheckoutSession } from '../../services/paymongo.service.js';
 import { logger } from '../../utils/logger.js';
 import { formatCurrency } from '../../utils/helpers.js';
@@ -1368,6 +1368,8 @@ export async function customerSubmitOcularLocation(
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You do not own this appointment');
   }
+  // Reject sites outside mainland Luzon before any ocular appointment is created or changed.
+  await assertOcularLocationAccepted(input.customerLocation);
 
   if (appointment.type === AppointmentType.OFFICE) {
     const isReadyForOcular =
@@ -1934,6 +1936,16 @@ export async function updateVisitStatus(
   );
 
   return appointment;
+}
+
+// ── Customer: acknowledge the ocular fee is non-refundable (required before paying online) ──
+
+export async function recordOcularFeeNonRefundableAck(appointmentId: string, customerId: string) {
+  // Only the first acknowledgment is kept; a missing/foreign booking is rejected later by the payment itself.
+  await Appointment.updateOne(
+    { _id: appointmentId, customerId, ocularFeeNonRefundableAckAt: { $exists: false } },
+    { $set: { ocularFeeNonRefundableAckAt: new Date() } },
+  );
 }
 
 // ── Mark No-Show ──

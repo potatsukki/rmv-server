@@ -208,10 +208,17 @@ router.post(
 
 // ── Fees ──
 router.get(
-  '/design-fees/pending',
+  '/fees/pending',
   authenticate,
   authorize(Role.CASHIER, Role.ADMIN),
-  ctrl.listPendingDesignFees,
+  ctrl.listPendingFees,
+);
+
+router.post(
+  '/:id/design-fee/acknowledge',
+  authenticate,
+  authorize(Role.CUSTOMER),
+  ctrl.acknowledgeDesignFee,
 );
 
 router.get(

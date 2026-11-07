@@ -30,6 +30,8 @@ export interface IProject extends Document {
     receiptNumber?: string;
     recordedBy?: Types.ObjectId;
     creditedPlanId?: Types.ObjectId;
+    acknowledgedAt?: Date;
+    acknowledgedVia?: 'customer' | 'in_person';
   };
   /** Plan that received the ocular fee credit (only when ocular_fee_on_proceed = 'credit'). */
   ocularFeeCreditedPlanId?: Types.ObjectId;
@@ -149,6 +151,8 @@ const projectSchema = new Schema<IProject>(
       receiptNumber: String,
       recordedBy: { type: Schema.Types.ObjectId, ref: 'User' },
       creditedPlanId: { type: Schema.Types.ObjectId, ref: 'PaymentPlan' },
+      acknowledgedAt: Date,
+      acknowledgedVia: { type: String, enum: ['customer', 'in_person'] },
     },
     ocularFeeCreditedPlanId: { type: Schema.Types.ObjectId, ref: 'PaymentPlan' },
     serviceType: { type: String, required: true, trim: true },

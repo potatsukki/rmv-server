@@ -2,7 +2,9 @@ import {
   Blueprint, BlueprintDraft, Project, ProjectItem, User, AuditLog, PaymentPlan,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { assertDesignFeeAllowsBlueprint } from '../projects/design-fee.service.js';
+import {
+  assertDesignFeeAllowsBlueprint, assertRevisionFeeAllowsWork, notifyRevisionFeeDue, prepareRevisionFee,
+} from '../projects/design-fee.service.js';
 import {
   BlueprintStatus, BlueprintComponent, ProjectStatus,
   AuditAction, NotificationCategory, Role, PaymentStageStatus, DeliveryType,
@@ -26,7 +28,9 @@ import type {
 } from './blueprints.validation.js';
 import type { Types } from 'mongoose';
 
-const MAX_REVISIONS = 3;
+// Revisions beyond the free ones are allowed but carry a fee (see design-fee.service). This only
+// bounds how far restoreReleasedQuotation walks back through a revision chain.
+const MAX_REVISION_CHAIN_HOPS = 50;
 
 interface BlueprintDraftFileInput {
   key: string;
@@ -390,7 +394,7 @@ async function restoreReleasedQuotation<T extends IBlueprint | null>(blueprint: 
   // a recorded release of this exact quotation, following its revision chain.
   let source: IBlueprint = blueprint;
   const quotation = quotationSnapshot(blueprint.quotation);
-  for (let hops = 0; hops <= MAX_REVISIONS; hops += 1) {
+  for (let hops = 0; hops <= MAX_REVISION_CHAIN_HOPS; hops += 1) {
     const released = await AuditLog.findOne({
       targetType: 'blueprint',
       targetId: source._id,
@@ -408,7 +412,7 @@ async function restoreReleasedQuotation<T extends IBlueprint | null>(blueprint: 
       action: AuditAction.BLUEPRINT_REVISION_UPLOADED,
     }).sort({ createdAt: -1 });
     const previousId = revision?.details?.previousId;
-    if (typeof previousId !== 'string' || hops === MAX_REVISIONS) break;
+    if (typeof previousId !== 'string' || hops === MAX_REVISION_CHAIN_HOPS) break;
     const previous = await Blueprint.findById(previousId);
     if (!previous?.quotation
       || previous.projectId.toString() !== blueprint.projectId.toString()
@@ -656,13 +660,10 @@ export async function uploadRevision(
   if (currentBlueprint.status !== BlueprintStatus.REVISION_REQUESTED) {
     throw AppError.badRequest('A revision can only be uploaded when revision is requested');
   }
+  // Paid revisions (beyond the free ones) start only after the cashier records the fee.
+  assertRevisionFeeAllowsWork(currentBlueprint);
 
   const newVersion = currentBlueprint.version + 1;
-
-  // Max 3 revisions check (initial + 3 revisions = version 4 max)
-  if (newVersion > MAX_REVISIONS + 1) {
-    throw AppError.badRequest(`Maximum of ${MAX_REVISIONS} revisions allowed`);
-  }
 
   const project = await Project.findById(currentBlueprint.projectId);
   if (!project) throw AppError.notFound('Project not found');
@@ -864,12 +865,9 @@ export async function requestRevision(
     throw AppError.forbidden('Only the project customer can request revisions');
   }
 
-  // Check max revisions
-  if (blueprint.version >= MAX_REVISIONS + 1) {
-    throw AppError.badRequest(`Maximum of ${MAX_REVISIONS} revisions reached`);
-  }
-
   blueprintStateMachine.assertTransition(blueprint.status, BlueprintStatus.REVISION_REQUESTED);
+  // Free revisions first; after that each request needs the customer's non-refundable fee acknowledgment.
+  const revisionFee = await prepareRevisionFee(blueprint.version, input.acknowledgeRevisionFee);
 
   // If the blueprint was already fully approved, revert the project back to BLUEPRINT stage
   if (blueprint.status === BlueprintStatus.APPROVED && project.status === ProjectStatus.APPROVED) {
@@ -888,14 +886,21 @@ export async function requestRevision(
   }
   blueprint.revisionNotes = input.notes;
   blueprint.revisionRefKeys = input.refKeys;
+  if (revisionFee) blueprint.revisionFee = revisionFee;
   await blueprint.save();
+  if (revisionFee) await notifyRevisionFeeDue(project, revisionFee.amount, revisionFee.revisionNumber);
 
   await AuditLog.create({
     action: AuditAction.BLUEPRINT_REVISION_REQUESTED,
     actorId: customerId,
     targetType: 'blueprint',
     targetId: blueprint._id,
-    details: { notes: input.notes, version: blueprint.version, component: blueprint.revisionComponent },
+    details: {
+      notes: input.notes,
+      version: blueprint.version,
+      component: blueprint.revisionComponent,
+      revisionFee: revisionFee ? { amount: revisionFee.amount, revisionNumber: revisionFee.revisionNumber } : undefined,
+    },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -952,6 +957,7 @@ export async function upsertBlueprintDraft(
     if (input.sourceBlueprintId && input.sourceBlueprintId !== latestBlueprint._id.toString()) {
       throw AppError.badRequest('Revision draft must target the latest revision-requested blueprint');
     }
+    assertRevisionFeeAllowsWork(latestBlueprint);
   }
 
   const draftQuery = itemScopedQuery(projectId, projectItemId);

@@ -847,7 +847,9 @@ export async function getMyPaymentHistory(customerId: string) {
       receiptNumber: p.receiptNumber,
       description: p.stageId?.startsWith('design-fee-')
         ? `Design Fee — ${projectMap.get(p.projectId.toString()) || 'Project'}`
-        : projectMap.get(p.projectId.toString()) || 'Project Payment',
+        : p.stageId?.startsWith('revision-fee-')
+          ? `Revision Fee — ${projectMap.get(p.projectId.toString()) || 'Project'}`
+          : projectMap.get(p.projectId.toString()) || 'Project Payment',
       date: (p.createdAt as Date).toISOString(),
       declineReason: p.declineReason,
       rejectionReason: p.rejectionReason, duplicateReference: p.duplicateReference, rejectionSource: p.rejectionSource,

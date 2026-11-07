@@ -14,12 +14,131 @@ import { generateAndUploadReceipt, generateNextReceiptNumber } from '../payments
 import { OCULAR_TOLL_NOTE } from '../maps/maps.service.js';
 
 export const DESIGN_FEE_STAGE_PREFIX = 'design-fee-';
+export const REVISION_FEE_STAGE_PREFIX = 'revision-fee-';
 const DESIGN_FEE_LABEL = 'Design Fee (Layout & Blueprint)';
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
 export function isDesignFeePaymentStage(stageId?: string | null) {
   return Boolean(stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX));
+}
+
+export function isRevisionFeePaymentStage(stageId?: string | null) {
+  return Boolean(stageId?.startsWith(REVISION_FEE_STAGE_PREFIX));
+}
+
+export interface RecordFeeInput {
+  method: PaymentMethod.CASH | PaymentMethod.GCASH | PaymentMethod.BANK_TRANSFER;
+  referenceNumber?: string;
+  /** Cashier confirms the customer acknowledged in person that the fee is non-refundable. */
+  customerAcknowledgedInPerson?: boolean;
+}
+
+function cleanReference(input: RecordFeeInput) {
+  const referenceNumber = input.referenceNumber?.trim() || undefined;
+  if (input.method !== PaymentMethod.CASH && !referenceNumber) {
+    throw AppError.badRequest('Enter the GCash or bank reference number', ErrorCode.VALIDATION_ERROR);
+  }
+  return referenceNumber;
+}
+
+/**
+ * Shared cashier flow for a one-off fee (design fee, revision fee): receipt PDF, verified Payment,
+ * audit log, customer notification + receipt email. The caller has already claimed the fee atomically.
+ */
+async function issueVerifiedFeePayment(args: {
+  paymentId: Types.ObjectId;
+  project: { _id: Types.ObjectId; customerId: Types.ObjectId; title: string };
+  stageId: string;
+  label: string;
+  amount: number;
+  input: RecordFeeInput;
+  referenceNumber?: string;
+  actorId: string;
+  source: string;
+  auditType: string;
+  paidAt: Date;
+  ip?: string;
+  ua?: string;
+}) {
+  const { project, amount, label, input, referenceNumber, actorId, paidAt } = args;
+  const receiptNumber = await generateNextReceiptNumber();
+  const [customer, cashier] = await Promise.all([User.findById(project.customerId), User.findById(actorId)]);
+  const receipt = await generateAndUploadReceipt({
+    receiptNumber,
+    customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
+    customerEmail: customer?.email || '',
+    customerAddress: '',
+    projectTitle: project.title,
+    stageName: label,
+    amountPaid: amount,
+    paymentMethod: input.method,
+    referenceNumber,
+    creditApplied: 0,
+    excessCredit: 0,
+    verifiedByName: cashier ? `${cashier.firstName} ${cashier.lastName}` : 'Cashier',
+    verifiedAt: paidAt,
+    totalProjectCost: amount,
+    totalPaid: amount,
+    totalOutstanding: 0,
+  });
+
+  const payment = await Payment.create({
+    _id: args.paymentId,
+    projectId: project._id,
+    customerId: project.customerId,
+    stageId: args.stageId,
+    method: input.method,
+    amountPaid: amount,
+    amountRequired: amount,
+    referenceNumber,
+    status: PaymentStageStatus.VERIFIED,
+    paymentStatus: 'paid',
+    paymentDate: paidAt,
+    verifiedBy: actorId,
+    verifiedAt: paidAt,
+    receiptNumber,
+    receiptKey: receipt.key || undefined,
+    evidenceTrail: [{
+      version: 1,
+      source: args.source,
+      status: PaymentStageStatus.VERIFIED,
+      method: input.method,
+      amountPaid: amount,
+      referenceNumber,
+      receiptKey: receipt.key || undefined,
+      receiptNumber,
+      note: `${label} recorded and receipt issued`,
+      actorId,
+      capturedAt: paidAt,
+    }],
+  });
+
+  await AuditLog.create({
+    action: AuditAction.PAYMENT_VERIFIED,
+    actorId,
+    targetType: 'payment',
+    targetId: payment._id,
+    details: { type: args.auditType, projectId: project._id.toString(), amountPaid: amount, method: input.method, receiptNumber },
+    ipAddress: args.ip,
+    userAgent: args.ua,
+  });
+
+  if (customer?.email) {
+    await sendPaymentVerifiedEmail(customer.email, {
+      amount: formatCurrency(amount),
+      stageLabel: label,
+      receiptNumber,
+      projectId: project._id.toString(),
+    }, receipt.buffer.length > 0 ? receipt.buffer : undefined);
+  }
+  emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
+    type: `${args.auditType}_recorded`,
+    paymentId: payment._id.toString(),
+    projectId: project._id.toString(),
+  });
+
+  return { payment, receiptNumber };
 }
 
 // ── Design fee becomes due once the customer proceeds (project submitted after the ocular) ──
@@ -43,7 +162,7 @@ export async function openDesignFee(projectId: string | Types.ObjectId) {
     project.customerId,
     NotificationCategory.PAYMENT,
     'Design Fee Due',
-    `A design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. It will be deducted from your total project cost once.`,
+    `A non-refundable design fee of ${formatCurrency(designFeeAmount)} for "${project.title}" is due before the blueprint starts. It will be deducted once from your total project cost.`,
     `/projects/${project._id}/payments`,
   );
   await notifyRole(
@@ -73,16 +192,25 @@ export function assertDesignFeeAllowsBlueprint(project: { designFee?: { status?:
   }
 }
 
-// ── Cashier records the design fee payment ──
+/** Customer confirms in the app that the design fee is non-refundable. */
+export async function acknowledgeDesignFee(projectId: string, customerId: string) {
+  const project = await Project.findById(projectId);
+  if (!project) throw AppError.notFound('Project not found');
+  if (project.customerId.toString() !== customerId) throw AppError.forbidden('Only the project customer can acknowledge this fee');
+  if (project.designFee?.status !== 'pending') throw AppError.badRequest('This project has no design fee waiting for payment');
+  if (project.designFee.acknowledgedAt) return project;
 
-export interface RecordDesignFeeInput {
-  method: PaymentMethod.CASH | PaymentMethod.GCASH | PaymentMethod.BANK_TRANSFER;
-  referenceNumber?: string;
+  const updated = await Project.findOneAndUpdate(
+    { _id: projectId, 'designFee.status': 'pending', 'designFee.acknowledgedAt': { $exists: false } },
+    { $set: { 'designFee.acknowledgedAt': new Date(), 'designFee.acknowledgedVia': 'customer' } },
+    { new: true },
+  );
+  return updated || Project.findById(projectId);
 }
 
 export async function recordDesignFeePayment(
   projectId: string,
-  input: RecordDesignFeeInput,
+  input: RecordFeeInput,
   actorId: string,
   ip?: string,
   ua?: string,
@@ -97,10 +225,14 @@ export async function recordDesignFeePayment(
       ErrorCode.DUPLICATE_ENTRY,
     );
   }
-  const referenceNumber = input.referenceNumber?.trim() || undefined;
-  if (input.method !== PaymentMethod.CASH && !referenceNumber) {
-    throw AppError.badRequest('Enter the GCash or bank reference number', ErrorCode.VALIDATION_ERROR);
+  const alreadyAcknowledged = Boolean(existing.designFee.acknowledgedAt);
+  if (!alreadyAcknowledged && !input.customerAcknowledgedInPerson) {
+    throw AppError.badRequest(
+      'The customer must acknowledge that the design fee is non-refundable before it is recorded',
+      ErrorCode.VALIDATION_ERROR,
+    );
   }
+  const referenceNumber = cleanReference(input);
 
   const now = new Date();
   const paymentId = new Types.ObjectId();
@@ -115,6 +247,7 @@ export async function recordDesignFeePayment(
         'designFee.referenceNumber': referenceNumber,
         'designFee.paymentId': paymentId,
         'designFee.recordedBy': actorId,
+        ...(alreadyAcknowledged ? {} : { 'designFee.acknowledgedAt': now, 'designFee.acknowledgedVia': 'in_person' }),
       },
     },
     { new: true },
@@ -122,68 +255,22 @@ export async function recordDesignFeePayment(
   if (!project) throw AppError.conflict('The design fee for this project is already paid', ErrorCode.DUPLICATE_ENTRY);
 
   const amount = project.designFee!.amount;
-  const receiptNumber = await generateNextReceiptNumber();
-  const [customer, cashier] = await Promise.all([User.findById(project.customerId), User.findById(actorId)]);
-  const receipt = await generateAndUploadReceipt({
-    receiptNumber,
-    customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
-    customerEmail: customer?.email || '',
-    customerAddress: '',
-    projectTitle: project.title,
-    stageName: DESIGN_FEE_LABEL,
-    amountPaid: amount,
-    paymentMethod: input.method,
-    referenceNumber,
-    creditApplied: 0,
-    excessCredit: 0,
-    verifiedByName: cashier ? `${cashier.firstName} ${cashier.lastName}` : 'Cashier',
-    verifiedAt: now,
-    totalProjectCost: amount,
-    totalPaid: amount,
-    totalOutstanding: 0,
-  });
-
-  const payment = await Payment.create({
-    _id: paymentId,
-    projectId: project._id,
-    customerId: project.customerId,
+  const { payment, receiptNumber } = await issueVerifiedFeePayment({
+    paymentId,
+    project,
     stageId: `${DESIGN_FEE_STAGE_PREFIX}${project._id}`,
-    method: input.method,
-    amountPaid: amount,
-    amountRequired: amount,
+    label: DESIGN_FEE_LABEL,
+    amount,
+    input,
     referenceNumber,
-    status: PaymentStageStatus.VERIFIED,
-    paymentStatus: 'paid',
-    paymentDate: now,
-    verifiedBy: actorId,
-    verifiedAt: now,
-    receiptNumber,
-    receiptKey: receipt.key || undefined,
-    evidenceTrail: [{
-      version: 1,
-      source: 'cashier_design_fee',
-      status: PaymentStageStatus.VERIFIED,
-      method: input.method,
-      amountPaid: amount,
-      referenceNumber,
-      receiptKey: receipt.key || undefined,
-      receiptNumber,
-      note: 'Design fee recorded and receipt issued',
-      actorId,
-      capturedAt: now,
-    }],
+    actorId,
+    source: 'cashier_design_fee',
+    auditType: 'design_fee',
+    paidAt: now,
+    ip,
+    ua,
   });
   await Project.updateOne({ _id: project._id }, { $set: { 'designFee.receiptNumber': receiptNumber } });
-
-  await AuditLog.create({
-    action: AuditAction.PAYMENT_VERIFIED,
-    actorId,
-    targetType: 'payment',
-    targetId: payment._id,
-    details: { type: 'design_fee', projectId: project._id.toString(), amountPaid: amount, method: input.method, receiptNumber },
-    ipAddress: ip,
-    userAgent: ua,
-  });
 
   await createAndSendNotification(
     project.customerId,
@@ -192,14 +279,6 @@ export async function recordDesignFeePayment(
     `Your design fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. It will be deducted from your total project cost.`,
     `/projects/${project._id}/payments`,
   );
-  if (customer?.email) {
-    await sendPaymentVerifiedEmail(customer.email, {
-      amount: formatCurrency(amount),
-      stageLabel: DESIGN_FEE_LABEL,
-      receiptNumber,
-      projectId: project._id.toString(),
-    }, receipt.buffer.length > 0 ? receipt.buffer : undefined);
-  }
   await notifyRole(
     Role.ENGINEER,
     NotificationCategory.PROJECT,
@@ -207,21 +286,167 @@ export async function recordDesignFeePayment(
     `The design fee for "${project.title}" is paid. The blueprint can start.`,
     `/projects/${project._id}`,
   );
-  emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
-    type: 'design_fee_recorded',
-    paymentId: payment._id.toString(),
-    projectId: project._id.toString(),
-  });
 
   return { project, payment, receiptNumber };
 }
 
-export async function listPendingDesignFees() {
-  return Project.find({ 'designFee.status': 'pending', deletedAt: null })
-    .select('projectNumber title status designFee customerId createdAt')
-    .populate('customerId', 'firstName lastName customerNumber email phone')
-    .sort({ 'designFee.dueAt': 1 })
-    .lean();
+// ── Revision fee: requests beyond the free revisions cost a fee, paid before the engineer revises ──
+
+/**
+ * Called when the customer requests a revision on `blueprintVersion`. Returns the fee to store on
+ * that blueprint, or null when the revision is still free. Paid revisions need the customer's
+ * non-refundable acknowledgment.
+ */
+export async function prepareRevisionFee(blueprintVersion: number, acknowledged: boolean | undefined) {
+  const { revisionFeeAmount, freeRevisionLimit } = await getFeePolicyConfig();
+  const revisionNumber = blueprintVersion;
+  if (revisionNumber <= freeRevisionLimit || revisionFeeAmount <= 0) return null;
+  if (!acknowledged) {
+    throw AppError.badRequest(
+      `This revision has a ${formatCurrency(revisionFeeAmount)} non-refundable fee. Please confirm to continue.`,
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+  return { amount: revisionFeeAmount, status: 'pending' as const, revisionNumber, acknowledgedAt: new Date() };
+}
+
+export async function notifyRevisionFeeDue(project: { _id: unknown; customerId: unknown; title: string }, amount: number, revisionNumber: number) {
+  await createAndSendNotification(
+    project.customerId as Types.ObjectId,
+    NotificationCategory.PAYMENT,
+    'Revision Fee Due',
+    `Revision ${revisionNumber} for "${project.title}" has a non-refundable fee of ${formatCurrency(amount)}. Pay it at the RMV cashier so the engineer can start the revision.`,
+    `/projects/${project._id}/payments`,
+  );
+  await notifyRole(
+    Role.CASHIER,
+    NotificationCategory.PAYMENT,
+    'Revision Fee Pending',
+    `Project "${project.title}" has a ${formatCurrency(amount)} revision fee waiting for payment.`,
+    `/projects/${project._id}/payments`,
+  );
+}
+
+export function assertRevisionFeeAllowsWork(blueprint: { revisionFee?: { status?: string } | null }) {
+  if (blueprint.revisionFee?.status === 'pending') {
+    throw AppError.badRequest(
+      'The revision fee must be paid and verified by the cashier before the revision starts',
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+}
+
+export async function recordRevisionFeePayment(
+  blueprintId: string,
+  input: RecordFeeInput,
+  actorId: string,
+  ip?: string,
+  ua?: string,
+) {
+  const existing = await Blueprint.findById(blueprintId);
+  if (!existing) throw AppError.notFound('Blueprint not found');
+  if (existing.revisionFee?.status !== 'pending') {
+    throw AppError.conflict(
+      existing.revisionFee?.status === 'verified'
+        ? 'The revision fee for this request is already paid'
+        : 'This revision has no fee waiting for payment',
+      ErrorCode.DUPLICATE_ENTRY,
+    );
+  }
+  const referenceNumber = cleanReference(input);
+  const project = await Project.findById(existing.projectId);
+  if (!project) throw AppError.notFound('Project not found');
+
+  const now = new Date();
+  const paymentId = new Types.ObjectId();
+  const blueprint = await Blueprint.findOneAndUpdate(
+    { _id: blueprintId, 'revisionFee.status': 'pending' },
+    {
+      $set: {
+        'revisionFee.status': 'verified',
+        'revisionFee.paidAt': now,
+        'revisionFee.method': input.method,
+        'revisionFee.referenceNumber': referenceNumber,
+        'revisionFee.paymentId': paymentId,
+        'revisionFee.recordedBy': actorId,
+      },
+    },
+    { new: true },
+  );
+  if (!blueprint) throw AppError.conflict('The revision fee for this request is already paid', ErrorCode.DUPLICATE_ENTRY);
+
+  const amount = blueprint.revisionFee!.amount;
+  const label = `Revision Fee (Revision ${blueprint.revisionFee!.revisionNumber})`;
+  const { payment, receiptNumber } = await issueVerifiedFeePayment({
+    paymentId,
+    project,
+    stageId: `${REVISION_FEE_STAGE_PREFIX}${blueprint._id}`,
+    label,
+    amount,
+    input,
+    referenceNumber,
+    actorId,
+    source: 'cashier_revision_fee',
+    auditType: 'revision_fee',
+    paidAt: now,
+    ip,
+    ua,
+  });
+  await Blueprint.updateOne({ _id: blueprint._id }, { $set: { 'revisionFee.receiptNumber': receiptNumber } });
+
+  await createAndSendNotification(
+    project.customerId,
+    NotificationCategory.PAYMENT,
+    'Revision Fee Received',
+    `Your revision fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. The engineer can now start your revision.`,
+    `/projects/${project._id}/payments`,
+  );
+  if (blueprint.uploadedBy) {
+    await createAndSendNotification(
+      blueprint.uploadedBy,
+      NotificationCategory.PROJECT,
+      'Revision Fee Paid',
+      `The revision fee for "${project.title}" is paid. You can start the requested revision.`,
+      `/projects/${project._id}`,
+    );
+  }
+
+  return { blueprint, payment, receiptNumber };
+}
+
+export async function listPendingFees() {
+  const [designFees, pendingRevisions] = await Promise.all([
+    Project.find({ 'designFee.status': 'pending', deletedAt: null })
+      .select('projectNumber title status designFee customerId createdAt')
+      .populate('customerId', 'firstName lastName customerNumber email phone')
+      .sort({ 'designFee.dueAt': 1 })
+      .lean(),
+    Blueprint.find({ 'revisionFee.status': 'pending' })
+      .select('projectId projectItemId version revisionFee updatedAt')
+      .sort({ updatedAt: 1 })
+      .lean(),
+  ]);
+
+  const projectIds = [...new Set(pendingRevisions.map((blueprint) => blueprint.projectId.toString()))];
+  const projects = projectIds.length
+    ? await Project.find({ _id: { $in: projectIds }, deletedAt: null })
+      .select('projectNumber title status customerId')
+      .populate('customerId', 'firstName lastName customerNumber email phone')
+      .lean()
+    : [];
+  const projectById = new Map(projects.map((project) => [project._id.toString(), project]));
+
+  const revisionFees = pendingRevisions.flatMap((blueprint) => {
+    const project = projectById.get(blueprint.projectId.toString());
+    return project ? [{
+      blueprintId: blueprint._id.toString(),
+      version: blueprint.version,
+      revisionFee: blueprint.revisionFee,
+      project,
+    }] : [];
+  });
+
+  return { designFees, revisionFees };
 }
 
 // ── Credits: the paid design fee (and, by policy, the ocular fee) is deducted from one plan once ──
@@ -229,16 +454,17 @@ export async function listPendingDesignFees() {
 type PlanLike = {
   _id?: unknown;
   totalAmount: number;
-  grossAmount?: number;
+  baseAmount?: number;
+  surchargePercent?: number;
   designFeeCredit?: number;
   ocularFeeCredit?: number;
   stages: Array<{ amount: number; remainingBalance: number; status: string; amountPaid: number }>;
 };
 
-/** Deducts a credit from a plan total and re-spreads it over the stages proportionally. */
-export function deductCreditFromPlan(plan: PlanLike, credit: number) {
+/** Deducts an amount from a plan total and re-spreads it over the stages proportionally. */
+export function deductCreditFromPlan(plan: PlanLike, deduction: number) {
   const gross = roundMoney(plan.totalAmount);
-  const applied = roundMoney(Math.min(Math.max(credit, 0), gross));
+  const applied = roundMoney(Math.min(Math.max(deduction, 0), gross));
   if (applied <= 0) return 0;
 
   const net = roundMoney(gross - applied);
@@ -255,6 +481,16 @@ export function deductCreditFromPlan(plan: PlanLike, credit: number) {
   });
   plan.totalAmount = net;
   return applied;
+}
+
+/**
+ * Credits are taken off the quotation total BEFORE the installment surcharge, so the plan total
+ * becomes (base − credit) × (1 + surcharge). Returns the credit actually applied (pre-surcharge).
+ */
+function applyCreditBeforeSurcharge(plan: PlanLike, credit: number) {
+  const multiplier = 1 + (plan.surchargePercent || 0) / 100;
+  const deducted = deductCreditFromPlan(plan, roundMoney(credit * multiplier));
+  return roundMoney(deducted / multiplier);
 }
 
 async function getProjectOcularAppointment(project: { ocularAppointmentId?: unknown; appointmentId?: unknown }) {
@@ -277,7 +513,8 @@ export async function applyFeeCreditsToNewPlans<T extends PlanLike>(projectId: s
   const first = plans[0];
   if (!first) return plans;
   first._id ||= new Types.ObjectId();
-  first.grossAmount = roundMoney(first.totalAmount);
+  const multiplier = 1 + (first.surchargePercent || 0) / 100;
+  first.baseAmount ??= roundMoney(first.totalAmount / multiplier);
 
   const { ocularFeeOnProceed } = await getFeePolicyConfig();
 
@@ -287,7 +524,7 @@ export async function applyFeeCreditsToNewPlans<T extends PlanLike>(projectId: s
     { new: true },
   );
   if (designClaim?.designFee?.amount) {
-    first.designFeeCredit = deductCreditFromPlan(first, designClaim.designFee.amount);
+    first.designFeeCredit = applyCreditBeforeSurcharge(first, designClaim.designFee.amount);
   }
 
   if (ocularFeeOnProceed === 'credit') {
@@ -299,7 +536,7 @@ export async function applyFeeCreditsToNewPlans<T extends PlanLike>(projectId: s
         { $set: { ocularFeeCreditedPlanId: first._id } },
         { new: true },
       );
-      if (ocularClaim) first.ocularFeeCredit = deductCreditFromPlan(first, ocular.ocularFee || 0);
+      if (ocularClaim) first.ocularFeeCredit = applyCreditBeforeSurcharge(first, ocular.ocularFee || 0);
     }
   }
 
@@ -312,18 +549,27 @@ export async function getProjectFeeSummary(projectId: string) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
 
-  const [{ ocularFeeOnProceed, designFeeAmount }, plans, ocular] = await Promise.all([
+  const [{ ocularFeeOnProceed, designFeeAmount, revisionFeeAmount, freeRevisionLimit }, plans, ocular, revisedBlueprints] = await Promise.all([
     getFeePolicyConfig(),
     PaymentPlan.find({ projectId: project._id }).lean(),
     getProjectOcularAppointment(project),
+    Blueprint.find({ projectId: project._id, 'revisionFee.status': { $in: ['pending', 'verified'] } })
+      .select('version revisionFee')
+      .lean(),
   ]);
 
-  // Project cost before credits: gross plan totals, or the latest approved quotation before a plan exists.
+  // Project cost = quotation total before credits and before the installment surcharge.
   let projectCost: number | null = null;
+  let installmentSurcharge = 0;
   if (plans.length) {
-    projectCost = roundMoney(plans.reduce((sum, plan) => (
-      sum + (plan.grossAmount ?? roundMoney(plan.totalAmount + (plan.designFeeCredit || 0) + (plan.ocularFeeCredit || 0)))
-    ), 0));
+    projectCost = 0;
+    for (const plan of plans) {
+      const credits = (plan.designFeeCredit || 0) + (plan.ocularFeeCredit || 0);
+      // Plans created before this field existed: their total already is the full amount.
+      const base = plan.baseAmount ?? roundMoney(plan.totalAmount + credits);
+      projectCost = roundMoney(projectCost + base);
+      installmentSurcharge = roundMoney(installmentSurcharge + Math.max(0, plan.totalAmount - (base - credits)));
+    }
   } else if (project.totalCost && project.totalCost > 0) {
     projectCost = roundMoney(project.totalCost);
   } else {
@@ -348,19 +594,27 @@ export async function getProjectFeeSummary(projectId: string) {
     ? (plans.length ? planOcularCredit : ocularPaid)
     : 0;
 
+  const revisionAmount = roundMoney(revisedBlueprints.reduce((sum, item) => sum + (item.revisionFee?.amount || 0), 0));
+  const revisionPaid = roundMoney(revisedBlueprints
+    .filter((item) => item.revisionFee?.status === 'verified')
+    .reduce((sum, item) => sum + (item.revisionFee?.amount || 0), 0));
+
   const planPaymentsReceived = roundMoney(plans.reduce((sum, plan) => (
     sum + plan.stages.reduce((stageSum, stage) => stageSum + (stage.amountPaid || 0), 0)
   ), 0));
 
-  const totalCharges = roundMoney((projectCost || 0) + designAmount + (ocularApplies ? ocularAmount : 0));
+  const totalCharges = roundMoney(
+    (projectCost || 0) + installmentSurcharge + designAmount + (ocularApplies ? ocularAmount : 0) + revisionAmount,
+  );
   const totalCredits = roundMoney(designFeeCredit + ocularFeeCredit);
   const totalAmountDue = roundMoney(Math.max(0, totalCharges - totalCredits));
-  const paymentsReceived = roundMoney(designPaid + ocularPaid + planPaymentsReceived);
+  const paymentsReceived = roundMoney(designPaid + ocularPaid + revisionPaid + planPaymentsReceived);
   const remainingBalance = roundMoney(Math.max(0, totalAmountDue - paymentsReceived));
 
   return {
     projectId: project._id.toString(),
     projectCost,
+    installmentSurcharge,
     designFee: {
       amount: designStatus === 'not_required' ? 0 : roundMoney(project.designFee?.amount || designFeeAmount),
       status: designStatus,
@@ -368,6 +622,7 @@ export async function getProjectFeeSummary(projectId: string) {
       method: project.designFee?.method || null,
       referenceNumber: project.designFee?.referenceNumber || null,
       receiptNumber: project.designFee?.receiptNumber || null,
+      acknowledgedAt: project.designFee?.acknowledgedAt || null,
     },
     designFeeCredit,
     ocularFee: {
@@ -379,6 +634,19 @@ export async function getProjectFeeSummary(projectId: string) {
       tollNote: OCULAR_TOLL_NOTE,
     },
     ocularFeeCredit,
+    revisionFees: {
+      count: revisedBlueprints.length,
+      amount: revisionAmount,
+      paid: revisionPaid,
+      pending: roundMoney(revisionAmount - revisionPaid),
+      items: revisedBlueprints.map((item) => ({
+        blueprintId: item._id.toString(),
+        revisionNumber: item.revisionFee?.revisionNumber || item.version,
+        amount: item.revisionFee?.amount || 0,
+        status: item.revisionFee?.status || 'pending',
+        receiptNumber: item.revisionFee?.receiptNumber || null,
+      })),
+    },
     totalCharges,
     totalCredits,
     totalAmountDue,
@@ -386,5 +654,6 @@ export async function getProjectFeeSummary(projectId: string) {
     planPaymentsReceived,
     remainingBalance,
     hasPaymentPlan: plans.length > 0,
+    revisionPolicy: { freeRevisionLimit, revisionFeeAmount },
   };
 }

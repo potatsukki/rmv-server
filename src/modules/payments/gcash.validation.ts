@@ -1,9 +1,26 @@
 import { z } from 'zod';
 
-export const gcashTargetSchema = z.object({
+const gcashTargetObject = z.object({
   bookingId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   stageId: z.string().min(1).max(100).optional(),
-}).refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), 'Choose one booking or payment stage');
+});
+const ONE_TARGET_MESSAGE = 'Choose one booking or payment stage';
+export const OCULAR_FEE_ACK_MESSAGE = 'Please confirm that the ocular fee is non-refundable before paying';
+
+export const gcashTargetSchema = gcashTargetObject
+  .refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), ONE_TARGET_MESSAGE);
+/** Customer picks cash: an ocular fee (booking) needs the non-refundable acknowledgment. */
+export const selectCashSchema = gcashTargetObject
+  .extend({ acknowledgeNonRefundable: z.boolean().optional() })
+  .refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), ONE_TARGET_MESSAGE)
+  .refine((data) => !data.bookingId || data.acknowledgeNonRefundable === true, {
+    message: OCULAR_FEE_ACK_MESSAGE,
+    path: ['acknowledgeNonRefundable'],
+  });
+/** Body for the customer's own ocular fee checkout / cash request. */
+export const ocularFeeAckSchema = z.object({
+  acknowledgeNonRefundable: z.literal(true, { message: OCULAR_FEE_ACK_MESSAGE }),
+});
 export const submitGcashSchema = z.object({
   bookingId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   stageId: z.string().min(1).max(100).optional(),
@@ -12,7 +29,13 @@ export const submitGcashSchema = z.object({
   // backend-computed amount due and the date is the moment of submission. The GCash
   // reference number is the unique evidence the cashier verifies against.
   proofKey: z.string().min(1).max(300).optional(),
-}).refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), 'Choose one booking or payment stage');
+  acknowledgeNonRefundable: z.boolean().optional(),
+})
+  .refine((data) => Boolean(data.bookingId) !== Boolean(data.stageId), ONE_TARGET_MESSAGE)
+  .refine((data) => !data.bookingId || data.acknowledgeNonRefundable === true, {
+    message: OCULAR_FEE_ACK_MESSAGE,
+    path: ['acknowledgeNonRefundable'],
+  });
 export const gcashSettingsSchema = z.object({
   accountName: z.string().trim().max(200),
   accountNumber: z.string().trim().regex(/^(09\d{9})?$/, 'Use an 11-digit mobile number starting with 09'),

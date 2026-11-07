@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { ocularFeeAckSchema } from '../payments/gcash.validation.js';
 import * as ctrl from './appointments.controller.js';
 import { authenticate } from '../../middleware/auth.js';
 import { authorize } from '../../middleware/rbac.js';
@@ -208,6 +209,7 @@ router.post(
   '/:id/ocular-fee-checkout',
   authenticate,
   authorize(Role.CUSTOMER),
+  validate(ocularFeeAckSchema),
   ctrl.createOcularFeeCheckout,
 );
 
@@ -216,6 +218,7 @@ router.post(
   '/:id/request-cash',
   authenticate,
   authorize(Role.CUSTOMER),
+  validate(ocularFeeAckSchema),
   ctrl.requestOcularCashPayment,
 );
 

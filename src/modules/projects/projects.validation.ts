@@ -214,6 +214,7 @@ export type SkipProjectReviewInput = z.infer<typeof skipProjectReviewSchema>;
 export const recordDesignFeeSchema = z.object({
   method: z.enum(['cash', 'gcash', 'bank_transfer']),
   referenceNumber: z.string().trim().max(100).optional(),
+  customerAcknowledgedInPerson: z.boolean().optional(),
 }).refine((input) => input.method === 'cash' || Boolean(input.referenceNumber), {
   message: 'Enter the GCash or bank reference number',
   path: ['referenceNumber'],

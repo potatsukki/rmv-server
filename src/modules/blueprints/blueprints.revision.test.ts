@@ -14,7 +14,10 @@ vi.mock('../../models/index.js', () => ({
 vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: mocks.notifyRole }));
 vi.mock('../notifications/email.service.js', () => ({ sendBlueprintUploadedEmail: vi.fn() }));
 vi.mock('../uploads/upload.service.js', () => ({ deleteFile: mocks.deleteFile }));
-vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
+vi.mock('../config/config.service.js', () => ({
+  getInstallmentConfig: vi.fn(),
+  getFeePolicyConfig: async () => ({ designFeeAmount: 1000, ocularFeeOnProceed: 'separate', revisionFeeAmount: 1000, freeRevisionLimit: 3 }),
+}));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
 
 import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadBlueprint, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
@@ -56,6 +59,43 @@ describe('component-scoped blueprint revisions', () => {
       quotationReviewStatus: component === 'blueprint' ? 'sent_to_customer' : 'draft',
       quotation: { total: 3000 },
     });
+  });
+
+  it('keeps revisions 1 to 3 free', async () => {
+    const bp = { ...source(), version: 3, status: BlueprintStatus.UPLOADED };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    await requestRevision('bp-1', requestRevisionSchema.parse({ notes: 'Third change' }), 'customer-1');
+    expect(bp).toMatchObject({ status: BlueprintStatus.REVISION_REQUESTED });
+    expect((bp as any).revisionFee).toBeUndefined();
+  });
+
+  it('asks the customer to accept the ₱1,000 fee for revision 4 and records it as pending', async () => {
+    const bp = { ...source(), version: 4, status: BlueprintStatus.UPLOADED };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    await expect(requestRevision('bp-1', requestRevisionSchema.parse({ notes: 'Fourth change' }), 'customer-1'))
+      .rejects.toThrow('non-refundable fee');
+    expect(bp.save).not.toHaveBeenCalled();
+
+    await requestRevision('bp-1', requestRevisionSchema.parse({ notes: 'Fourth change', acknowledgeRevisionFee: true }), 'customer-1');
+    expect(bp).toMatchObject({
+      status: BlueprintStatus.REVISION_REQUESTED,
+      revisionFee: { amount: 1000, status: 'pending', revisionNumber: 4, acknowledgedAt: expect.any(Date) },
+    });
+  });
+
+  it('blocks the engineer until the cashier records the revision fee', async () => {
+    const bp = { ...source(), version: 4, revisionFee: { amount: 1000, status: 'pending', revisionNumber: 4 } };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    await expect(uploadRevision('bp-1', revisionUploadSchema.parse({ blueprintKey: 'v5.pdf', designKey: 'v5.png' }), 'engineer-1'))
+      .rejects.toThrow('revision fee must be paid');
+    expect(mocks.blueprintCreate).not.toHaveBeenCalled();
+  });
+
+  it('allows a paid revision beyond the old limit once the fee is verified', async () => {
+    const bp = { ...source(), version: 4, revisionFee: { amount: 1000, status: 'verified', revisionNumber: 4 } };
+    mocks.blueprintFindById.mockResolvedValue(bp);
+    const result = await uploadRevision('bp-1', revisionUploadSchema.parse({ blueprintKey: 'v5.pdf', designKey: 'v5.png' }), 'engineer-1');
+    expect(result).toMatchObject({ version: 5 });
   });
 
   it('a legacy blueprint revision ignores changed costing and retains its approval and quotation metadata', async () => {

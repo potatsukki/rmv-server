@@ -259,6 +259,7 @@ export const verifyOcularFeeCheckout = asyncHandler(async (req: Request, res: Re
 
 // ── Customer: Create PayMongo Checkout for Ocular Fee ──
 export const createOcularFeeCheckout = asyncHandler(async (req: Request, res: Response) => {
+  await appointmentsService.recordOcularFeeNonRefundableAck(req.params.id as string, req.userId!);
   const origin = `${req.protocol}://${req.get('host')}`;
   const clientOrigin = req.headers.origin || req.headers.referer?.replace(/\/$/, '') || origin;
   const result = await appointmentsService.createOcularFeeCheckout(
@@ -279,6 +280,7 @@ export const createOcularFeeCheckout = asyncHandler(async (req: Request, res: Re
 
 // ── Customer: Request Ocular Fee Cash Payment ──
 export const requestOcularCashPayment = asyncHandler(async (req: Request, res: Response) => {
+  await appointmentsService.recordOcularFeeNonRefundableAck(req.params.id as string, req.userId!);
   const appointment = await appointmentsService.requestOcularCashPayment(
     req.params.id as string,
     req.userId!,

@@ -53,18 +53,27 @@ const SUPERSEDED_CONFIG_DEFAULTS: Array<[key: string, oldValue: unknown, newValu
 
 /** Fixed design (layout and blueprint) service fee, credited once to the project cost. */
 export const DEFAULT_DESIGN_FEE_AMOUNT = 1000;
+/** Fee for each customer revision request beyond the free revisions. */
+export const DEFAULT_REVISION_FEE_AMOUNT = 1000;
+export const DEFAULT_FREE_REVISION_LIMIT = 3;
 /** How a paid outside-NCR ocular fee is treated when the project continues. */
 export const OCULAR_FEE_ON_PROCEED_OPTIONS = ['separate', 'credit'] as const;
 export type OcularFeeOnProceed = typeof OCULAR_FEE_ON_PROCEED_OPTIONS[number];
 
 export async function getFeePolicyConfig() {
-  const [designFeeAmount, ocularFeeOnProceed] = await Promise.all([
+  const [designFeeAmount, ocularFeeOnProceed, revisionFeeAmount, freeRevisionLimit] = await Promise.all([
     getConfigValue<number>('design_fee_amount', DEFAULT_DESIGN_FEE_AMOUNT),
     getConfigValue<string>('ocular_fee_on_proceed', 'separate'),
+    getConfigValue<number>('revision_fee_amount', DEFAULT_REVISION_FEE_AMOUNT),
+    getConfigValue<number>('free_revision_limit', DEFAULT_FREE_REVISION_LIMIT),
   ]);
   const amount = Number(designFeeAmount);
+  const revisionAmount = Number(revisionFeeAmount);
+  const freeLimit = Number(freeRevisionLimit);
   return {
     designFeeAmount: Number.isFinite(amount) && amount >= 0 ? amount : DEFAULT_DESIGN_FEE_AMOUNT,
+    revisionFeeAmount: Number.isFinite(revisionAmount) && revisionAmount >= 0 ? revisionAmount : DEFAULT_REVISION_FEE_AMOUNT,
+    freeRevisionLimit: Number.isInteger(freeLimit) && freeLimit >= 0 ? freeLimit : DEFAULT_FREE_REVISION_LIMIT,
     ocularFeeOnProceed: (OCULAR_FEE_ON_PROCEED_OPTIONS as readonly string[]).includes(ocularFeeOnProceed)
       ? ocularFeeOnProceed as OcularFeeOnProceed
       : 'separate',
@@ -159,10 +168,15 @@ export async function upsertConfig(
   if (key === 'ocular_fee_on_proceed' && !(OCULAR_FEE_ON_PROCEED_OPTIONS as readonly unknown[]).includes(input.value)) {
     throw AppError.badRequest(`ocular_fee_on_proceed must be one of: ${OCULAR_FEE_ON_PROCEED_OPTIONS.join(', ')}`);
   }
-  if (key === 'design_fee_amount') {
+  if (key === 'design_fee_amount' || key === 'revision_fee_amount') {
     const amount = Number(input.value);
-    if (!Number.isFinite(amount) || amount < 0) throw AppError.badRequest('Design fee must be a number of 0 or more');
+    if (!Number.isFinite(amount) || amount < 0) throw AppError.badRequest('The fee must be a number of 0 or more');
     input.value = Math.round(amount * 100) / 100;
+  }
+  if (key === 'free_revision_limit') {
+    const limit = Number(input.value);
+    if (!Number.isInteger(limit) || limit < 0) throw AppError.badRequest('Free revisions must be a whole number of 0 or more');
+    input.value = limit;
   }
   const hasPrevious = !!existing;
   const changed = !existing || !valuesEqual(existing.value, input.value) || existing.description !== input.description;
@@ -664,6 +678,14 @@ export async function seedDefaultConfigs(): Promise<void> {
     design_fee_amount: {
       value: DEFAULT_DESIGN_FEE_AMOUNT,
       description: 'Design (layout and blueprint) service fee paid before the blueprint starts; credited once to the project cost',
+    },
+    revision_fee_amount: {
+      value: DEFAULT_REVISION_FEE_AMOUNT,
+      description: 'Fee for each customer blueprint revision request beyond the free revisions (non-refundable)',
+    },
+    free_revision_limit: {
+      value: DEFAULT_FREE_REVISION_LIMIT,
+      description: 'Number of free blueprint revisions per project item before the revision fee applies',
     },
     ocular_fee_on_proceed: {
       value: 'separate',

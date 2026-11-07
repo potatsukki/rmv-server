@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as blueprintsService from './blueprints.service.js';
+import * as designFeeService from '../projects/design-fee.service.js';
 
 export const uploadBlueprint = asyncHandler(async (req: Request, res: Response) => {
   const blueprint = await blueprintsService.uploadBlueprint(req.body, req.userId!, req.ip, req.get('user-agent'));
@@ -119,3 +120,15 @@ export const acceptBlueprint = asyncHandler(async (req: Request, res: Response) 
   );
   res.json({ success: true, data: result });
 });
+
+export const recordRevisionFee = asyncHandler(async (req: Request, res: Response) => {
+  const result = await designFeeService.recordRevisionFeePayment(
+    req.params.id as string,
+    req.body,
+    req.userId!,
+    req.ip,
+    req.headers['user-agent'],
+  );
+  res.json({ success: true, data: result });
+});
+
