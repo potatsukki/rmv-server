@@ -18,6 +18,7 @@ export enum StaffAvailabilityStatus {
 // ── Appointment Status ──
 export enum AppointmentStatus {
   REQUESTED = 'requested',
+  ASSIGNED = 'assigned',
   CONFIRMED = 'confirmed',
   PREPARING = 'preparing',
   ON_THE_WAY = 'on_the_way',

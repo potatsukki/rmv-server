@@ -139,6 +139,7 @@ export interface IAppointment extends Document {
 
   // Booking metadata
   bookedBy: Types.ObjectId; // Customer or Agent who created
+  assignedBy?: Types.ObjectId;
   confirmedBy?: Types.ObjectId;
 
   createdAt: Date;
@@ -305,6 +306,7 @@ const appointmentSchema = new Schema<IAppointment>(
     sourceConsultationReportId: { type: Schema.Types.ObjectId, ref: 'VisitReport' },
 
     bookedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true },

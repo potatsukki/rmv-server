@@ -41,6 +41,7 @@ interface SearchAppointmentInput {
 
 const APPOINTMENT_STATUS_LABELS: Record<string, string[]> = {
   [AppointmentStatus.REQUESTED]: ['requested'],
+  [AppointmentStatus.ASSIGNED]: ['assigned'],
   [AppointmentStatus.CONFIRMED]: ['confirmed'],
   [AppointmentStatus.PREPARING]: ['preparing'],
   [AppointmentStatus.ON_THE_WAY]: ['on the way'],

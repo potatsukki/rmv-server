@@ -124,6 +124,7 @@ import {
   prepareProjectOcularSchedule,
   getAvailableSlots,
   reassignAppointmentSales,
+  reviewAssignedAppointment,
   requestAppointment,
   requestReschedule,
   submitSiteDetails,
@@ -219,7 +220,7 @@ describe('completeAppointment', () => {
 describe('reassignAppointmentSales', () => {
   afterEach(() => vi.clearAllMocks());
 
-  it('confirms a requested office appointment immediately when sales staff is assigned', async () => {
+  it('moves a requested office appointment to assigned until the sales staff accepts', async () => {
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.REQUESTED,
@@ -239,15 +240,69 @@ describe('reassignAppointmentSales', () => {
       [Role.APPOINTMENT_AGENT],
     );
 
-    expect(result.status).toBe(AppointmentStatus.CONFIRMED);
-    expect(result.confirmedBy).toBe('agent-1');
+    expect(result.status).toBe(AppointmentStatus.ASSIGNED);
+    expect(result.assignedBy).toBe('agent-1');
+    expect(result.confirmedBy).toBeUndefined();
     expect(mockAssertTransition).toHaveBeenCalledExactlyOnceWith(
       AppointmentStatus.REQUESTED,
-      AppointmentStatus.CONFIRMED,
+      AppointmentStatus.ASSIGNED,
     );
     expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
-      action: AuditAction.APPOINTMENT_CONFIRMED,
+      action: AuditAction.SALES_ASSIGNED,
     }));
+    expect(mockAutoCreateDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe('reviewAssignedAppointment', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('confirms an assigned office appointment when the sales staff accepts', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.ASSIGNED,
+      slotCode: '09:00',
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+    mockUserFindOne.mockImplementation(() => ({
+      select: vi.fn().mockResolvedValue({ _id: 'sales-1', availabilityStatus: StaffAvailabilityStatus.AVAILABLE }),
+    }));
+
+    await reviewAssignedAppointment('appointment-1', { decision: 'accept' }, 'sales-1');
+
+    expect(appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(appointment.confirmedBy).toBe('sales-1');
+    expect(mockAssertTransition).toHaveBeenCalledWith(AppointmentStatus.ASSIGNED, AppointmentStatus.CONFIRMED);
+    expect(mockAutoCreateDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the appointment to requested when the sales staff declines', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.ASSIGNED,
+      slotCode: '09:00',
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+
+    await reviewAssignedAppointment('appointment-1', { decision: 'decline', reason: 'On leave' }, 'sales-1');
+
+    expect(appointment.status).toBe(AppointmentStatus.REQUESTED);
+    expect(appointment.salesStaffId).toBeUndefined();
+    expect(mockAutoCreateDraft).not.toHaveBeenCalled();
+  });
+
+  it('rejects a review when the appointment is not waiting for acceptance', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+
+    await expect(reviewAssignedAppointment('appointment-1', { decision: 'accept' }, 'sales-1'))
+      .rejects.toThrow('This appointment is not waiting for your confirmation');
   });
 });
 
@@ -722,6 +777,33 @@ describe('updateConsultationAttendance', () => {
         attendanceStatus: AppointmentAttendanceStatus.CUSTOMER_DECLINED,
       }),
     }));
+
+    vi.useRealTimers();
+  });
+
+  it('records a no-show consultation as completed and keeps the no-show outcome', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T03:30:00.000Z'));
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      date: '2026-09-17',
+      slotCode: '13:00',
+      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+      salesStaffId: { toString: () => 'sales-1' },
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    await updateConsultationAttendance(
+      'appointment-1',
+      { action: 'no_show', notes: 'Customer did not arrive' },
+      'sales-1',
+      [Role.SALES_STAFF],
+    );
+
+    expect(appointment.status).toBe(AppointmentStatus.COMPLETED);
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.NO_SHOW);
+    expect(mockAssertTransition).toHaveBeenCalledWith(AppointmentStatus.CONFIRMED, AppointmentStatus.COMPLETED);
 
     vi.useRealTimers();
   });

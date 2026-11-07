@@ -37,6 +37,7 @@ import type { SlotCode } from '../../utils/constants.js';
 import { v4 as uuidv4 } from 'uuid';
 import { PaymentStageStatus } from '../../utils/constants.js';
 import { getInstallmentConfig } from '../config/config.service.js';
+import { applyFeeCreditsToNewPlans, markDesignFeeNotCharged, openDesignFee } from './design-fee.service.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { designItemKey, projectItemFilterForReport } from '../../services/project-item-identity.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
@@ -233,6 +234,9 @@ function assertSignedContractKey(key: string) {
 }
 
 async function notifyProjectSubmittedAfterContract(project: any) {
+  // The customer proceeded past the ocular visit, so the design fee is now due before the blueprint.
+  await openDesignFee(project._id);
+
   await createAndSendNotification(
     project.customerId,
     NotificationCategory.PROJECT,
@@ -705,6 +709,9 @@ export async function createProject(
     }
     if (appointment.attendanceStatus === AppointmentAttendanceStatus.CUSTOMER_DECLINED) {
       throw AppError.badRequest('The customer declined this consultation, so it cannot be linked to a project');
+    }
+    if (appointment.attendanceStatus === AppointmentAttendanceStatus.NO_SHOW) {
+      throw AppError.badRequest('The customer did not show up for this consultation, so it cannot be linked to a project');
     }
     if (input.customerId && appointment.customerId.toString() !== input.customerId) {
       throw AppError.badRequest('The appointment must belong to the selected customer');
@@ -1922,7 +1929,7 @@ export async function selectPaymentPlan(
     );
   }
 
-  const plans = await PaymentPlan.insertMany(isCombinedPlan
+  const planDocs = await applyFeeCreditsToNewPlans(project._id, isCombinedPlan
     ? [buildCombinedPlan(project._id, itemBuilds.map(({ built }) => built), actorId)]
     : itemBuilds.map(({ projectItemId, built }) => ({
       projectId: project._id,
@@ -1932,6 +1939,7 @@ export async function selectPaymentPlan(
       stages: built.stages,
       createdBy: actorId,
     })));
+  const plans = await PaymentPlan.insertMany(planDocs);
 
   if (project.status === ProjectStatus.APPROVED) {
     projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
@@ -2138,6 +2146,8 @@ export async function transitionProject(
   }
 
   await project.save();
+  // A project that stops before the design fee is paid is not charged for it.
+  if (input.status === ProjectStatus.CANCELLED) await markDesignFeeNotCharged(project._id);
 
   const actionMap: Partial<Record<ProjectStatus, AuditAction>> = {
     [ProjectStatus.CANCELLED]: AuditAction.PROJECT_CANCELLED,

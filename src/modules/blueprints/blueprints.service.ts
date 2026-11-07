@@ -2,6 +2,7 @@ import {
   Blueprint, BlueprintDraft, Project, ProjectItem, User, AuditLog, PaymentPlan,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
+import { assertDesignFeeAllowsBlueprint } from '../projects/design-fee.service.js';
 import {
   BlueprintStatus, BlueprintComponent, ProjectStatus,
   AuditAction, NotificationCategory, Role, PaymentStageStatus, DeliveryType,
@@ -534,6 +535,7 @@ export async function uploadBlueprint(
 ) {
   const project = await Project.findById(input.projectId);
   if (!project) throw AppError.notFound('Project not found');
+  assertDesignFeeAllowsBlueprint(project);
 
   const projectItem = await resolveProjectItemForBlueprint(project, input.projectItemId);
   const designReviewStatus = projectItem?.designReviewStatus || project.designReviewStatus || 'not_required';

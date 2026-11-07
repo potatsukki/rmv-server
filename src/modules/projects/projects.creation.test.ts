@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  openDesignFee: vi.fn(),
   appointmentFindById: vi.fn(),
   appointmentCreate: vi.fn(),
   projectFindOne: vi.fn(),
@@ -51,6 +52,11 @@ vi.mock('../uploads/upload.service.js', () => ({
 }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
+vi.mock('./design-fee.service.js', () => ({
+  openDesignFee: mocks.openDesignFee,
+  markDesignFeeNotCharged: vi.fn(),
+  applyFeeCreditsToNewPlans: vi.fn(async (_projectId: unknown, plans: unknown[]) => plans),
+}));
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: mocks.generateProjectNumber }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 vi.mock('../appointments/appointments.service.js', () => ({
@@ -251,6 +257,8 @@ describe('markOcularDone', () => {
   it('moves a For Ocular project to For Review after the ocular report is submitted', async () => {
     const project = await markOcularDone('project-1', actorId, [Role.SALES_STAFF]);
     expect(project).toMatchObject({ status: ProjectStatus.SUBMITTED, visitReportId: 'report-1' });
+    // Proceeding past the ocular makes the design fee due before the blueprint.
+    expect(mocks.openDesignFee).toHaveBeenCalledWith(project._id);
     expect(mocks.projectFindOneAndUpdate).toHaveBeenCalledWith(
       { _id: 'project-1', status: ProjectStatus.DRAFT, ocularAppointmentId: 'ocular-1' },
       expect.anything(),

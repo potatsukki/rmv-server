@@ -2,6 +2,8 @@ import mongoose, { Schema, Document, Types } from 'mongoose';
 import { ContractStatus, DeliveryType, ProjectStatus } from '../utils/constants.js';
 import type { IProjectItem } from './ProjectItem.js';
 
+export type DesignFeeStatus = 'not_required' | 'pending' | 'verified' | 'not_charged';
+
 export interface IProject extends Document {
   _id: Types.ObjectId;
   appointmentId?: Types.ObjectId;
@@ -16,6 +18,21 @@ export interface IProject extends Document {
 
   title: string;
   totalCost?: number;
+  /** Design (layout and blueprint) service fee. 'not_required' for projects created before the fee existed. */
+  designFee?: {
+    amount: number;
+    status: DesignFeeStatus;
+    dueAt?: Date;
+    paidAt?: Date;
+    method?: string;
+    referenceNumber?: string;
+    paymentId?: Types.ObjectId;
+    receiptNumber?: string;
+    recordedBy?: Types.ObjectId;
+    creditedPlanId?: Types.ObjectId;
+  };
+  /** Plan that received the ocular fee credit (only when ocular_fee_on_proceed = 'credit'). */
+  ocularFeeCreditedPlanId?: Types.ObjectId;
   serviceType: string; // e.g., gate, railing, kitchen
   serviceTypes?: string[];
   serviceTypeCustom?: string;
@@ -117,6 +134,23 @@ const projectSchema = new Schema<IProject>(
 
     title: { type: String, required: true, trim: true },
     totalCost: { type: Number },
+    designFee: {
+      amount: { type: Number, min: 0, default: 0 },
+      status: {
+        type: String,
+        enum: ['not_required', 'pending', 'verified', 'not_charged'],
+        default: 'not_required',
+      },
+      dueAt: Date,
+      paidAt: Date,
+      method: String,
+      referenceNumber: { type: String, trim: true },
+      paymentId: { type: Schema.Types.ObjectId, ref: 'Payment' },
+      receiptNumber: String,
+      recordedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      creditedPlanId: { type: Schema.Types.ObjectId, ref: 'PaymentPlan' },
+    },
+    ocularFeeCreditedPlanId: { type: Schema.Types.ObjectId, ref: 'PaymentPlan' },
     serviceType: { type: String, required: true, trim: true },
     serviceTypes: [{ type: String, trim: true }],
     serviceTypeCustom: String,

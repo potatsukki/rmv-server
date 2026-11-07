@@ -167,6 +167,7 @@ export async function notifyBookingAgentAppointmentSuccessful(appointment: {
   type: string;
   date: string;
   bookedBy?: unknown;
+  assignedBy?: unknown;
   confirmedBy?: unknown;
 }): Promise<void> {
   const title = 'Appointment Successful';
@@ -175,7 +176,7 @@ export async function notifyBookingAgentAppointmentSuccessful(appointment: {
   const link = `/appointments/${String(appointment._id)}`;
 
   try {
-    const candidateIds = [appointment.bookedBy, appointment.confirmedBy]
+    const candidateIds = [appointment.bookedBy, appointment.assignedBy, appointment.confirmedBy]
       .filter(Boolean)
       .map((id) => String(id));
     const agents = await User.find({

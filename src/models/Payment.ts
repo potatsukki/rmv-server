@@ -27,6 +27,12 @@ export interface IPaymentPlan extends Document {
   projectId: Types.ObjectId;
   projectItemId?: Types.ObjectId;
   totalAmount: number;
+  /** Amount due before fee credits (quotation total incl. any installment surcharge). */
+  grossAmount?: number;
+  /** Paid design fee deducted from this plan (applied to one plan per project, once). */
+  designFeeCredit?: number;
+  /** Paid ocular fee deducted from this plan when ocular_fee_on_proceed = 'credit'. */
+  ocularFeeCredit?: number;
   isPayInFull: boolean;
   stages: IPaymentStage[];
   isImmutable: boolean; // Locked after first verified payment
@@ -67,6 +73,9 @@ const paymentPlanSchema = new Schema<IPaymentPlan>(
     projectId: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
     projectItemId: { type: Schema.Types.ObjectId, ref: 'ProjectItem' },
     totalAmount: { type: Number, required: true, min: 0 },
+    grossAmount: { type: Number, min: 0 },
+    designFeeCredit: { type: Number, min: 0, default: 0 },
+    ocularFeeCredit: { type: Number, min: 0, default: 0 },
     isPayInFull: { type: Boolean, default: false },
     stages: { type: [paymentStageSchema], required: true },
     isImmutable: { type: Boolean, default: false },
