@@ -1,6 +1,7 @@
 import {
   VisitReport, Appointment, Project, ProjectItem, User, AuditLog, SlotLock,
 } from '../../models/index.js';
+import { logger } from '../../utils/logger.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
@@ -2277,12 +2278,35 @@ export async function submitReport(
           `Project "${linkedProject.title}" completed its ocular visit and is ready for blueprint work.`,
           `/projects/${linkedProject._id}`,
         );
-      } else {
+      } else if (linkedProject.contractStatus !== ContractStatus.UPLOADED) {
         await notifySalesContractUploadRequired(
           linkedProject,
           linkedProject.serviceType || linkedProject.title,
           'Ocular measurements have been submitted.',
         );
+      }
+
+      // There is no Done Ocular button: once the ocular visit is finished and its reports are in,
+      // a For Ocular project with a signed contract moves to For Review on its own.
+      if (
+        linkedProject.status === ProjectStatus.DRAFT
+        && linkedProject.ocularAppointmentId?.toString() === appt._id.toString()
+        && linkedProject.contractStatus === ContractStatus.UPLOADED
+        && appt.status === AppointmentStatus.COMPLETED
+      ) {
+        try {
+          const { markOcularDone } = await import('../projects/projects.service.js');
+          await markOcularDone(
+            linkedProject._id.toString(),
+            (linkedProject.salesStaffId || salesStaffId).toString(),
+            [Role.SALES_STAFF, Role.ADMIN],
+            ip,
+            ua,
+          );
+        } catch (error) {
+          // Another started report on this visit may still be a draft; submitting it runs this again.
+          logger.info(`Project ${linkedProject._id} stays For Ocular: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
   }
