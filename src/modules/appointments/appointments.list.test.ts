@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   appointmentFind: vi.fn(),
@@ -54,5 +54,31 @@ describe('listAppointments for Create Project', () => {
     expect(mocks.projectDistinct).toHaveBeenCalledWith('appointmentId', { status: { $ne: 'cancelled' }, customerId: 'customer-1' });
     const filter = mocks.appointmentFind.mock.calls[0]![0];
     expect(JSON.stringify(filter)).toContain('"$nin":["consultation-1","ocular-1"]');
+  });
+});
+
+describe('listAppointments status groups', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const chain = { populate: vi.fn(), sort: vi.fn(), skip: vi.fn(), limit: vi.fn().mockResolvedValue([]) };
+    chain.populate.mockReturnValue(chain);
+    chain.sort.mockReturnValue(chain);
+    chain.skip.mockReturnValue(chain);
+    mocks.appointmentFind.mockReturnValue(chain);
+    mocks.appointmentCountDocuments.mockResolvedValue(0);
+  });
+
+  it('lists the customer completed group, including cancelled visits', async () => {
+    await listAppointments({ statusGroup: 'completed' }, 'customer-1', [Role.CUSTOMER]);
+
+    const filter = mocks.appointmentFind.mock.calls[0]![0];
+    expect(filter.customerId).toBe('customer-1');
+    expect(JSON.stringify(filter)).toContain('"$in":["completed","ready_for_ocular","cancelled","no_show"]');
+  });
+
+  it('ignores an unknown status group', async () => {
+    await listAppointments({ statusGroup: 'on_the_way' }, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({ customerId: 'customer-1' });
   });
 });

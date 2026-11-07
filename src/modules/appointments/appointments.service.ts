@@ -43,6 +43,7 @@ import type {
   SubmitOcularLocationInput,
   AgentFinalizeOcularInput,
 } from './appointments.validation.js';
+import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
 import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
@@ -3227,7 +3228,8 @@ export async function listAppointmentQueue(
 
   // If status/search is provided, don't restrict by the "Queue" window.
   // If not, we keep the default queue filter for a clean view.
-  if (query.status === undefined && !normalizedSearch) {
+  const statusGroupFilter = buildAppointmentStatusGroupFilter(query.statusGroup);
+  if (query.status === undefined && !statusGroupFilter && !normalizedSearch) {
     andFilters.push({
       $or: [
         { status: { $in: APPOINTMENT_QUEUE_ACTIONABLE_STATUSES } },
@@ -3271,6 +3273,7 @@ export async function listAppointmentQueue(
       andFilters.push({ status: query.status });
     }
   }
+  if (statusGroupFilter) andFilters.push(statusGroupFilter);
 
   const queueFilter = andFilters.length === 1 ? andFilters[0] : { $and: andFilters };
   const fetchLimit = normalizedSearch ? 1000 : Math.min(Math.max(limit * 3, 180), 600);
@@ -3417,7 +3420,7 @@ export async function listAppointmentQueue(
     return Number.isNaN(parsed) ? 0 : parsed;
   };
 
-  const prioritizeLatestActivity = query.status === undefined && !normalizedSearch;
+  const prioritizeLatestActivity = query.status === undefined && !statusGroupFilter && !normalizedSearch;
 
   const sortUpcoming = (a: AppointmentQueueItem, b: AppointmentQueueItem) => {
     if (prioritizeLatestActivity) {
@@ -3495,6 +3498,8 @@ export function defaultAppointmentSort(status?: string) {
 
 export async function listAppointments(query: {
   status?: string;
+  /** One of the four statuses the UI shows (requested, assigned, confirmed, completed). */
+  statusGroup?: string;
   type?: string;
   date?: string;
   dateFrom?: string;
@@ -3570,6 +3575,8 @@ export async function listAppointments(query: {
       filter.status = query.status;
     }
   }
+  const statusGroupFilter = buildAppointmentStatusGroupFilter(query.statusGroup);
+  if (statusGroupFilter) appendAndFilter(filter, statusGroupFilter);
   if (query.type) filter.type = query.type;
   if (query.date) filter.date = query.date;
   if (query.ocularFeeStatus) filter.ocularFeeStatus = query.ocularFeeStatus;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { APPOINTMENT_STATUS_GROUPS } from './appointment-status-groups.js';
 
 export const salesNotesSchema = z.object({ initialDesignNotes: z.string().max(2000).trim() });
 import { AppointmentType, PaymentMethod, OcularFeePaymentChoice, ServiceType, MeasurementUnit, Environment, SLOT_CODES } from '../../utils/constants.js';
@@ -123,6 +124,7 @@ export const availableSlotsQuerySchema = z.object({
 
 export const appointmentQueueQuerySchema = z.object({
   status: z.string().max(120).trim().optional(),
+  statusGroup: z.enum(APPOINTMENT_STATUS_GROUPS).optional(),
   search: z.string().max(120).trim().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(120),
 });
