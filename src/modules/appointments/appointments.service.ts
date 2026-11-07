@@ -556,6 +556,7 @@ async function assertSalesAvailable(
   slotCode: SlotCode | string,
   appointmentType: AppointmentType,
   appointmentId?: string,
+  options: { enforceSingleActiveAssignment?: boolean } = {},
 ): Promise<void> {
   const salesUser = await User.findOne({
     _id: salesId,
@@ -575,6 +576,7 @@ async function assertSalesAvailable(
     slotCode,
     appointmentType,
     appointmentId,
+    enforceSingleActiveAssignment: options.enforceSingleActiveAssignment,
   });
 
   if (!eligibility.assignmentEligible) {
@@ -924,12 +926,14 @@ export async function reassignAppointmentSales(
     return appointment;
   }
 
+  // A sales staff member takes one active appointment at a time.
   await assertSalesAvailable(
     input.salesStaffId,
     appointment.date,
     appointment.slotCode as SlotCode,
     appointment.type,
     appointment._id.toString(),
+    { enforceSingleActiveAssignment: true },
   );
 
   if (appointment.type === AppointmentType.OCULAR && appointment.status !== AppointmentStatus.REQUESTED) {
@@ -941,23 +945,23 @@ export async function reassignAppointmentSales(
   }
 
   const wasRequested = appointment.status === AppointmentStatus.REQUESTED;
-  // Office flow: Requested -> Assigned (staff assigned) -> Confirmed (staff accepts).
-  // Assigning or reassigning before acceptance keeps the appointment in Assigned.
-  const awaitingSalesAcceptance = appointment.type === AppointmentType.OFFICE
+  // Office flow: Requested -> Confirmed. The agent's assignment confirms the appointment;
+  // the sales staff no longer accepts or declines it. Older "assigned" records still
+  // waiting for acceptance are confirmed the same way when they are reassigned.
+  const confirmsOnAssignment = appointment.type === AppointmentType.OFFICE
     && (wasRequested || appointment.status === AppointmentStatus.ASSIGNED);
   const isFirstAssignment = wasRequested && appointment.type === AppointmentType.OFFICE;
 
   appointment.salesStaffId = nextSalesStaff._id;
-  if (awaitingSalesAcceptance) {
-    if (wasRequested) {
-      appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.ASSIGNED);
-    }
-    appointment.status = AppointmentStatus.ASSIGNED;
+  if (confirmsOnAssignment) {
+    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
+    appointment.status = AppointmentStatus.CONFIRMED;
     appointment.assignedBy = actorId as unknown as Types.ObjectId;
+    appointment.confirmedBy = actorId as unknown as Types.ObjectId;
   }
   await appointment.save();
 
-  const ownershipSync = wasRequested || awaitingSalesAcceptance
+  const ownershipSync = wasRequested || confirmsOnAssignment
     ? { draftVisitReportsUpdated: 0, projectsUpdated: 0 }
     : await syncDraftOwnershipForReassignment(appointment._id, nextSalesStaff._id);
 
@@ -978,13 +982,13 @@ export async function reassignAppointmentSales(
     userAgent: ua,
   });
 
-  const needsReview = awaitingSalesAcceptance || wasRequested;
+  const isNewAssignment = confirmsOnAssignment || wasRequested;
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
-    needsReview ? 'Appointment Review Required' : 'Appointment Reassigned',
-    needsReview
-      ? `You have been assigned to the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. Please accept or decline it.`
+    isNewAssignment ? 'New Appointment Assigned' : 'Appointment Reassigned',
+    confirmsOnAssignment
+      ? `You have been assigned to the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. It is now confirmed on your schedule.`
       : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
     `/appointments/${appointment._id}`,
   );
@@ -1004,8 +1008,8 @@ export async function reassignAppointmentSales(
     await createAndSendNotification(
       appointment.customerId,
       NotificationCategory.APPOINTMENT,
-      'Sales Staff Assigned',
-      `A sales staff has been assigned to your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. You will be notified once it is confirmed.`,
+      'Appointment Confirmed',
+      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed and a sales staff member has been assigned to you.`,
       `/appointments/${appointment._id}`,
     );
   } else if (!wasRequested) {
@@ -1018,10 +1022,26 @@ export async function reassignAppointmentSales(
     );
   }
 
+  if (confirmsOnAssignment) {
+    await autoCreateVisitReport(
+      appointment._id,
+      appointment.customerId,
+      appointment.salesStaffId!,
+      'consultation',
+      appointment.customerSiteDetails || undefined,
+      appointment.serviceTypes,
+      appointment.serviceTypes?.[0],
+      appointment.serviceTypeCustom,
+    );
+  }
+
   return appointment;
 }
 
 // ── Sales Staff: Review Assigned Appointment ──
+// New assignments are confirmed by the agent directly. This only lets the assigned
+// sales staff confirm older "assigned" records created before that change; declining
+// is no longer allowed.
 
 export async function reviewAssignedAppointment(
   appointmentId: string,
@@ -1044,40 +1064,8 @@ export async function reviewAssignedAppointment(
     throw AppError.badRequest('This appointment is not waiting for your confirmation');
   }
 
-  if (input.decision === 'decline') {
-    appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.REQUESTED);
-    appointment.status = AppointmentStatus.REQUESTED;
-    appointment.salesStaffId = undefined;
-    if (input.reason) appointment.internalNotes = input.reason;
-    await appointment.save();
-
-    await AuditLog.create({
-      action: AuditAction.APPOINTMENT_UPDATED,
-      actorId: salesStaffId,
-      targetType: 'appointment',
-      targetId: appointment._id,
-      details: { action: 'sales_assignment_declined', reason: input.reason || null },
-      ipAddress: ip,
-      userAgent: ua,
-    });
-
-    await notifyRole(
-      Role.APPOINTMENT_AGENT,
-      NotificationCategory.APPOINTMENT,
-      'Sales Staff Reassignment Needed',
-      `The assigned sales staff declined the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}${input.reason ? `. Reason: ${input.reason}` : ''}. Please assign another staff member.`,
-      `/appointments/${appointment._id}`,
-    );
-
-    await createAndSendNotification(
-      appointment.customerId,
-      NotificationCategory.APPOINTMENT,
-      'Appointment Team Update',
-      'We are assigning another available sales staff member to your appointment.',
-      `/appointments/${appointment._id}`,
-    );
-
-    return appointment;
+  if (input.decision !== 'accept') {
+    throw AppError.badRequest('Assigned appointments can no longer be declined. Ask the appointment agent to transfer it if needed.');
   }
 
   await assertSalesAvailable(

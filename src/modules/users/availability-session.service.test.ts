@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   mockAppointmentExists,
   mockAppointmentCountDocuments,
+  mockAppointmentFindOne,
   mockSalesAvailabilityFindOne,
 } = vi.hoisted(() => ({
   mockAppointmentExists: vi.fn(),
   mockAppointmentCountDocuments: vi.fn(),
+  mockAppointmentFindOne: vi.fn(),
   mockSalesAvailabilityFindOne: vi.fn(),
 }));
 
@@ -14,6 +16,7 @@ vi.mock('../../models/index.js', () => ({
   Appointment: {
     exists: mockAppointmentExists,
     countDocuments: mockAppointmentCountDocuments,
+    findOne: mockAppointmentFindOne,
   },
   AvailabilitySession: {},
   SalesAvailability: {
@@ -24,13 +27,20 @@ vi.mock('../../models/index.js', () => ({
 import {
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
+  SALES_ACTIVE_ASSIGNMENT_STATUSES,
 } from './availability-session.service.js';
-import { AppointmentType, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
+import { AppointmentStatus, AppointmentType, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
 function mockSelectable<T>(value: T) {
   return {
     select: vi.fn().mockResolvedValue(value),
   };
+}
+
+function mockActiveAssignment(value: unknown) {
+  mockAppointmentFindOne.mockReturnValueOnce({
+    select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(value) }),
+  });
 }
 
 function buildSession(overrides: Record<string, unknown> = {}) {
@@ -275,5 +285,86 @@ describe('availability-session.service sales assignment eligibility', () => {
     });
     expect(result).toEqual({ assignmentEligible: false, assignmentBlockedReason: reason });
     expect(mockAppointmentExists).not.toHaveBeenCalled();
+  });
+});
+
+describe('availability-session.service one active appointment per sales staff', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-04-23T00:30:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  const newAssignment = {
+    salesStaffId: 'sales-1',
+    userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    dateStr: '2026-04-23',
+    slotCode: '09:00',
+    appointmentType: AppointmentType.OFFICE,
+    appointmentId: 'appt-new',
+    enforceSingleActiveAssignment: true,
+  };
+
+  it('blocks a new assignment while the staff still has an active appointment', async () => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockActiveAssignment({ _id: 'appt-active', appointmentNumber: 'APT-20261109-0006' });
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
+
+    expect(result).toEqual({
+      assignmentEligible: false,
+      assignmentBlockedReason: 'Has an active appointment (APT-20261109-0006) until it is completed',
+    });
+    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
+      salesStaffId: 'sales-1',
+      status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+      _id: { $ne: 'appt-new' },
+    });
+  });
+
+  it('makes the staff assignable again once their appointment is no longer active', async () => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockActiveAssignment(null);
+    mockAppointmentCountDocuments.mockResolvedValueOnce(0);
+    mockAppointmentExists.mockResolvedValueOnce(null);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
+
+    expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  it('treats completed, cancelled, no-show, and ready-for-ocular appointments as finished', () => {
+    for (const finished of [
+      AppointmentStatus.COMPLETED,
+      AppointmentStatus.CANCELLED,
+      AppointmentStatus.NO_SHOW,
+      AppointmentStatus.READY_FOR_OCULAR,
+    ]) {
+      expect(SALES_ACTIVE_ASSIGNMENT_STATUSES).not.toContain(finished);
+    }
+    expect(SALES_ACTIVE_ASSIGNMENT_STATUSES).toEqual(expect.arrayContaining([
+      AppointmentStatus.CONFIRMED,
+      AppointmentStatus.IN_PROGRESS,
+      AppointmentStatus.RESCHEDULE_REQUESTED,
+    ]));
+  });
+
+  it('does not apply the one-appointment rule to existing assignments', async () => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockAppointmentCountDocuments.mockResolvedValueOnce(0);
+    mockAppointmentExists.mockResolvedValueOnce(null);
+
+    const result = await evaluateSalesAssignmentEligibility({
+      ...newAssignment,
+      enforceSingleActiveAssignment: undefined,
+      session: buildSession() as never,
+    });
+
+    expect(result).toEqual({ assignmentEligible: true });
+    expect(mockAppointmentFindOne).not.toHaveBeenCalled();
   });
 });

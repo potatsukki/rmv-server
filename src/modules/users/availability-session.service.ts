@@ -29,6 +29,29 @@ const FINAL_APPOINTMENT_STATUSES = [
   AppointmentStatus.NO_SHOW,
 ];
 const MAX_OCULAR_APPOINTMENTS_PER_DAY = 2;
+
+// A sales staff member holds one active appointment at a time. These statuses still need
+// them; they become assignable again once it is completed, cancelled, a no-show, or the
+// consultation report is submitted (ready for ocular).
+export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
+  AppointmentStatus.REQUESTED,
+  AppointmentStatus.ASSIGNED,
+  AppointmentStatus.CONFIRMED,
+  AppointmentStatus.PREPARING,
+  AppointmentStatus.ON_THE_WAY,
+  AppointmentStatus.ARRIVED_AT_SITE,
+  AppointmentStatus.IN_PROGRESS,
+  AppointmentStatus.RESCHEDULE_REQUESTED,
+];
+
+export async function findActiveSalesAssignment(salesStaffId: string, excludeAppointmentId?: string) {
+  const filter: Record<string, unknown> = {
+    salesStaffId,
+    status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+  };
+  if (excludeAppointmentId) filter._id = { $ne: excludeAppointmentId };
+  return Appointment.findOne(filter).select('appointmentNumber date type status').lean();
+}
 const PH_TIMEZONE_OFFSET = '+08:00';
 
 export interface AvailabilityShiftState {
@@ -248,6 +271,8 @@ export async function evaluateSalesAssignmentEligibility(input: {
   slotCode: SlotCode | string;
   appointmentId?: string;
   appointmentType?: AppointmentType;
+  /** New assignments only: block staff who still have another active appointment. */
+  enforceSingleActiveAssignment?: boolean;
 }): Promise<SalesAssignmentEligibility> {
   const {
     salesStaffId,
@@ -257,6 +282,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
     slotCode,
     appointmentId,
     appointmentType,
+    enforceSingleActiveAssignment,
   } = input;
 
   // ⚠️  TESTING BYPASS – set to `true` to skip shift/availability checks.
@@ -293,6 +319,18 @@ export async function evaluateSalesAssignmentEligibility(input: {
     const adminAvailability = await SalesAvailability.findOne({ salesStaffId }).select('unavailableDates');
     if (adminAvailability?.unavailableDates.includes(dateStr)) {
       return { assignmentEligible: false, assignmentBlockedReason: 'Blocked on this date' };
+    }
+  }
+
+  if (enforceSingleActiveAssignment) {
+    const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId);
+    if (activeAssignment) {
+      return {
+        assignmentEligible: false,
+        assignmentBlockedReason: activeAssignment.appointmentNumber
+          ? `Has an active appointment (${activeAssignment.appointmentNumber}) until it is completed`
+          : 'Has an active appointment until it is completed',
+      };
     }
   }
 

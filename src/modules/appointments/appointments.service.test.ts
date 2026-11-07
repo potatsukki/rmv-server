@@ -142,6 +142,7 @@ import {
   ServiceType,
   StaffAvailabilityStatus,
 } from '../../utils/constants.js';
+import { evaluateSalesAssignmentEligibility } from '../users/availability-session.service.js';
 
 function createAppointment(overrides: Record<string, unknown> = {}) {
   return {
@@ -220,7 +221,14 @@ describe('completeAppointment', () => {
 describe('reassignAppointmentSales', () => {
   afterEach(() => vi.clearAllMocks());
 
-  it('moves a requested office appointment to assigned until the sales staff accepts', async () => {
+  function mockSalesStaffLookup() {
+    mockUserFindOne.mockImplementation(() => ({
+      select: vi.fn().mockResolvedValue({ _id: 'sales-1', availabilityStatus: StaffAvailabilityStatus.AVAILABLE }),
+    }));
+    mockUserFindOne.mockResolvedValueOnce({ _id: 'sales-1', firstName: 'Sam', lastName: 'Cruz' });
+  }
+
+  it('confirms a requested office appointment as soon as the agent assigns sales staff', async () => {
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.REQUESTED,
@@ -228,10 +236,7 @@ describe('reassignAppointmentSales', () => {
       salesStaffId: undefined,
     });
     mockAppointmentFindById.mockResolvedValue(appointment);
-    mockUserFindOne.mockImplementation(() => ({
-      select: vi.fn().mockResolvedValue({ _id: 'sales-1', availabilityStatus: StaffAvailabilityStatus.AVAILABLE }),
-    }));
-    mockUserFindOne.mockResolvedValueOnce({ _id: 'sales-1', firstName: 'Sam', lastName: 'Cruz' });
+    mockSalesStaffLookup();
 
     const result = await reassignAppointmentSales(
       'appointment-1',
@@ -240,16 +245,71 @@ describe('reassignAppointmentSales', () => {
       [Role.APPOINTMENT_AGENT],
     );
 
-    expect(result.status).toBe(AppointmentStatus.ASSIGNED);
+    expect(result.status).toBe(AppointmentStatus.CONFIRMED);
     expect(result.assignedBy).toBe('agent-1');
-    expect(result.confirmedBy).toBeUndefined();
+    expect(result.confirmedBy).toBe('agent-1');
     expect(mockAssertTransition).toHaveBeenCalledExactlyOnceWith(
       AppointmentStatus.REQUESTED,
-      AppointmentStatus.ASSIGNED,
+      AppointmentStatus.CONFIRMED,
     );
     expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
       action: AuditAction.SALES_ASSIGNED,
     }));
+    expect(mockAutoCreateDraft).toHaveBeenCalledTimes(1);
+    expect(evaluateSalesAssignmentEligibility).toHaveBeenCalledWith(expect.objectContaining({
+      salesStaffId: 'sales-1',
+      appointmentId: 'appointment-1',
+      enforceSingleActiveAssignment: true,
+    }));
+  });
+
+  it('confirms an older assigned appointment when it is transferred', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.ASSIGNED,
+      slotCode: '09:00',
+      salesStaffId: { toString: () => 'sales-0' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+    mockSalesStaffLookup();
+
+    const result = await reassignAppointmentSales(
+      'appointment-1',
+      { salesStaffId: 'sales-1', reason: 'Transfer' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
+    );
+
+    expect(result.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(mockAssertTransition).toHaveBeenCalledExactlyOnceWith(
+      AppointmentStatus.ASSIGNED,
+      AppointmentStatus.CONFIRMED,
+    );
+    expect(mockAutoCreateDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses sales staff who still have another active appointment', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.REQUESTED,
+      slotCode: '09:00',
+      salesStaffId: undefined,
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+    mockSalesStaffLookup();
+    vi.mocked(evaluateSalesAssignmentEligibility).mockResolvedValueOnce({
+      assignmentEligible: false,
+      assignmentBlockedReason: 'Has an active appointment (APT-20261109-0006) until it is completed',
+    });
+
+    await expect(reassignAppointmentSales(
+      'appointment-1',
+      { salesStaffId: 'sales-1' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
+    )).rejects.toThrow('Has an active appointment (APT-20261109-0006) until it is completed');
+
+    expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();
   });
 });
@@ -257,7 +317,7 @@ describe('reassignAppointmentSales', () => {
 describe('reviewAssignedAppointment', () => {
   afterEach(() => vi.clearAllMocks());
 
-  it('confirms an assigned office appointment when the sales staff accepts', async () => {
+  it('still lets sales staff confirm an older assigned appointment', async () => {
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.ASSIGNED,
@@ -277,7 +337,7 @@ describe('reviewAssignedAppointment', () => {
     expect(mockAutoCreateDraft).toHaveBeenCalledTimes(1);
   });
 
-  it('returns the appointment to requested when the sales staff declines', async () => {
+  it('does not let sales staff decline an assigned appointment', async () => {
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.ASSIGNED,
@@ -286,10 +346,11 @@ describe('reviewAssignedAppointment', () => {
     });
     mockAppointmentFindById.mockResolvedValue(appointment);
 
-    await reviewAssignedAppointment('appointment-1', { decision: 'decline', reason: 'On leave' }, 'sales-1');
+    await expect(reviewAssignedAppointment('appointment-1', { decision: 'decline' } as never, 'sales-1'))
+      .rejects.toThrow('can no longer be declined');
 
-    expect(appointment.status).toBe(AppointmentStatus.REQUESTED);
-    expect(appointment.salesStaffId).toBeUndefined();
+    expect(appointment.status).toBe(AppointmentStatus.ASSIGNED);
+    expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();
   });
 
