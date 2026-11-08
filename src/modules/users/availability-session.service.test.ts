@@ -62,14 +62,14 @@ describe('availability-session.service summary', () => {
     vi.clearAllMocks();
   });
 
-  it('requires setup for internal users without an open session', () => {
+  it('treats internal users without an open session as available by default', () => {
     const summary = buildAvailabilityStateSummary({
       roles: [Role.SALES_STAFF],
     });
 
     expect(summary).toMatchObject({
-      availabilityStatus: undefined,
-      availabilitySetupRequired: true,
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      availabilitySetupRequired: false,
     });
     expect(summary.activeShift).toBeUndefined();
     expect(summary.expiredShift).toBeUndefined();
@@ -90,7 +90,7 @@ describe('availability-session.service summary', () => {
     });
   });
 
-  it('marks ended shifts as expired and requires another setup action', () => {
+  it('keeps an ended shift for display without requiring setup', () => {
     const summary = buildAvailabilityStateSummary(
       {
         roles: [Role.SALES_STAFF],
@@ -106,7 +106,8 @@ describe('availability-session.service summary', () => {
     expect(summary.expiredShift).toMatchObject({
       sessionId: 'session-1',
     });
-    expect(summary.availabilitySetupRequired).toBe(true);
+    expect(summary.availabilityStatus).toBe(StaffAvailabilityStatus.AVAILABLE);
+    expect(summary.availabilitySetupRequired).toBe(false);
   });
 });
 
@@ -275,13 +276,29 @@ describe('availability-session.service sales assignment eligibility', () => {
   });
 
   it.each([
-    [{ shiftEndAt: new Date('2026-04-23T00:00:00Z') }, 'Shift ended'],
-    [{ closedAt: new Date('2026-04-23T00:00:00Z') }, 'Setup required'],
-    [{ shiftStartAt: new Date('2026-04-23T03:00:00Z') }, 'Off shift'],
-  ])('rejects an expired, closed, or off-shift session: %s', async (overrides, reason) => {
+    ['no session', null],
+    ['an ended shift', buildSession({ shiftEndAt: new Date('2026-04-23T00:00:00Z') })],
+    ['a closed session', buildSession({ closedAt: new Date('2026-04-23T00:00:00Z') })],
+    ['a shift that starts after the slot', buildSession({ shiftStartAt: new Date('2026-04-23T03:00:00Z') })],
+  ])('keeps staff assignable with %s now that there is no time-in', async (_label, session) => {
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockAppointmentCountDocuments.mockResolvedValueOnce(0);
+    mockAppointmentExists.mockResolvedValueOnce(null);
+
     const result = await evaluateSalesAssignmentEligibility({
-      salesStaffId: 'sales-1', userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      session: buildSession(overrides) as never, dateStr: '2026-04-23', slotCode: '09:00',
+      salesStaffId: 'sales-1', userAvailabilityStatus: undefined,
+      session: session as never, dateStr: '2026-04-23', slotCode: '09:00', appointmentType: AppointmentType.OFFICE,
+    });
+    expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  it.each([
+    [StaffAvailabilityStatus.UNAVAILABLE, 'Unavailable'],
+    [StaffAvailabilityStatus.ON_LEAVE, 'On leave'],
+  ])('still blocks staff an admin marked %s', async (status, reason) => {
+    const result = await evaluateSalesAssignmentEligibility({
+      salesStaffId: 'sales-1', userAvailabilityStatus: status,
+      session: null, dateStr: '2026-04-23', slotCode: '09:00', appointmentType: AppointmentType.OFFICE,
     });
     expect(result).toEqual({ assignmentEligible: false, assignmentBlockedReason: reason });
     expect(mockAppointmentExists).not.toHaveBeenCalled();

@@ -470,20 +470,17 @@ async function getSlotAvailability(
   slotCode: string,
   appointmentId?: string,
 ) {
+  // Sales staff are available by default unless an admin marked them Unavailable or On Leave.
   const salesStaff = await User.find({
     roles: Role.SALES_STAFF,
     isActive: true,
-    availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+    availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
   }).select('_id roles availabilityStatus').lean();
 
   const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
     salesStaff.map((staff) => staff._id),
   );
   const isSlotCountEligible = (staff: { _id: Types.ObjectId | string; roles?: Array<Role | string>; availabilityStatus?: StaffAvailabilityStatus }) => {
-    if (staff.availabilityStatus !== StaffAvailabilityStatus.AVAILABLE) {
-      return false;
-    }
-
     const summary = buildAvailabilityStateSummary(
       {
         roles: staff.roles,
@@ -3205,7 +3202,6 @@ export async function listAppointmentQueue(
 
   const limit = query.limit ?? 120;
   const nowInManila = toZonedTime(new Date(), TZ);
-  const todayStr = format(nowInManila, 'yyyy-MM-dd');
   const recentStartStr = format(addDays(nowInManila, -(APPOINTMENT_QUEUE_RECENT_DAYS - 1)), 'yyyy-MM-dd');
 
   const andFilters: Record<string, unknown>[] = [];
@@ -3234,8 +3230,9 @@ export async function listAppointmentQueue(
       $or: [
         { status: { $in: APPOINTMENT_QUEUE_ACTIONABLE_STATUSES } },
         {
+          // No upper bound: an ocular finished before its scheduled date is still recent activity.
           status: { $in: APPOINTMENT_QUEUE_RECENT_STATUSES },
-          date: { $gte: recentStartStr, $lte: todayStr },
+          date: { $gte: recentStartStr },
         },
       ],
     });
@@ -3247,6 +3244,9 @@ export async function listAppointmentQueue(
     .filter(Boolean) || [];
   const isHistoricalStatusFilter = requestedStatuses.length > 0
     && requestedStatuses.every((status) => APPOINTMENT_QUEUE_RECENT_STATUSES.includes(status as AppointmentStatus));
+  // The Completed tab is history: list everything newest first instead of pinning
+  // finished consultations to the top as actionable items.
+  const isHistoricalView = isHistoricalStatusFilter || query.statusGroup === 'completed';
 
   if (query.status) {
     const includesReadyForOcular = requestedStatuses.includes(AppointmentStatus.READY_FOR_OCULAR);
@@ -3281,7 +3281,10 @@ export async function listAppointmentQueue(
   const appointments = await Appointment.find(queueFilter)
     .populate('customerId', 'customerNumber firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName availabilityStatus availabilityNote')
-    .sort({ date: 1, slotCode: 1, createdAt: 1 })
+    // History is fetched newest first so the fetch limit drops the oldest records, not the newest.
+    .sort(isHistoricalView
+      ? { date: -1, slotCode: -1, createdAt: -1 }
+      : { date: 1, slotCode: 1, createdAt: 1 })
     .limit(fetchLimit);
 
   const appointmentIds = appointments.map((appointment) => appointment._id);
@@ -3297,10 +3300,14 @@ export async function listAppointmentQueue(
       : Promise.resolve([]),
     appointmentIds.length
       ? Project.find({
-        appointmentId: { $in: appointmentIds },
+        // An ocular scheduled from a project links back through ocularAppointmentId.
+        $or: [
+          { appointmentId: { $in: appointmentIds } },
+          { ocularAppointmentId: { $in: appointmentIds } },
+        ],
         status: { $ne: ProjectStatus.CANCELLED },
       })
-        .select('_id appointmentId customerId projectNumber title serviceType status createdAt')
+        .select('_id appointmentId ocularAppointmentId customerId projectNumber title serviceType status createdAt')
         .sort({ createdAt: -1 })
         .lean()
       : Promise.resolve([]),
@@ -3316,10 +3323,11 @@ export async function listAppointmentQueue(
 
   const projectByAppointmentId = new Map<string, any>();
   for (const project of customerProjects as any[]) {
-    const appointmentId = project.appointmentId ? String(project.appointmentId) : undefined;
-
-    if (appointmentId && !projectByAppointmentId.has(appointmentId)) {
-      projectByAppointmentId.set(appointmentId, project);
+    for (const linkedId of [project.appointmentId, project.ocularAppointmentId]) {
+      const appointmentId = linkedId ? String(linkedId) : undefined;
+      if (appointmentId && !projectByAppointmentId.has(appointmentId)) {
+        projectByAppointmentId.set(appointmentId, project);
+      }
     }
   }
 
@@ -3336,8 +3344,8 @@ export async function listAppointmentQueue(
     );
     const currentReport = linkedReports.find((r: any) => String(r.appointmentId) === appointmentId);
 
-    const isReadyForOcular = !isHistoricalStatusFilter && isReadyForOcularQueueItem(appointment);
-    const isActionable = !isHistoricalStatusFilter
+    const isReadyForOcular = !isHistoricalView && isReadyForOcularQueueItem(appointment);
+    const isActionable = !isHistoricalView
       && (
         APPOINTMENT_QUEUE_ACTIONABLE_STATUSES.includes(appointment.status)
         || isReadyForOcular

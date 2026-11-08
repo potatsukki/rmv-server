@@ -373,47 +373,50 @@ describe('getAvailableSlots', () => {
     vi.clearAllMocks();
   });
 
-  it('counts only sales staff whose persisted and effective availability labels are Available', async () => {
+  it('counts every sales staff an admin has not marked Unavailable or On Leave', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
 
-    const availableStaff = {
-      _id: 'sales-available',
+    const timedInStaff = {
+      _id: 'sales-timed-in',
       roles: [Role.SALES_STAFF],
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
     };
-    const setupRequiredStaff = {
-      _id: 'sales-setup-required',
-      roles: [Role.SALES_STAFF],
-      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-    };
-    const staleAvailableSessionStaff = {
-      _id: 'sales-stale-session',
+    // No time-in session at all: available by default now that staff no longer time in.
+    const noSessionStaff = {
+      _id: 'sales-no-session',
       roles: [Role.SALES_STAFF],
       availabilityStatus: undefined,
     };
-    const availableSession = {
-      _id: { toString: () => 'session-available' },
-      userId: { toString: () => 'sales-available' },
-      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
-    };
-    const staleAvailableSession = {
-      _id: { toString: () => 'session-stale' },
-      userId: { toString: () => 'sales-stale-session' },
-      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+    // An admin marked this one unavailable through an open availability session.
+    const unavailableSessionStaff = {
+      _id: 'sales-unavailable',
+      roles: [Role.SALES_STAFF],
+      availabilityStatus: undefined,
     };
 
     mockHolidayFindOne.mockResolvedValue(null);
     mockBlockedSlotExists.mockResolvedValue(false);
     mockUserFind.mockImplementation(() => selectLeanResult([
-      availableStaff,
-      setupRequiredStaff,
-      staleAvailableSessionStaff,
+      timedInStaff,
+      noSessionStaff,
+      unavailableSessionStaff,
     ]));
     mockAvailabilitySessionFind.mockReturnValue({
-      sort: vi.fn().mockResolvedValue([availableSession, staleAvailableSession]),
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: { toString: () => 'session-timed-in' },
+          userId: { toString: () => 'sales-timed-in' },
+          availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+          shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+        },
+        {
+          _id: { toString: () => 'session-unavailable' },
+          userId: { toString: () => 'sales-unavailable' },
+          availabilityStatus: StaffAvailabilityStatus.UNAVAILABLE,
+          shiftStartAt: new Date('2026-09-06T00:00:00.000Z'),
+        },
+      ]),
     });
     mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
     mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
@@ -424,15 +427,15 @@ describe('getAvailableSlots', () => {
     });
 
     expect(result.slots).toHaveLength(7);
-    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 2)).toBe(true);
     expect(mockUserFind).toHaveBeenCalledWith({
       roles: Role.SALES_STAFF,
       isActive: true,
-      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
     });
   });
 
-  it('excludes setup-required and expired-shift staff from slot count totals', async () => {
+  it('keeps staff with a missing or ended shift in the slot count', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
 
@@ -441,8 +444,8 @@ describe('getAvailableSlots', () => {
       roles: [Role.SALES_STAFF],
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
     };
-    const setupRequiredStaff = {
-      _id: 'sales-setup-required',
+    const noShiftStaff = {
+      _id: 'sales-no-shift',
       roles: [Role.SALES_STAFF],
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
     };
@@ -456,7 +459,7 @@ describe('getAvailableSlots', () => {
     mockBlockedSlotExists.mockResolvedValue(false);
     mockUserFind.mockImplementation(() => selectLeanResult([
       activeStaff,
-      setupRequiredStaff,
+      noShiftStaff,
       endedShiftStaff,
     ]));
     mockAvailabilitySessionFind.mockReturnValue({
@@ -470,8 +473,8 @@ describe('getAvailableSlots', () => {
           closedAt: undefined,
         },
         {
-          _id: { toString: () => 'session-setup' },
-          userId: { toString: () => 'sales-setup-required' },
+          _id: { toString: () => 'session-no-shift' },
+          userId: { toString: () => 'sales-no-shift' },
           availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
           shiftStartAt: undefined,
           shiftEndAt: undefined,
@@ -495,8 +498,7 @@ describe('getAvailableSlots', () => {
       type: AppointmentType.OFFICE,
     });
 
-    expect(result.slots.every((slot) => slot.remaining === 1)).toBe(true);
-    expect(result.slots.every((slot) => slot.available)).toBe(true);
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 3)).toBe(true);
   });
 });
 
