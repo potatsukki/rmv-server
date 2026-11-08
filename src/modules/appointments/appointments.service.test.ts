@@ -168,11 +168,21 @@ describe('prepareProjectOcularSchedule', () => {
     await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('already have an active appointment');
   });
 
+  it('rejects an ocular scheduled less than 3 days after its consultation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-08T01:00:00Z'));
+    mockAppointmentFindOne.mockResolvedValue(null);
+    await expect(prepareProjectOcularSchedule({
+      customerId: 'customer-1', date: '2026-11-12', slotCode: '09:00', salesStaffId: 'sales-1', consultationDate: '2026-11-10',
+    })).rejects.toThrow('at least 3 days after the consultation');
+    expect(mockAppointmentFindOne).not.toHaveBeenCalled();
+  });
+
   it('enforces the existing advance booking rule', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
     mockAppointmentFindOne.mockResolvedValue(null);
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-06', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('at least 2 days');
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-06', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('at least 3 days');
   });
 
   it('rejects a blocked ocular slot', async () => {
