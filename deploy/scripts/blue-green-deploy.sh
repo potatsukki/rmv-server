@@ -65,7 +65,7 @@ deploy_service() {
 
   if [ -n "$image_ref" ]; then
     echo "Pulling image for $service -> $image_ref"
-    if docker compose -f "$COMPOSE_FILE" pull "$service"; then
+    if docker pull "$image_ref"; then
       return 0
     fi
     echo "WARN: pull failed for $service, falling back to local build"
