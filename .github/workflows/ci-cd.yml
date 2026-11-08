@@ -79,6 +79,9 @@ jobs:
     name: Blue-Green Deploy (Backend)
     runs-on: ubuntu-latest
     needs: [ci, image]
+    permissions:
+      contents: read
+      packages: read
     concurrency:
       group: vps-deploy
       cancel-in-progress: false
@@ -113,9 +116,13 @@ jobs:
             chmod +x /opt/rmv/rmv-server/deploy/scripts/blue-green-deploy.sh
             export RMV_API_IMAGE='${{ needs.image.outputs.image_repo }}'
             export RMV_IMAGE_TAG='${{ needs.image.outputs.image_tag }}'
-            if [ -n "${{ secrets.GHCR_USERNAME }}" ] && [ -n "${{ secrets.GHCR_TOKEN }}" ]; then
-              echo '${{ secrets.GHCR_TOKEN }}' | docker login ghcr.io -u '${{ secrets.GHCR_USERNAME }}' --password-stdin
+            GHCR_USER='${{ secrets.GHCR_USERNAME }}'
+            GHCR_TOKEN='${{ secrets.GHCR_TOKEN }}'
+            if [ -z "$GHCR_USER" ] || [ -z "$GHCR_TOKEN" ]; then
+              GHCR_USER='${{ github.actor }}'
+              GHCR_TOKEN='${{ github.token }}'
             fi
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             /opt/rmv/rmv-server/deploy/scripts/blue-green-deploy.sh api
 
             echo "========== BACKEND DEPLOY DONE =========="
