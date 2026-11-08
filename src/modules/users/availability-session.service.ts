@@ -186,50 +186,34 @@ export function buildAvailabilityStateSummary(
     return summary;
   }
 
-  if (userOverrideStatus && (!session || session.closedAt)) {
-    summary.availabilitySetupRequired = false;
+  // Staff no longer time in: anyone an admin has not marked Unavailable or On Leave is
+  // available by default. Shifts are kept for display only and never require setup.
+  const openSession = session && !session.closedAt ? session : null;
+
+  if (userOverrideStatus) {
+    summary.availabilityStatus = userOverrideStatus;
+    if (openSession) summary.availabilityNote = openSession.availabilityNote ?? undefined;
     return summary;
   }
 
-  if (!session || session.closedAt) {
-    summary.availabilitySetupRequired = true;
-    summary.availabilityStatus = undefined;
+  if (!openSession) {
+    summary.availabilityStatus = StaffAvailabilityStatus.AVAILABLE;
     summary.availabilityNote = undefined;
     return summary;
   }
 
-  summary.availabilityStatus = session.availabilityStatus;
-  summary.availabilityNote = session.availabilityNote ?? undefined;
+  summary.availabilityStatus = openSession.availabilityStatus;
+  summary.availabilityNote = openSession.availabilityNote ?? undefined;
 
-  if (userOverrideStatus) {
-    summary.availabilityStatus = userOverrideStatus;
-    summary.activeShift = undefined;
-    summary.expiredShift = undefined;
-    summary.availabilitySetupRequired = false;
-    return summary;
-  }
-
-  if (session.availabilityStatus === StaffAvailabilityStatus.AVAILABLE) {
-    const shiftState = toShiftState(session, now);
-    if (!shiftState) {
-      summary.availabilitySetupRequired = true;
-      return summary;
-    }
-
-    if (shiftState.shiftEndAt && shiftState.shiftEndAt.getTime() < now.getTime()) {
+  if (openSession.availabilityStatus === StaffAvailabilityStatus.AVAILABLE) {
+    const shiftState = toShiftState(openSession, now);
+    if (shiftState?.shiftEndAt && shiftState.shiftEndAt.getTime() < now.getTime()) {
       summary.expiredShift = shiftState;
-      summary.activeShift = undefined;
-      summary.availabilitySetupRequired = true;
-      return summary;
+    } else if (shiftState) {
+      summary.activeShift = shiftState;
     }
-
-    summary.activeShift = shiftState;
-    return summary;
   }
 
-  summary.activeShift = undefined;
-  summary.expiredShift = undefined;
-  summary.availabilitySetupRequired = false;
   return summary;
 }
 
@@ -295,25 +279,15 @@ export async function evaluateSalesAssignmentEligibility(input: {
       || userAvailabilityStatus === StaffAvailabilityStatus.ON_LEAVE
         ? userAvailabilityStatus
         : undefined;
-    const effectiveStatus = userOverrideStatus ?? session?.availabilityStatus ?? userAvailabilityStatus;
+    // Available by default: only an admin's Unavailable / On Leave (or a blocked date) stops
+    // assignment. There is no time-in, so a missing or ended shift no longer blocks it.
+    const openSessionStatus = session && !session.closedAt ? session.availabilityStatus : undefined;
+    const effectiveStatus = userOverrideStatus ?? openSessionStatus ?? userAvailabilityStatus;
     if (effectiveStatus === StaffAvailabilityStatus.UNAVAILABLE) {
       return { assignmentEligible: false, assignmentBlockedReason: 'Unavailable' };
     }
     if (effectiveStatus === StaffAvailabilityStatus.ON_LEAVE) {
       return { assignmentEligible: false, assignmentBlockedReason: 'On leave' };
-    }
-
-    if (!session || session.closedAt) {
-      return { assignmentEligible: false, assignmentBlockedReason: 'Setup required' };
-    }
-
-    if (isAvailabilityShiftExpired(session)) {
-      return { assignmentEligible: false, assignmentBlockedReason: 'Shift ended' };
-    }
-
-    const targetDateTime = getSlotDateTime(dateStr, slotCode);
-    if (!doesShiftCoverDateTime(session, targetDateTime)) {
-      return { assignmentEligible: false, assignmentBlockedReason: 'Off shift' };
     }
 
     const adminAvailability = await SalesAvailability.findOne({ salesStaffId }).select('unavailableDates');
