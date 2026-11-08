@@ -163,7 +163,7 @@ describe('appointment report submission without project creation', () => {
   it('schedules the follow-up ocular appointment without a project', async () => {
     const { report, appointment } = setupReport({
       consultationOutcome: 'schedule_ocular', serviceType: 'gates',
-      recommendedOcularDate: new Date('2026-09-18T12:00:00Z'), recommendedOcularSlot: '09:00',
+      recommendedOcularDate: new Date('2026-09-20T12:00:00Z'), recommendedOcularSlot: '09:00',
     });
     mocks.appointmentFindById.mockReturnValue({
       then: (resolve: (value: unknown) => unknown) => Promise.resolve(appointment).then(resolve),
@@ -179,7 +179,7 @@ describe('appointment report submission without project creation', () => {
     await submitReport('report-1', 'sales-1');
     expect(appointment.status).toBe('completed');
     expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'ocular', date: '2026-09-18', slotCode: '09:00', sourceConsultationAppointmentId: 'appointment-1',
+      type: 'ocular', date: '2026-09-20', slotCode: '09:00', sourceConsultationAppointmentId: 'appointment-1',
       // The recommending sales staff already owns it — created confirmed, no separate confirmation step.
       status: 'confirmed', confirmedBy: 'sales-1', salesStaffId: 'sales-1',
     }));
@@ -188,7 +188,7 @@ describe('appointment report submission without project creation', () => {
     expect(report.status).toBe('draft');
     // No site address yet on the new ocular appointment, so the customer is emailed to submit one.
     expect(mocks.sendOcularAddressNeededEmail).toHaveBeenCalledWith('customer@example.com', expect.objectContaining({
-      date: '2026-09-18',
+      date: '2026-09-20',
       appointmentId: 'ocular-1',
     }));
     expect(mocks.sendOcularFeeDueEmail).not.toHaveBeenCalled();

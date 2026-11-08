@@ -14,6 +14,7 @@ import { sendOcularAddressNeededEmail, sendOcularFeeDueEmail, sendOcularVisitSch
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
 import { resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { assertOcularAfterConsultation } from '../appointments/ocular-schedule-rules.js';
 import { assertOcularLocationAccepted } from '../maps/maps.service.js';
 import { synchronizeConsultationAttendanceByTime } from '../appointments/consultation-attendance-automation.js';
 
@@ -1784,6 +1785,9 @@ export async function submitReport(
         'Select an ocular visit date and time before scheduling the ocular visit.',
         ErrorCode.VALIDATION_ERROR,
       );
+    }
+    if (consultationOutcome === 'schedule_ocular' && report.recommendedOcularDate) {
+      assertOcularAfterConsultation(report.recommendedOcularDate.toISOString().split('T')[0]!, appt.date);
     }
     // Reject sites outside mainland Luzon before the report or ocular appointment is saved.
     if (consultationOutcome === 'schedule_ocular' && hasRecommendedOcularAddress) {

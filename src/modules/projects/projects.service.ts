@@ -742,6 +742,7 @@ export async function createProject(
       ...input.ocularVisit,
       salesStaffId: appointment?.salesStaffId?.toString()
         || (actorRoles.includes(Role.SALES_STAFF) ? actorId : undefined),
+      consultationDate: appointment?.type === AppointmentType.OFFICE ? appointment.date : undefined,
     })
     : appointment?.salesStaffId || actorId;
   // Resolve the site and fee before creating anything so a routing failure leaves no partial project.
@@ -1035,6 +1036,7 @@ export async function scheduleProjectOcular(
     date: input.date,
     slotCode: input.slotCode,
     salesStaffId: project.salesStaffId.toString(),
+    consultationDate: sourceAppointment?.date,
   });
   const ocularSite = await resolveOcularVisitData(AppointmentType.OCULAR, input.formattedAddress, input.customerLocation);
   const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);

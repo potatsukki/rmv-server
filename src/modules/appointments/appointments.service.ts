@@ -44,6 +44,7 @@ import type {
   AgentFinalizeOcularInput,
 } from './appointments.validation.js';
 import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
+import { assertOcularAfterConsultation } from './ocular-schedule-rules.js';
 import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
@@ -422,12 +423,25 @@ async function assertNoActiveAppointment(customerId: string): Promise<void> {
   }
 }
 
+/** Consultation date behind an ocular appointment, when it came from one. */
+async function getSourceConsultationDate(appointment: {
+  type?: AppointmentType | string;
+  sourceConsultationAppointmentId?: unknown;
+}): Promise<string | undefined> {
+  if (appointment.type !== AppointmentType.OCULAR || !appointment.sourceConsultationAppointmentId) return undefined;
+  const consultation = await Appointment.findById(appointment.sourceConsultationAppointmentId).select('date').lean();
+  return consultation?.date;
+}
+
 export async function prepareProjectOcularSchedule(input: {
   customerId: string;
   date: string;
   slotCode: SlotCode;
   salesStaffId?: string;
+  /** Date of the consultation this ocular follows; the ocular must be 3+ days after it. */
+  consultationDate?: string;
 }): Promise<string> {
+  assertOcularAfterConsultation(input.date, input.consultationDate);
   await assertNoActiveAppointment(input.customerId);
   await assertDateAvailable(input.date);
   const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
@@ -2201,6 +2215,7 @@ export async function requestReschedule(
   const oldDate = appointment.date;
   const oldSlot = appointment.slotCode;
 
+  assertOcularAfterConsultation(input.newDate, await getSourceConsultationDate(appointment));
   await assertDateAvailable(input.newDate);
   await assertSlotAvailable(input.newDate, input.newSlotCode, appointment.type, appointment._id.toString());
 
@@ -2345,6 +2360,7 @@ export async function completeReschedule(
     throw AppError.badRequest('Appointment is not pending reschedule');
   }
 
+  assertOcularAfterConsultation(input.date, await getSourceConsultationDate(appointment));
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, appointment.type, appointment._id.toString());
 
