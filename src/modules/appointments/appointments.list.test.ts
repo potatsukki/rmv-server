@@ -81,4 +81,25 @@ describe('listAppointments status groups', () => {
 
     expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({ customerId: 'customer-1' });
   });
+
+  it('leaves out project oculars when the Appointments page asks for it', async () => {
+    mocks.projectDistinct.mockResolvedValueOnce(['ocular-1', null]);
+
+    await listAppointments({ excludeProjectOculars: 'true' }, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mocks.projectDistinct).toHaveBeenCalledWith('ocularAppointmentId', expect.objectContaining({
+      status: { $ne: 'cancelled' },
+    }));
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({
+      customerId: 'customer-1',
+      $and: [{ _id: { $nin: ['ocular-1'] } }],
+    });
+  });
+
+  it('keeps project oculars for other lists (Projects page, Create Project)', async () => {
+    await listAppointments({ type: 'ocular' }, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mocks.projectDistinct).not.toHaveBeenCalled();
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({ customerId: 'customer-1', type: 'ocular' });
+  });
 });

@@ -30,9 +30,10 @@ const FINAL_APPOINTMENT_STATUSES = [
 ];
 const MAX_OCULAR_APPOINTMENTS_PER_DAY = 2;
 
-// A sales staff member holds one active appointment at a time. These statuses still need
-// them; they become assignable again once it is completed, cancelled, a no-show, or the
-// consultation report is submitted (ready for ocular).
+// A sales staff member takes one appointment per day. These statuses still need them on that
+// date; an appointment on another date never blocks them. They become assignable for that date
+// again once it is completed, cancelled, a no-show, or the consultation report is submitted
+// (ready for ocular).
 export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
   AppointmentStatus.ASSIGNED,
@@ -44,11 +45,17 @@ export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.RESCHEDULE_REQUESTED,
 ];
 
-export async function findActiveSalesAssignment(salesStaffId: string, excludeAppointmentId?: string) {
+export async function findActiveSalesAssignment(
+  salesStaffId: string,
+  excludeAppointmentId?: string,
+  /** Only count active appointments on this date (YYYY-MM-DD). */
+  dateStr?: string,
+) {
   const filter: Record<string, unknown> = {
     salesStaffId,
     status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
   };
+  if (dateStr) filter.date = dateStr;
   if (excludeAppointmentId) filter._id = { $ne: excludeAppointmentId };
   return Appointment.findOne(filter).select('appointmentNumber date type status').lean();
 }
@@ -255,7 +262,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
   slotCode: SlotCode | string;
   appointmentId?: string;
   appointmentType?: AppointmentType;
-  /** New assignments only: block staff who still have another active appointment. */
+  /** New assignments only: block staff who already have another active appointment on this date. */
   enforceSingleActiveAssignment?: boolean;
 }): Promise<SalesAssignmentEligibility> {
   const {
@@ -297,13 +304,13 @@ export async function evaluateSalesAssignmentEligibility(input: {
   }
 
   if (enforceSingleActiveAssignment) {
-    const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId);
+    const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr);
     if (activeAssignment) {
       return {
         assignmentEligible: false,
         assignmentBlockedReason: activeAssignment.appointmentNumber
-          ? `Has an active appointment (${activeAssignment.appointmentNumber}) until it is completed`
-          : 'Has an active appointment until it is completed',
+          ? `Already has an appointment on this date (${activeAssignment.appointmentNumber})`
+          : 'Already has an appointment on this date',
       };
     }
   }

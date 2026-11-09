@@ -305,7 +305,7 @@ describe('availability-session.service sales assignment eligibility', () => {
   });
 });
 
-describe('availability-session.service one active appointment per sales staff', () => {
+describe('availability-session.service one appointment per day per sales staff', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-04-23T00:30:00.000Z'));
@@ -326,21 +326,40 @@ describe('availability-session.service one active appointment per sales staff', 
     enforceSingleActiveAssignment: true,
   };
 
-  it('blocks a new assignment while the staff still has an active appointment', async () => {
+  it('blocks a new assignment while the staff has another active appointment on the same date', async () => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment({ _id: 'appt-active', appointmentNumber: 'APT-20261109-0006' });
+    mockActiveAssignment({ _id: 'appt-active', appointmentNumber: 'APT-20260423-0006' });
 
     const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
 
     expect(result).toEqual({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Has an active appointment (APT-20261109-0006) until it is completed',
+      assignmentBlockedReason: 'Already has an appointment on this date (APT-20260423-0006)',
     });
     expect(mockAppointmentFindOne).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
       status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+      date: '2026-04-23',
       _id: { $ne: 'appt-new' },
     });
+  });
+
+  it('does not block the staff over an active appointment on another date', async () => {
+    // e.g. a project ocular on Nov 11 must not block an office appointment on Nov 12:
+    // the lookup only matches the target date, so nothing is found.
+    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
+    mockActiveAssignment(null);
+    mockAppointmentCountDocuments.mockResolvedValueOnce(0);
+    mockAppointmentExists.mockResolvedValueOnce(null);
+
+    const result = await evaluateSalesAssignmentEligibility({
+      ...newAssignment,
+      dateStr: '2026-11-12',
+      session: buildSession() as never,
+    });
+
+    expect(result).toEqual({ assignmentEligible: true });
+    expect(mockAppointmentFindOne).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-12' }));
   });
 
   it('makes the staff assignable again once their appointment is no longer active', async () => {

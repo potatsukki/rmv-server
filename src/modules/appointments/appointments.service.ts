@@ -167,6 +167,18 @@ function appendAndFilter(
   filter.$and = existingAnd;
 }
 
+/**
+ * Ocular visits a project scheduled. They belong to the project (Projects tab), so the
+ * Appointments page leaves them out when it asks with excludeProjectOculars=true.
+ */
+async function getProjectOcularAppointmentIds(): Promise<unknown[]> {
+  const ids = await Project.distinct('ocularAppointmentId', {
+    status: { $ne: ProjectStatus.CANCELLED },
+    ocularAppointmentId: { $exists: true, $ne: null },
+  });
+  return ids.filter(Boolean);
+}
+
 export interface AppointmentQueueSampleProject {
   projectId: string;
   title: string;
@@ -939,7 +951,7 @@ export async function reassignAppointmentSales(
     return appointment;
   }
 
-  // A sales staff member takes one active appointment at a time.
+  // A sales staff member takes one appointment per day; other dates don't block them.
   await assertSalesAvailable(
     input.salesStaffId,
     appointment.date,
@@ -3064,6 +3076,22 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
   if (canonicalOcularAppointment?._id) {
     appointmentObject.canonicalAppointmentId = canonicalOcularAppointment._id;
   }
+  // An ocular scheduled from a project belongs to that project; the page links back to it.
+  if (appointment.type === AppointmentType.OCULAR) {
+    const linkedProject = await Project.findOne({
+      ocularAppointmentId: appointment._id,
+      status: { $ne: ProjectStatus.CANCELLED },
+    })
+      .select('_id projectNumber title')
+      .lean();
+    if (linkedProject) {
+      appointmentObject.linkedProject = {
+        _id: String(linkedProject._id),
+        projectNumber: linkedProject.projectNumber,
+        title: linkedProject.title,
+      };
+    }
+  }
 
   return appointmentObject;
 }
@@ -3240,6 +3268,11 @@ export async function listAppointmentQueue(
         { type: AppointmentType.OCULAR, ocularFeeStatus: { $ne: 'pending' } },
       ],
     });
+  }
+
+  if (query.excludeProjectOculars === 'true') {
+    const projectOcularIds = await getProjectOcularAppointmentIds();
+    if (projectOcularIds.length) andFilters.push({ _id: { $nin: projectOcularIds } });
   }
 
   // If status/search is provided, don't restrict by the "Queue" window.
@@ -3544,6 +3577,8 @@ export async function listAppointments(query: {
   sortBy?: string;
   sortOrder?: string;
   withoutProject?: string;
+  /** 'true' leaves out ocular visits a project scheduled (they are shown under Projects). */
+  excludeProjectOculars?: string;
 }, actorId: string, actorRoles: Role[]) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
@@ -3633,6 +3668,11 @@ export async function listAppointments(query: {
     appendAndFilter(filter, { _id: { $nin: [...sourceIds, ...ocularIds].filter(Boolean) } });
     // No-show and customer-declined consultations are recorded as completed but must not start a project.
     appendAndFilter(filter, { attendanceStatus: { $nin: CLOSED_WITHOUT_CONSULTATION_ATTENDANCE } });
+  }
+
+  if (query.excludeProjectOculars === 'true') {
+    const projectOcularIds = await getProjectOcularAppointmentIds();
+    if (projectOcularIds.length) appendAndFilter(filter, { _id: { $nin: projectOcularIds } });
   }
 
   const sortField = query.sortBy;

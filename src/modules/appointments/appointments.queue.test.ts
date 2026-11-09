@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { mockAppointmentFind, mockVisitReportFind, mockProjectFind } = vi.hoisted(() => ({
+const { mockAppointmentFind, mockVisitReportFind, mockProjectFind, mockProjectDistinct } = vi.hoisted(() => ({
   mockAppointmentFind: vi.fn(),
   mockVisitReportFind: vi.fn(),
   mockProjectFind: vi.fn(),
+  mockProjectDistinct: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -18,7 +19,7 @@ vi.mock('../../models/index.js', () => ({
   BlockedSlot: {},
   VisitReport: { find: mockVisitReportFind },
   VisitReportStatus: {},
-  Project: { find: mockProjectFind },
+  Project: { find: mockProjectFind, distinct: mockProjectDistinct },
   AppointmentQueueCounter: {},
 }));
 
@@ -162,5 +163,26 @@ describe('listAppointmentQueue', () => {
     expect(item?.actions.projectPath).toBe('/projects/project-1');
     expect(item?.actions.createProjectPath).toBeUndefined();
     expect(item?.sampleProjects).toEqual([expect.objectContaining({ projectId: 'project-1', title: 'Railings Project' })]);
+  });
+
+  it('leaves out project oculars when the Appointments page asks for it', async () => {
+    mockAppointments([]);
+    mockProjectDistinct.mockResolvedValueOnce(['ocular-1', null]);
+
+    await listAppointmentQueue({ excludeProjectOculars: 'true' } as never, SALES_ID, [Role.SALES_STAFF]);
+
+    expect(mockProjectDistinct).toHaveBeenCalledWith('ocularAppointmentId', expect.objectContaining({
+      status: { $ne: 'cancelled' },
+    }));
+    expect(JSON.stringify(mockAppointmentFind.mock.calls[0]?.[0])).toContain('"_id":{"$nin":["ocular-1"]}');
+  });
+
+  it('keeps project oculars in the queue without the flag', async () => {
+    mockAppointments([]);
+
+    await listAppointmentQueue({} as never, SALES_ID, [Role.SALES_STAFF]);
+
+    expect(mockProjectDistinct).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockAppointmentFind.mock.calls[0]?.[0])).not.toContain('"_id"');
   });
 });
