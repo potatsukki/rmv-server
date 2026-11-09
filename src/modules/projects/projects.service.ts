@@ -54,6 +54,7 @@ import {
   type ProjectWorkflowStage,
 } from './project-stage.js';
 import { getProjectPaymentDue, NO_PAYMENT_DUE, type ProjectPaymentDue } from '../payments/payment-due.js';
+import { applyTargetFinishDate } from './target-finish.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
 const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
@@ -2133,6 +2134,7 @@ export async function assignFabricationStaff(
     if (initialPaymentVerified) {
       projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
       project.status = ProjectStatus.FABRICATION;
+      await applyTargetFinishDate(project);
     }
   }
 
@@ -2221,6 +2223,7 @@ export async function transitionProject(
   if (input.status === ProjectStatus.CANCELLED && input.cancelReason) {
     project.cancelReason = input.cancelReason;
   }
+  if (input.status === ProjectStatus.FABRICATION) await applyTargetFinishDate(project);
 
   await project.save();
   // A project that stops before the design fee is paid is not charged for it.
