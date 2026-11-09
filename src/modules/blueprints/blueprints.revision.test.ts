@@ -20,7 +20,7 @@ vi.mock('../config/config.service.js', () => ({
 }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
 
-import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadBlueprint, uploadRevision, upsertBlueprintDraft } from './blueprints.service.js';
+import { approveComponent, finalizeBlueprintDraft, getLatestBlueprint, listBlueprintsByProject, requestRevision, uploadBlueprint, uploadRevision, upsertBlueprintDraft, withWorkingDaysDuration } from './blueprints.service.js';
 import { requestRevisionSchema, revisionUploadSchema, uploadBlueprintSchema } from './blueprints.validation.js';
 import { AuditAction, BlueprintComponent, BlueprintStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -39,6 +39,30 @@ function projectQuery() {
   const project = { _id: 'project-1', title: 'Railings', customerId: 'customer-1', engineerIds: ['engineer-1'], status: ProjectStatus.BLUEPRINT, save: vi.fn().mockResolvedValue(undefined) };
   return Object.assign(Promise.resolve(project), { select: vi.fn().mockResolvedValue(project) });
 }
+
+describe('quotation working days', () => {
+  it('turns the engineer working days into the duration the customer and contract show', () => {
+    expect(withWorkingDaysDuration({ total: 1000, workingDays: 10, systemEstimatedDuration: '2-3 Weeks' })).toMatchObject({
+      workingDays: 10,
+      adjustedEstimatedDuration: '10 working days',
+      estimatedDuration: '10 working days',
+      systemEstimatedDuration: '2-3 Weeks',
+    });
+    expect(withWorkingDaysDuration({ total: 1000, workingDays: 1 })?.estimatedDuration).toBe('1 working day');
+  });
+
+  it('keeps the preset duration when no working days are given', () => {
+    const quotation = { total: 1000, estimatedDuration: '2-3 Weeks' };
+    expect(withWorkingDaysDuration(quotation)).toBe(quotation);
+    expect(withWorkingDaysDuration(undefined)).toBeUndefined();
+  });
+
+  it('accepts working days only as a whole number from 1 to 365', () => {
+    expect(uploadBlueprintSchema.safeParse({ projectId: 'p', blueprintKey: 'b', designKey: 'd', quotation: { total: 1, workingDays: 10 } }).success).toBe(true);
+    expect(uploadBlueprintSchema.safeParse({ projectId: 'p', blueprintKey: 'b', designKey: 'd', quotation: { total: 1, workingDays: 0 } }).success).toBe(false);
+    expect(uploadBlueprintSchema.safeParse({ projectId: 'p', blueprintKey: 'b', designKey: 'd', quotation: { total: 1, workingDays: 2.5 } }).success).toBe(false);
+  });
+});
 
 describe('component-scoped blueprint revisions', () => {
   beforeEach(() => {

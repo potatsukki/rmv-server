@@ -68,6 +68,8 @@ export interface IBlueprint extends Document {
       trigger?: string;
     }[];
     validityDays?: number;
+    /** Engineer's work duration in working days (Mon–Sat); drives estimatedDuration and the target finish date. */
+    workingDays?: number;
     systemEstimatedDuration?: string;
     adjustedEstimatedDuration?: string;
     estimatedDuration?: string;
@@ -165,6 +167,7 @@ const blueprintSchema = new Schema<IBlueprint>(
         trigger: { type: String },
       }],
       validityDays: { type: Number, default: 30 },
+      workingDays: { type: Number, min: 1, max: 365 },
       systemEstimatedDuration: String,
       adjustedEstimatedDuration: String,
       estimatedDuration: String,

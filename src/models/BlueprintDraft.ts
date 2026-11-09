@@ -63,6 +63,7 @@ export interface IBlueprintDraft extends Document {
     lineItems?: IBlueprintDraftQuotationLineItem[];
     fees?: string;
     validityDays?: string;
+    workingDays?: string;
     breakdown?: string;
     estimatedDuration?: string;
     engineerNotes?: string;
@@ -153,6 +154,7 @@ const blueprintDraftSchema = new Schema<IBlueprintDraft>(
       lineItems: { type: [blueprintDraftLineItemSchema], default: undefined },
       fees: { type: String, default: '' },
       validityDays: { type: String, default: '30' },
+      workingDays: { type: String, default: '' },
       breakdown: { type: String, default: '' },
       estimatedDuration: { type: String, default: '' },
       engineerNotes: { type: String, default: '' },

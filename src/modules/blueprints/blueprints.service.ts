@@ -74,6 +74,7 @@ interface BlueprintDraftQuotationInput {
   }>;
   fees?: string;
   validityDays?: string;
+  workingDays?: string;
   breakdown?: string;
   estimatedDuration?: string;
   engineerNotes?: string;
@@ -169,6 +170,27 @@ function normalizeDraftFile(
   };
 }
 
+export function formatWorkingDays(days: number) {
+  return `${days} working day${days === 1 ? '' : 's'}`;
+}
+
+function parseWorkingDays(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const days = Number(value);
+  return Number.isInteger(days) && days >= 1 && days <= 365 ? days : undefined;
+}
+
+/** The engineer's working days, when set, become the duration text the customer and contract show. */
+export function withWorkingDaysDuration<
+  T extends { workingDays?: number; adjustedEstimatedDuration?: string; estimatedDuration?: string },
+>(quotation: T | undefined): T | undefined {
+  if (!quotation) return quotation;
+  const workingDays = parseWorkingDays(quotation.workingDays);
+  if (!workingDays) return quotation;
+  const duration = formatWorkingDays(workingDays);
+  return { ...quotation, workingDays, adjustedEstimatedDuration: duration, estimatedDuration: duration };
+}
+
 function normalizeDraftQuotation(
   quotation?: BlueprintDraftQuotationInput,
 ): BlueprintDraftQuotationInput | undefined {
@@ -198,6 +220,7 @@ function normalizeDraftQuotation(
     })),
     fees: quotation.fees ?? '',
     validityDays: quotation.validityDays ?? '30',
+    workingDays: quotation.workingDays ?? '',
     breakdown: quotation.breakdown ?? '',
     estimatedDuration: quotation.estimatedDuration ?? '',
     engineerNotes: quotation.engineerNotes ?? '',
@@ -221,6 +244,8 @@ function getDraftFileKeys(files?: {
 }
 
 function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliveryType?: string) {
+  const workingDays = parseWorkingDays(quotation?.workingDays);
+  const workingDaysDuration = workingDays ? formatWorkingDays(workingDays) : undefined;
   const internalCostValues = normalizeInternalCostStrings(quotation?.internalCosts);
   const hasInternalCostValues = Boolean(internalCostValues)
     && INTERNAL_COST_KEYS.some((key) => asMoney(internalCostValues?.[key]) > 0);
@@ -237,7 +262,8 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
 
     const paymentOption: 'full' | 'milestone' = quotation?.paymentOption === 'full' ? 'full' : 'milestone';
     const paymentMilestones = buildDefaultPaymentMilestones(total, paymentOption, deliveryType);
-    const estimatedDuration = quotation?.adjustedEstimatedDuration?.trim()
+    const estimatedDuration = workingDaysDuration
+      || quotation?.adjustedEstimatedDuration?.trim()
       || quotation?.estimatedDuration?.trim()
       || quotation?.systemEstimatedDuration?.trim()
       || undefined;
@@ -261,8 +287,9 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
       paymentOption,
       paymentMilestones,
       validityDays: Number(quotation?.validityDays) || 30,
+      workingDays,
       systemEstimatedDuration: quotation?.systemEstimatedDuration?.trim() || undefined,
-      adjustedEstimatedDuration: quotation?.adjustedEstimatedDuration?.trim() || undefined,
+      adjustedEstimatedDuration: workingDaysDuration || quotation?.adjustedEstimatedDuration?.trim() || undefined,
       estimatedDuration,
       inclusions: quotation?.inclusions?.trim() || undefined,
       exclusions: quotation?.exclusions?.trim() || undefined,
@@ -321,9 +348,10 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
     paymentOption: 'milestone' as const,
     lineItems: lineItems.length > 0 ? lineItems : undefined,
     validityDays: Number(quotation?.validityDays) || 30,
+    workingDays,
     breakdown: quotation?.breakdown?.trim() || undefined,
     inclusions: quotation?.breakdown?.trim() || undefined,
-    estimatedDuration: quotation?.estimatedDuration?.trim() || undefined,
+    estimatedDuration: workingDaysDuration || quotation?.estimatedDuration?.trim() || undefined,
     engineerNotes: quotation?.engineerNotes?.trim() || undefined,
     paymentMilestones: validMilestones.length > 0
       ? validMilestones
@@ -572,7 +600,7 @@ export async function uploadBlueprint(
     designKey: input.designKey,
     costingKey: input.costingKey,
     uploadedBy,
-    quotation: input.quotation,
+    quotation: withWorkingDaysDuration(input.quotation),
     quotationReviewStatus: input.quotation ? 'sent_to_customer' : 'draft',
     // Billing and design are approved automatically once the quotation is sent — the customer
     // no longer reviews the design or clicks "Approve Billing". They can still Request
@@ -670,7 +698,9 @@ export async function uploadRevision(
 
   const isCostingRevision = currentBlueprint.revisionComponent === 'costing';
   if (!isCostingRevision) await restoreReleasedQuotation(currentBlueprint);
-  const quotation = isCostingRevision ? input.quotation ?? currentBlueprint.quotation : currentBlueprint.quotation;
+  const quotation = isCostingRevision
+    ? withWorkingDaysDuration(input.quotation) ?? currentBlueprint.quotation
+    : currentBlueprint.quotation;
   const hasNewQuotation = isCostingRevision && Boolean(input.quotation);
   const blueprintKey = isCostingRevision ? currentBlueprint.blueprintKey : input.blueprintKey ?? currentBlueprint.blueprintKey;
   const designKey = isCostingRevision ? currentBlueprint.designKey : input.designKey ?? currentBlueprint.designKey;

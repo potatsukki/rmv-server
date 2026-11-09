@@ -17,6 +17,7 @@ import { r2Client } from '../../config/r2.js';
 import { generateDownloadUrl } from '../uploads/upload.service.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import { applyTargetFinishDate } from '../projects/target-finish.js';
 import { recordCashPaymentSchema } from './payments.validation.js';
 import type {
   CreatePaymentPlanInput,
@@ -112,6 +113,7 @@ export async function activateAssignedFabricationAfterInitialPayment(project: an
 
   projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
   project.status = ProjectStatus.FABRICATION;
+  await applyTargetFinishDate(project);
   await project.save();
   await ProjectItem.updateMany(
     { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
