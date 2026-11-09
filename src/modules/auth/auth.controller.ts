@@ -71,7 +71,16 @@ export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
 
   setAuthCookies(res, result.accessToken, result.refreshToken);
 
-  res.json({ success: true, data: { message: result.message, user: result.user, accessToken: res.locals.accessToken, refreshToken: res.locals.refreshToken } });
+  res.json({
+    success: true,
+    data: {
+      message: result.message,
+      user: result.user,
+      csrfToken: res.locals.csrfToken,
+      accessToken: res.locals.accessToken,
+      refreshToken: res.locals.refreshToken,
+    },
+  });
 });
 
 export const login = asyncHandler(async (req: Request, res: Response) => {
