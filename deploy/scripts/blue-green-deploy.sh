@@ -33,6 +33,27 @@ read_color() {
   if [ -f "$file" ]; then cat "$file"; else echo "none"; fi
 }
 
+cleanup_target_container() {
+  local container="$1"
+
+  if docker inspect "$container" >/dev/null 2>&1; then
+    echo "Removing stale target container: $container"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+  fi
+
+  local i=1
+  while [ "$i" -le 20 ]; do
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  echo "FATAL: target container still exists after cleanup: $container"
+  return 1
+}
+
 flip_color() {
   if [ "$1" = "blue" ]; then echo "green"; else echo "blue"; fi
 }
@@ -95,9 +116,11 @@ echo "Image preparation complete."
 echo ""
 echo "[2/5] Starting new containers..."
 if [ "$TARGET" = "api" ] || [ "$TARGET" = "both" ]; then
+  cleanup_target_container "rmv-api-$NEXT_API" || exit 1
   docker compose -f "$COMPOSE_FILE" --profile "$NEXT_API" up -d --no-deps "api-$NEXT_API"
 fi
 if [ "$TARGET" = "web" ] || [ "$TARGET" = "both" ]; then
+  cleanup_target_container "rmv-web-$NEXT_WEB" || exit 1
   docker compose -f "$COMPOSE_FILE" --profile "$NEXT_WEB" up -d --no-deps "web-$NEXT_WEB"
 fi
 echo "Containers started."
