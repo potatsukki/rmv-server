@@ -7,7 +7,10 @@ import {
   AppointmentStatus, AppointmentAttendanceStatus, AppointmentType, Role, AuditAction,
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
-import { activeProjectStatusesForRoles } from '../projects/projects.list-policy.js';
+import { activeProjectStatusesForRoles, customerVisibleProjectsFilter } from '../projects/projects.list-policy.js';
+import { resolveProjectStages } from '../projects/project-stage.js';
+import { getProjectPaymentDue } from '../payments/payment-due.js';
+import { buildAppointmentStatusGroupFilter } from '../appointments/appointment-status-groups.js';
 import { countPendingReportGroupsForSalesStaff } from '../visit-reports/visit-reports.service.js';
 
 type LifecycleEscalationProfile = {
@@ -691,70 +694,68 @@ async function countUnpaidProjects(projectIds: Types.ObjectId[] | null) {
   return unpaidProjects.size;
 }
 
-// Same key as DESIGN_FEE_STAGE_PREFIX in projects/design-fee.service.ts (not imported to keep this module light).
-const DESIGN_FEE_STAGE_PREFIX = 'design-fee-';
+const CLOSED_APPOINTMENT_STATUSES = [
+  AppointmentStatus.CANCELLED,
+  AppointmentStatus.COMPLETED,
+  AppointmentStatus.NO_SHOW,
+];
+
+/** Today's date in Manila (YYYY-MM-DD), the format appointment dates are stored in. */
+function manilaToday() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila' }).format(new Date());
+}
 
 /**
- * Customer "Pending Payments": items the customer must act on now.
- * - payment stages that are due (activated) and still pending or declined, with a balance left
- *   (same rule as the "Due Now" badge on the Payments page)
- * - design fees still unpaid, unless a GCash proof is already waiting for cashier review
+ * Customer dashboard numbers, counted with the same rules as the lists each card opens:
+ * - projects: the customer visibility rule and the Projects page listing stages
+ * - Pending Visits: the Requested + Assigned appointment status groups
+ * - Pending Payments: projects in the Payments "Needs Payment" filter + unpaid ocular fees
  */
-async function countCustomerPaymentsDue(projectIds: Types.ObjectId[]) {
-  if (projectIds.length === 0) return 0;
+async function getCustomerDashboardCounts(customerId: string) {
+  const projects = await Project.find(customerVisibleProjectsFilter(customerId))
+    .select('_id status designFee')
+    .lean()
+    .exec();
 
-  const [plans, designFeeProjects] = await Promise.all([
-    PaymentPlan.find({
-      projectId: { $in: projectIds },
-      stages: {
-        $elemMatch: {
-          activatedAt: { $ne: null },
-          status: { $in: [PaymentStageStatus.PENDING, PaymentStageStatus.DECLINED] },
-        },
-      },
-    })
-      .select('projectId stages.status stages.activatedAt stages.amount stages.amountPaid stages.creditApplied')
-      .populate<{ projectId: { _id: Types.ObjectId; status: ProjectStatus; deletedAt?: Date | null } | null }>(
-        'projectId', 'status deletedAt',
-      )
-      .lean()
-      .exec(),
-    Project.find({
-      _id: { $in: projectIds },
-      'designFee.status': 'pending',
-      status: { $ne: ProjectStatus.CANCELLED },
-      deletedAt: null,
-    })
-      .select('_id')
-      .lean()
-      .exec(),
+  const [stages, paymentDue, unpaidOcularFees, pendingVisits] = await Promise.all([
+    resolveProjectStages(projects),
+    getProjectPaymentDue(projects),
+    Appointment.countDocuments({
+      customerId,
+      type: AppointmentType.OCULAR,
+      ocularFeeStatus: 'pending',
+      ocularFee: { $gt: 0 },
+      status: { $nin: CLOSED_APPOINTMENT_STATUSES },
+      date: { $gte: manilaToday() },
+    }).exec(),
+    Appointment.countDocuments({
+      customerId,
+      $or: [
+        buildAppointmentStatusGroupFilter('requested')!,
+        buildAppointmentStatusGroupFilter('assigned')!,
+      ],
+    }).exec(),
   ]);
 
-  let dueStages = 0;
-  for (const plan of plans) {
-    const project = plan.projectId;
-    if (!project || project.deletedAt || project.status === ProjectStatus.CANCELLED) continue;
-    for (const stage of plan.stages) {
-      const isDue = Boolean(stage.activatedAt)
-        && (stage.status === PaymentStageStatus.PENDING || stage.status === PaymentStageStatus.DECLINED);
-      const balanceCents = Math.round(stage.amount * 100)
-        - Math.round((stage.amountPaid ?? 0) * 100)
-        - Math.round((stage.creditApplied ?? 0) * 100);
-      if (isDue && balanceCents > 0) dueStages += 1;
-    }
+  let completed = 0;
+  let cancelled = 0;
+  let fabrication = 0;
+  for (const stage of stages.values()) {
+    if (stage === 'completed') completed += 1;
+    else if (stage === 'cancelled') cancelled += 1;
+    else if (stage === 'fabrication') fabrication += 1;
   }
+  const projectsNeedingPayment = [...paymentDue.values()].filter((due) => due.needsPayment).length;
 
-  let dueDesignFees = 0;
-  if (designFeeProjects.length > 0) {
-    const stageIds = designFeeProjects.map((project) => `${DESIGN_FEE_STAGE_PREFIX}${String(project._id)}`);
-    const awaitingReview = new Set(
-      (await Payment.distinct('stageId', { stageId: { $in: stageIds }, paymentStatus: 'pending_verification' }).exec())
-        .map(String),
-    );
-    dueDesignFees = stageIds.filter((stageId) => !awaitingReview.has(stageId)).length;
-  }
-
-  return dueStages + dueDesignFees;
+  return {
+    projectIds: projects.map((project) => project._id as Types.ObjectId),
+    totalProjects: projects.length,
+    activeProjects: projects.length - completed - cancelled,
+    completedProjects: completed,
+    fabricationInProgress: fabrication,
+    pendingAppointments: pendingVisits,
+    pendingPayments: projectsNeedingPayment + unpaidOcularFees,
+  };
 }
 
 export async function getDashboardSummary(userId?: string, userRoles?: string[]) {
@@ -771,13 +772,8 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
     // Appointment filter: scope to the customer's own appointments when applicable
     const appointmentBaseFilter = isCustomerOnly && userId ? { customerId: userId } : {};
 
-    // Project filter for customer-scoped counts
-    const customerProjectFilter = isCustomerOnly && userId ? { customerId: userId } : {};
-
-    // For customer-scoped pending payments, we need to find the customer's project IDs first
-    const customerProjectIds = isCustomerOnly && userId
-      ? (await Project.find({ customerId: userId, deletedAt: null }).distinct('_id').exec())
-      : null;
+    // Customers get counts that match the filtered lists their dashboard cards open.
+    const customerCounts = isCustomerOnly && userId ? await getCustomerDashboardCounts(userId) : null;
 
     const [
       totalProjects,
@@ -795,8 +791,10 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       pendingBlueprints,
       completedToday,
     ] = await Promise.all([
-      Project.countDocuments({ deletedAt: null, ...customerProjectFilter }).exec(),
-      Project.countDocuments({
+      customerCounts
+        ? Promise.resolve(customerCounts.totalProjects)
+        : Project.countDocuments({ deletedAt: null }).exec(),
+      customerCounts ? Promise.resolve(customerCounts.activeProjects) : Project.countDocuments({
         deletedAt: null,
         status: userRoles?.includes(Role.SALES_STAFF) && !userRoles.includes(Role.ADMIN)
           ? { $in: activeProjectStatusesForRoles(userRoles as Role[]) }
@@ -811,18 +809,20 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
                 ? { customerId: userId }
                 : {}),
       }).exec(),
-      Project.countDocuments({ deletedAt: null, status: ProjectStatus.COMPLETED, ...customerProjectFilter }).exec(),
+      customerCounts
+        ? Promise.resolve(customerCounts.completedProjects)
+        : Project.countDocuments({ deletedAt: null, status: ProjectStatus.COMPLETED }).exec(),
       // Customers: payments they must act on now. Staff: proofs waiting for cashier review.
-      customerProjectIds
-        ? countCustomerPaymentsDue(customerProjectIds)
+      customerCounts
+        ? Promise.resolve(customerCounts.pendingPayments)
         : Payment.countDocuments({ status: PaymentStageStatus.PROOF_SUBMITTED }).exec(),
       // Count projects with an unsettled balance, independently of submitted payment records.
-      countUnpaidProjects(customerProjectIds),
+      countUnpaidProjects(customerCounts ? customerCounts.projectIds : null),
       Payment.aggregate([
         { $match: { status: PaymentStageStatus.VERIFIED, verifiedAt: { $gte: monthStart }, amountPaid: { $lte: MAX_REPORTABLE_PAYMENT_AMOUNT } } },
         { $group: { _id: null, total: { $sum: '$amountPaid' } } },
       ]).exec(),
-      Appointment.countDocuments({
+      customerCounts ? Promise.resolve(customerCounts.pendingAppointments) : Appointment.countDocuments({
         ...appointmentBaseFilter,
         status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.RESCHEDULE_REQUESTED] },
       }).exec(),
@@ -831,10 +831,9 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
         date: todayStr,
         status: { $in: [AppointmentStatus.CONFIRMED, AppointmentStatus.ASSIGNED, AppointmentStatus.REQUESTED] },
       }).exec(),
-      Project.countDocuments({
+      customerCounts ? Promise.resolve(customerCounts.fabricationInProgress) : Project.countDocuments({
         deletedAt: null,
         status: ProjectStatus.FABRICATION,
-        ...(isCustomerOnly && userId ? { customerId: userId } : {}),
         ...(userRoles?.includes(Role.ENGINEER)
           && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r as Role))
           && userId

@@ -3510,14 +3510,17 @@ const APPOINTMENT_HISTORY_STATUSES = new Set<string>([
   AppointmentStatus.NO_SHOW,
 ]);
 
-export function defaultAppointmentSort(status?: string) {
+export function defaultAppointmentSort(status?: string, statusGroup?: string) {
   const statuses = status
     ?.split(',')
     .map((value) => value.trim())
     .filter(Boolean) || [];
 
-  const isHistoricalOnly = statuses.length > 0
-    && statuses.every((value) => APPOINTMENT_HISTORY_STATUSES.has(value));
+  // History is listed newest first, so a capped page drops the oldest records, not the newest.
+  const isHistoricalOnly = statusGroup === 'completed' || (
+    statuses.length > 0
+    && statuses.every((value) => APPOINTMENT_HISTORY_STATUSES.has(value))
+  );
 
   return isHistoricalOnly
     ? { date: -1 as SortOrder, slotCode: -1 as SortOrder, createdAt: -1 as SortOrder }
@@ -3636,7 +3639,7 @@ export async function listAppointments(query: {
   const sortOrder: SortOrder = query.sortOrder === 'desc' ? -1 : 1;
   const sortSpec: Record<string, SortOrder> = sortField
     ? { [sortField]: sortOrder }
-    : defaultAppointmentSort(query.status);
+    : defaultAppointmentSort(query.status, query.statusGroup);
 
   if (!normalizedSearch) {
     const [appointments, total] = await Promise.all([
