@@ -309,7 +309,7 @@ describe('reassignAppointmentSales', () => {
     expect(mockAutoCreateDraft).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses sales staff who still have another active appointment', async () => {
+  it('refuses sales staff who already have an appointment on the same date', async () => {
     const appointment = createAppointment({
       type: AppointmentType.OFFICE,
       status: AppointmentStatus.REQUESTED,
@@ -320,7 +320,7 @@ describe('reassignAppointmentSales', () => {
     mockSalesStaffLookup();
     vi.mocked(evaluateSalesAssignmentEligibility).mockResolvedValueOnce({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Has an active appointment (APT-20261109-0006) until it is completed',
+      assignmentBlockedReason: 'Already has an appointment on this date (APT-20261109-0006)',
     });
 
     await expect(reassignAppointmentSales(
@@ -328,7 +328,7 @@ describe('reassignAppointmentSales', () => {
       { salesStaffId: 'sales-1' },
       'agent-1',
       [Role.APPOINTMENT_AGENT],
-    )).rejects.toThrow('Has an active appointment (APT-20261109-0006) until it is completed');
+    )).rejects.toThrow('Already has an appointment on this date (APT-20261109-0006)');
 
     expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();

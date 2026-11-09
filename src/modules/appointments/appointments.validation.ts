@@ -127,6 +127,7 @@ export const appointmentQueueQuerySchema = z.object({
   statusGroup: z.enum(APPOINTMENT_STATUS_GROUPS).optional(),
   search: z.string().max(120).trim().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(120),
+  excludeProjectOculars: z.enum(['true', 'false']).optional(),
 });
 
 export type RequestAppointmentInput = z.infer<typeof requestAppointmentSchema>;
