@@ -15,6 +15,7 @@ import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportI
 import type { Types } from 'mongoose';
 import { resolveOcularVisitData } from '../appointments/appointments.service.js';
 import { assertOcularAfterConsultation } from '../appointments/ocular-schedule-rules.js';
+import { assertAppointmentDayReached } from '../appointments/appointment-date-guards.js';
 import { assertOcularLocationAccepted } from '../maps/maps.service.js';
 import { synchronizeConsultationAttendanceByTime } from '../appointments/consultation-attendance-automation.js';
 
@@ -1732,6 +1733,8 @@ export async function submitReport(
   // Ensure the linked appointment is in a valid status before allowing submission
   const appt = await Appointment.findById(report.appointmentId);
   if (!appt) throw AppError.notFound('Linked appointment not found');
+  // Submitting the report completes the visit, so it can't happen before the visit day.
+  assertAppointmentDayReached(appt.date, 'submit this visit report');
   await synchronizeConsultationAttendanceByTime(appt);
 
   const isConsultationReport = report.visitType === 'consultation';
