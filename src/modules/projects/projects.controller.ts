@@ -87,6 +87,12 @@ export const getProjectByVisitReportId = asyncHandler(async (req: Request, res: 
   res.json({ success: true, data: project });
 });
 
+export const getProjectHistory = asyncHandler(async (req: Request, res: Response) => {
+  const items = await projectsService.getProjectHistory(req.params.id as string);
+  res.set('Cache-Control', 'no-store');
+  res.json({ success: true, data: items });
+});
+
 export const getProjectById = asyncHandler(async (req: Request, res: Response) => {
   const project = await projectsService.getProjectById((req.params.id as string), req.userId!, req.userRoles!);
   res.json({ success: true, data: project });

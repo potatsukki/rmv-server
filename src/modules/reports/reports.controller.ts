@@ -42,9 +42,16 @@ export const getConversionReport = asyncHandler(async (req: Request, res: Respon
 });
 
 export const getAuditLogs = asyncHandler(async (req: Request, res: Response) => {
+  const text = (key: string) => (typeof req.query[key] === 'string' && req.query[key] ? String(req.query[key]).trim() : undefined);
   const data = await reportsService.getRecentAuditLogs({
     limit: req.query.limit ? Number(req.query.limit) : undefined,
     page: req.query.page ? Number(req.query.page) : undefined,
+    action: text('action'),
+    targetType: text('targetType'),
+    targetId: text('targetId'),
+    actorId: text('actorId'),
+    dateFrom: text('dateFrom'),
+    dateTo: text('dateTo'),
   });
   res.json({ success: true, data });
 });

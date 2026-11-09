@@ -92,6 +92,9 @@ vi.mock('../notifications/socket.service.js', () => ({
   notifyRole: mockNotifyRole,
   emitRoleEvent: vi.fn(),
   notifyBookingAgentAppointmentSuccessful: mockNotifyBookingAgent,
+  notifyBookingAgents: vi.fn(),
+  notifyRoleExcept: vi.fn(),
+  notifyUsers: vi.fn(),
 }));
 
 vi.mock('../notifications/email.service.js', () => ({
@@ -120,6 +123,7 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 import {
+  assertConsultationOcularSchedule,
   completeAppointment,
   prepareProjectOcularSchedule,
   getAvailableSlots,
@@ -280,7 +284,6 @@ describe('reassignAppointmentSales', () => {
     expect(evaluateSalesAssignmentEligibility).toHaveBeenCalledWith(expect.objectContaining({
       salesStaffId: 'sales-1',
       appointmentId: 'appointment-1',
-      enforceSingleActiveAssignment: true,
     }));
   });
 
@@ -520,6 +523,98 @@ describe('getAvailableSlots', () => {
     });
 
     expect(result.slots.every((slot) => slot.available && slot.remaining === 3)).toBe(true);
+  });
+});
+
+describe('one appointment per sales staff per day', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  function twoAvailableStaff() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+    mockHolidayFindOne.mockResolvedValue(null);
+    mockBlockedSlotExists.mockResolvedValue(false);
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      { _id: 'sales-a', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
+      { _id: 'sales-b', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
+    ]));
+    mockAvailabilitySessionFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
+  }
+
+  it('takes a staff member with any appointment that day out of every slot of the day', async () => {
+    twoAvailableStaff();
+    // sales-a has an ocular visit at 14:00 that day.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a' }]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
+      date: '2026-09-10',
+      $or: [
+        { status: { $in: expect.arrayContaining([AppointmentStatus.CONFIRMED, AppointmentStatus.ON_THE_WAY]) } },
+        { slotCode: '09:00', status: { $nin: ['completed', 'cancelled', 'no_show'] } },
+      ],
+    }));
+  });
+
+  it('closes the day for customers once every staff member is taken or awaited', async () => {
+    twoAvailableStaff();
+    // sales-a is booked that day and one request is still waiting for a staff member.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a' }, { salesStaffId: undefined }]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+
+    expect(result.slots.every((slot) => !slot.available && slot.remaining === 0)).toBe(true);
+  });
+
+  it("shows only the given sales staff member's own free day", async () => {
+    twoAvailableStaff();
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      { _id: 'sales-b', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
+    ]));
+    // An unassigned request that day does not take sales-b's own day.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: undefined }]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR, salesStaffId: 'sales-b' });
+
+    expect(mockUserFind).toHaveBeenCalledWith(expect.objectContaining({ _id: 'sales-b' }));
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+  });
+
+  it('counts an ocular visit already under way as an active appointment of the customer', async () => {
+    mockAppointmentFindOne.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.ON_THE_WAY });
+
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' }))
+      .rejects.toThrow('already have an active appointment');
+    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
+      customerId: 'customer-1',
+      status: { $in: expect.arrayContaining([AppointmentStatus.ON_THE_WAY, AppointmentStatus.IN_PROGRESS]) },
+    });
+  });
+
+  it('rejects an ocular visit at a time that is not a real slot', async () => {
+    await expect(assertConsultationOcularSchedule({
+      customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-10-08', slotCode: '09:30',
+      consultationAppointmentId: 'consult-1',
+    })).rejects.toThrow('Choose a valid ocular visit time.');
+  });
+
+  it('never lets the source consultation or the moved ocular visit block itself', async () => {
+    mockAppointmentFindOne.mockResolvedValue({ _id: 'other-1', status: AppointmentStatus.CONFIRMED });
+
+    await expect(assertConsultationOcularSchedule({
+      customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-10-08', slotCode: '09:00',
+      consultationAppointmentId: 'consult-1', existingOcularId: 'ocular-1',
+    })).rejects.toThrow('already have an active appointment');
+    expect(mockAppointmentFindOne).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      _id: { $nin: ['consult-1', 'ocular-1'] },
+    }));
   });
 });
 

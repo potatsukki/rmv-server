@@ -107,20 +107,38 @@ function getLifecycleEscalationProfile(targetType?: string): LifecycleEscalation
 export async function getRecentAuditLogs(query: {
   limit?: number;
   page?: number;
+  action?: string;
+  targetType?: string;
+  targetId?: string;
+  actorId?: string;
+  /** YYYY-MM-DD, Manila time */
+  dateFrom?: string;
+  dateTo?: string;
 }) {
-  const limit = Math.min(query.limit ?? 5, 50);
+  const limit = Math.min(Math.max(query.limit ?? 5, 1), 100);
   const page = Math.max(query.page ?? 1, 1);
   const skip = (page - 1) * limit;
 
+  // Activity Log filters: what happened, to which record, by whom, and when.
+  const filter: Record<string, unknown> = {};
+  if (query.action) filter.action = query.action;
+  if (query.targetType) filter.targetType = query.targetType;
+  if (query.targetId && /^[a-f\d]{24}$/i.test(query.targetId)) filter.targetId = query.targetId;
+  if (query.actorId && /^[a-f\d]{24}$/i.test(query.actorId)) filter.actorId = query.actorId;
+  const createdAt: Record<string, Date> = {};
+  if (query.dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(query.dateFrom)) createdAt.$gte = new Date(`${query.dateFrom}T00:00:00+08:00`);
+  if (query.dateTo && /^\d{4}-\d{2}-\d{2}$/.test(query.dateTo)) createdAt.$lte = new Date(`${query.dateTo}T23:59:59.999+08:00`);
+  if (Object.keys(createdAt).length) filter.createdAt = createdAt;
+
   const [items, total] = await Promise.all([
-    AuditLog.find()
+    AuditLog.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate('actorId', 'firstName lastName email')
+      .populate('actorId', 'firstName lastName email roles')
       .lean()
       .exec(),
-    AuditLog.countDocuments().exec(),
+    AuditLog.countDocuments(filter).exec(),
   ]);
 
   return {

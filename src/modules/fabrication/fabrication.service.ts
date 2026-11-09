@@ -10,7 +10,7 @@ import { getFabricationStateMachine, projectStateMachine } from '../../utils/sta
 import { ON_SITE_FABRICATION_STAGES, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
 import type { IFabricationUpdate } from '../../models/FabricationUpdate.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
-import { createAndSendNotification, getIO } from '../notifications/socket.service.js';
+import { createAndSendNotification, getIO, notifyUsers } from '../notifications/socket.service.js';
 import { sendFabricationUpdateEmail, sendPaymentHeadsUpEmail, sendPaymentDueEmail, sendReadyForDeliveryEmail, sendProjectCompletedEmail } from '../notifications/email.service.js';
 import { getPaymentActivationConfig } from '../config/config.service.js';
 import { formatCurrency } from '../../utils/helpers.js';
@@ -387,6 +387,16 @@ export async function createFabricationUpdate(
       userAgent: ua,
     });
   }
+
+  // Staff on the project follow fabrication too (the customer is told above), except whoever posted it.
+  await notifyUsers(
+    [project.salesStaffId, ...(project.engineerIds || []), project.fabricationLeadId],
+    NotificationCategory.FABRICATION,
+    'Fabrication Update',
+    `"${project.title}" moved to ${String(input.status).replace(/_/g, ' ')}${projectItem?.label ? ` (${projectItem.label})` : ''}.`,
+    `/projects/${project._id}/fabrication`,
+    { excludeUserId: actorId },
+  );
 
   return update;
 }

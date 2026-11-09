@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   sendOcularAddressNeededEmail: vi.fn(),
   sendOcularFeeDueEmail: vi.fn(),
   sendOcularVisitScheduledEmail: vi.fn(),
+  assertConsultationOcularSchedule: vi.fn(),
 }));
 vi.mock('../../models/index.js', () => ({
   VisitReport: { findById: mocks.reportFindById, find: mocks.reportFind },
@@ -28,7 +29,10 @@ vi.mock('../notifications/email.service.js', () => ({
   sendOcularFeeDueEmail: mocks.sendOcularFeeDueEmail,
   sendOcularVisitScheduledEmail: mocks.sendOcularVisitScheduledEmail,
 }));
-vi.mock('../appointments/appointments.service.js', () => ({ resolveOcularVisitData: vi.fn() }));
+vi.mock('../appointments/appointments.service.js', () => ({
+  resolveOcularVisitData: vi.fn(),
+  assertConsultationOcularSchedule: mocks.assertConsultationOcularSchedule,
+}));
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: vi.fn().mockResolvedValue('PRJ-2026-0001') }));
 vi.mock('../appointments/consultation-attendance-automation.js', () => ({
   synchronizeConsultationAttendanceByTime: vi.fn(),
@@ -169,7 +173,10 @@ describe('appointment report submission without project creation', () => {
       then: (resolve: (value: unknown) => unknown) => Promise.resolve(appointment).then(resolve),
       select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue({ serviceTypes: ['gates'] }) }),
     });
-    mocks.appointmentFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue(null) });
+    mocks.appointmentFindOne.mockReturnValue({
+      sort: vi.fn().mockResolvedValue(null),
+      select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(null) }),
+    });
     mocks.appointmentCreate.mockResolvedValue({ _id: 'ocular-1', salesStaffId: 'sales-1' });
     mocks.reportFind.mockImplementation((filter) => ({
       then: (resolve: (value: unknown) => unknown) => Promise.resolve([]).then(resolve),
@@ -178,6 +185,11 @@ describe('appointment report submission without project creation', () => {
     mocks.userFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ email: 'customer@example.com' }) });
     await submitReport('report-1', 'sales-1');
     expect(appointment.status).toBe('completed');
+    // The ocular visit goes through the same schedule checks as any other (one appointment per day).
+    expect(mocks.assertConsultationOcularSchedule).toHaveBeenCalledWith({
+      customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-09-20', slotCode: '09:00',
+      consultationAppointmentId: 'appointment-1', existingOcularId: undefined,
+    });
     expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
       type: 'ocular', date: '2026-09-20', slotCode: '09:00', sourceConsultationAppointmentId: 'appointment-1',
       // The recommending sales staff already owns it — created confirmed, no separate confirmation step.

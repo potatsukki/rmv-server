@@ -45,6 +45,7 @@ vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymen
 vi.mock('../../models/Blueprint.js', () => ({ Blueprint: { findOne: mocks.blueprintFindOne } }));
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(), notifyRole: vi.fn(),
+  notifyBookingAgents: vi.fn(), notifyRoleExcept: vi.fn(), notifyUsers: vi.fn(),
 }));
 vi.mock('../../services/contract.service.js', () => ({ generateAndUploadContract: vi.fn() }));
 vi.mock('../uploads/upload.service.js', () => ({

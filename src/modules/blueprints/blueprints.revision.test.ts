@@ -11,7 +11,7 @@ vi.mock('../../models/index.js', () => ({
   Project: { findById: mocks.projectFindById }, ProjectItem: { countDocuments: async () => 0 }, PaymentPlan: {},
   User: { findById: mocks.userFindById }, AuditLog: { create: mocks.auditCreate, findOne: mocks.auditFindOne },
 }));
-vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: mocks.notifyRole }));
+vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: mocks.notifyRole, notifyUsers: vi.fn() }));
 vi.mock('../notifications/email.service.js', () => ({ sendBlueprintUploadedEmail: vi.fn() }));
 vi.mock('../uploads/upload.service.js', () => ({ deleteFile: mocks.deleteFile }));
 vi.mock('../config/config.service.js', () => ({

@@ -28,12 +28,12 @@ const FINAL_APPOINTMENT_STATUSES = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
 ];
-const MAX_OCULAR_APPOINTMENTS_PER_DAY = 2;
 
-// A sales staff member takes one appointment per day. These statuses still need them on that
-// date; an appointment on another date never blocks them. They become assignable for that date
-// again once it is completed, cancelled, a no-show, or the consultation report is submitted
-// (ready for ocular).
+// A sales staff member takes ONE appointment per day — an office consultation or an ocular
+// visit, never both — so consultations and ocular visits can't overlap. These statuses still
+// need them on that date; an appointment on another date never blocks them. They become
+// assignable for that date again once it is completed, cancelled, a no-show, or the
+// consultation report is submitted (ready for ocular).
 export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
   AppointmentStatus.ASSIGNED,
@@ -260,10 +260,9 @@ export async function evaluateSalesAssignmentEligibility(input: {
   session?: IAvailabilitySession | null;
   dateStr: string;
   slotCode: SlotCode | string;
+  /** The appointment being assigned or moved, so it never blocks itself. */
   appointmentId?: string;
   appointmentType?: AppointmentType;
-  /** New assignments only: block staff who already have another active appointment on this date. */
-  enforceSingleActiveAssignment?: boolean;
 }): Promise<SalesAssignmentEligibility> {
   const {
     salesStaffId,
@@ -272,8 +271,6 @@ export async function evaluateSalesAssignmentEligibility(input: {
     dateStr,
     slotCode,
     appointmentId,
-    appointmentType,
-    enforceSingleActiveAssignment,
   } = input;
 
   // ⚠️  TESTING BYPASS – set to `true` to skip shift/availability checks.
@@ -303,16 +300,15 @@ export async function evaluateSalesAssignmentEligibility(input: {
     }
   }
 
-  if (enforceSingleActiveAssignment) {
-    const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr);
-    if (activeAssignment) {
-      return {
-        assignmentEligible: false,
-        assignmentBlockedReason: activeAssignment.appointmentNumber
-          ? `Already has an appointment on this date (${activeAssignment.appointmentNumber})`
-          : 'Already has an appointment on this date',
-      };
-    }
+  // One appointment per day: any other active consultation or ocular visit that date blocks.
+  const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr);
+  if (activeAssignment) {
+    return {
+      assignmentEligible: false,
+      assignmentBlockedReason: activeAssignment.appointmentNumber
+        ? `Already has an appointment on this date (${activeAssignment.appointmentNumber})`
+        : 'Already has an appointment on this date',
+    };
   }
 
   const conflictFilter: Record<string, unknown> = {
@@ -323,23 +319,6 @@ export async function evaluateSalesAssignmentEligibility(input: {
   };
   if (appointmentId) {
     conflictFilter._id = { $ne: appointmentId };
-  }
-
-  const ocularConflictFilter: Record<string, unknown> = {
-    salesStaffId,
-    date: dateStr,
-    type: AppointmentType.OCULAR,
-    status: { $nin: FINAL_APPOINTMENT_STATUSES },
-  };
-  if (appointmentId) ocularConflictFilter._id = { $ne: appointmentId };
-
-  const activeOcularCount = await Appointment.countDocuments(ocularConflictFilter);
-  if (appointmentType === AppointmentType.OCULAR) {
-    if (activeOcularCount >= MAX_OCULAR_APPOINTMENTS_PER_DAY) {
-      return { assignmentEligible: false, assignmentBlockedReason: 'Daily ocular limit reached (2)' };
-    }
-  } else if (activeOcularCount > 0) {
-    return { assignmentEligible: false, assignmentBlockedReason: 'In ocular visit for this date' };
   }
 
   const conflictingAppointment = await Appointment.exists(conflictFilter);

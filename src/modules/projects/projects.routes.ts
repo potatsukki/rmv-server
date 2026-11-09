@@ -256,6 +256,13 @@ router.get(
 );
 
 router.get(
+  '/:id/history',
+  authenticate,
+  authorize(Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER, Role.CASHIER, Role.APPOINTMENT_AGENT, Role.FABRICATION_STAFF),
+  ctrl.getProjectHistory,
+);
+
+router.get(
   '/:id',
   authenticate,
   ctrl.getProjectById,

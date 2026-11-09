@@ -158,6 +158,77 @@ export async function notifyRole(
 }
 
 /**
+ * Notify each affected person once, never the person who did the action (their own action shows
+ * in the Activity history instead).
+ */
+export async function notifyUsers(
+  recipientIds: Array<string | Types.ObjectId | null | undefined>,
+  category: NotificationCategory,
+  title: string,
+  message: string,
+  link?: string,
+  options: { excludeUserId?: string | Types.ObjectId } = {},
+): Promise<void> {
+  const excluded = options.excludeUserId ? String(options.excludeUserId) : undefined;
+  const unique = [...new Set(recipientIds.filter(Boolean).map((id) => String(id)))]
+    .filter((id) => id !== excluded);
+  for (const id of unique) {
+    await createAndSendNotification(id, category, title, message, link);
+  }
+}
+
+/** Every active user with the role, except the one who did the action. */
+export async function notifyRoleExcept(
+  role: Role,
+  category: NotificationCategory,
+  title: string,
+  message: string,
+  link: string | undefined,
+  excludeUserId?: string | Types.ObjectId,
+): Promise<void> {
+  try {
+    const users = await User.find({ roles: role, isActive: true }).select('_id');
+    await notifyUsers(users.map((user) => user._id), category, title, message, link, { excludeUserId });
+  } catch (error) {
+    logger.error('Failed to notify role:', error);
+  }
+}
+
+/** The appointment agent(s) who booked or confirmed an appointment; all agents when none is linked. */
+export async function findBookingAgentIds(appointment: {
+  bookedBy?: unknown;
+  assignedBy?: unknown;
+  confirmedBy?: unknown;
+}): Promise<string[]> {
+  const candidateIds = [appointment.bookedBy, appointment.assignedBy, appointment.confirmedBy]
+    .filter(Boolean)
+    .map((id) => String((id as { _id?: unknown })?._id ?? id));
+  const linked = candidateIds.length
+    ? await User.find({ _id: { $in: [...new Set(candidateIds)] }, roles: Role.APPOINTMENT_AGENT, isActive: true }).select('_id')
+    : [];
+  if (linked.length) return linked.map((agent) => String(agent._id));
+  const all = await User.find({ roles: Role.APPOINTMENT_AGENT, isActive: true }).select('_id');
+  return all.map((agent) => String(agent._id));
+}
+
+/** Tell the booking agent(s) about an appointment change, skipping the person who made it. */
+export async function notifyBookingAgents(
+  appointment: { bookedBy?: unknown; assignedBy?: unknown; confirmedBy?: unknown },
+  category: NotificationCategory,
+  title: string,
+  message: string,
+  link?: string,
+  excludeUserId?: string | Types.ObjectId,
+): Promise<void> {
+  try {
+    const agentIds = await findBookingAgentIds(appointment);
+    await notifyUsers(agentIds, category, title, message, link, { excludeUserId });
+  } catch (error) {
+    logger.error('Failed to notify booking agent:', error);
+  }
+}
+
+/**
  * Tell the appointment agent who booked or confirmed an appointment that the
  * sales staff finished it. Falls back to all agents when no agent is linked.
  */
@@ -170,31 +241,14 @@ export async function notifyBookingAgentAppointmentSuccessful(appointment: {
   assignedBy?: unknown;
   confirmedBy?: unknown;
 }): Promise<void> {
-  const title = 'Appointment Successful';
   const reference = appointment.appointmentNumber || `${appointment.type} appointment`;
-  const message = `${reference} on ${appointment.date} was completed successfully by the sales staff.`;
-  const link = `/appointments/${String(appointment._id)}`;
-
-  try {
-    const candidateIds = [appointment.bookedBy, appointment.assignedBy, appointment.confirmedBy]
-      .filter(Boolean)
-      .map((id) => String(id));
-    const agents = await User.find({
-      _id: { $in: [...new Set(candidateIds)] },
-      roles: Role.APPOINTMENT_AGENT,
-      isActive: true,
-    }).select('_id');
-
-    if (agents.length === 0) {
-      await notifyRole(Role.APPOINTMENT_AGENT, NotificationCategory.APPOINTMENT, title, message, link);
-      return;
-    }
-    for (const agent of agents) {
-      await createAndSendNotification(agent._id, NotificationCategory.APPOINTMENT, title, message, link);
-    }
-  } catch (error) {
-    logger.error('Failed to notify booking agent:', error);
-  }
+  await notifyBookingAgents(
+    appointment,
+    NotificationCategory.APPOINTMENT,
+    'Appointment Successful',
+    `${reference} on ${appointment.date} was completed successfully by the sales staff.`,
+    `/appointments/${String(appointment._id)}`,
+  );
 }
 
 export function emitUserEvent(userId: string, event: string, payload: Record<string, unknown>): void {

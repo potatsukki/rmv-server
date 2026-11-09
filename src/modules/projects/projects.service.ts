@@ -9,10 +9,12 @@ import {
 } from '../../utils/constants.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyBookingAgents, notifyRole, notifyRoleExcept } from '../notifications/socket.service.js';
+import { formatNotificationDate } from '../../utils/notification-format.js';
 import { generateAndUploadContract, type ContractData } from '../../services/contract.service.js';
 import { generateDownloadUrl, verifyFileExists } from '../uploads/upload.service.js';
 import { logger } from '../../utils/logger.js';
+import { getActivityHistory } from '../reports/activity-history.js';
 import { cleanSalesNotes, combineSalesNotes } from '../../utils/salesNotes.js';
 import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 import type {
@@ -909,6 +911,17 @@ export async function createProject(
   if (input.initialDesignNotes !== undefined && input.appointmentId) {
     await syncAppointmentSalesNotes(input.appointmentId, input.initialDesignNotes);
   }
+
+  // The customer learns the project exists and what comes next.
+  await createAndSendNotification(
+    project.customerId,
+    NotificationCategory.PROJECT,
+    'Project Created',
+    project.contractStatus === ContractStatus.UPLOADED
+      ? `Your project "${project.title}" (${project.projectNumber}) was created and your signed contract is on file.`
+      : `Your project "${project.title}" (${project.projectNumber}) was created. Next step: sign the contract with your sales staff.`,
+    `/projects/${project._id}`,
+  );
   return project;
 }
 
@@ -1084,6 +1097,48 @@ export async function scheduleProjectOcular(
     ua,
   });
 
+  // Record the step on the project too, not only on the new ocular appointment.
+  await AuditLog.create({
+    action: AuditAction.PROJECT_UPDATED,
+    actorId,
+    targetType: 'project',
+    targetId: project._id,
+    details: {
+      action: 'ocular_scheduled',
+      ocularAppointmentId: project.ocularAppointmentId,
+      date: input.date,
+      slotCode: input.slotCode,
+      ocularFeePending,
+    },
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
+  // The agent who handled the consultation sees the visit on the schedule; cashiers expect the
+  // ocular fee when one is due. The customer is told by attachOcularAppointmentToProject.
+  const when = formatNotificationDate(input.date, input.slotCode);
+  const link = `/appointments/${project.ocularAppointmentId}`;
+  if (sourceAppointment) {
+    await notifyBookingAgents(
+      sourceAppointment,
+      NotificationCategory.APPOINTMENT,
+      'Ocular Visit Scheduled',
+      `The ocular visit for "${project.title}" (${project.projectNumber}) is scheduled on ${when}.`,
+      link,
+      actorId,
+    );
+  }
+  if (ocularFeePending) {
+    await notifyRoleExcept(
+      Role.CASHIER,
+      NotificationCategory.PAYMENT,
+      'Ocular Fee Due',
+      `An ocular fee is due for "${project.title}" (${project.projectNumber}); the visit is on ${when}.`,
+      link,
+      actorId,
+    );
+  }
+
   return project;
 }
 
@@ -1114,6 +1169,8 @@ export async function markOcularDone(
   actorRoles: Role[],
   ip?: string,
   ua?: string,
+  /** Set when the system sends the project for review on its own after the ocular report. */
+  automatic = false,
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
@@ -1180,7 +1237,12 @@ export async function markOcularDone(
     actorId,
     targetType: 'project',
     targetId: updated._id,
-    details: { action: 'ocular_marked_done', from: ProjectStatus.DRAFT, to: ProjectStatus.SUBMITTED },
+    details: {
+      action: 'ocular_marked_done',
+      from: ProjectStatus.DRAFT,
+      to: ProjectStatus.SUBMITTED,
+      ...(automatic ? { automatic: true, reason: 'ocular_report_submitted' } : {}),
+    },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1203,7 +1265,14 @@ export async function autoSendOcularProjectForReview(ocularAppointmentId: string
     if (!project) return null;
     const ocular = await Appointment.findById(ocularAppointmentId);
     if (ocular?.status !== AppointmentStatus.COMPLETED) return null;
-    return await markOcularDone(project._id.toString(), project.salesStaffId.toString(), [Role.SALES_STAFF, Role.ADMIN]);
+    return await markOcularDone(
+      project._id.toString(),
+      project.salesStaffId.toString(),
+      [Role.SALES_STAFF, Role.ADMIN],
+      undefined,
+      undefined,
+      true,
+    );
   } catch (error) {
     // e.g. a started report on this visit is still a draft; the next submission runs this again.
     logger.info(`Project for ocular ${ocularAppointmentId} stays For Ocular: ${error instanceof Error ? error.message : String(error)}`);
@@ -2270,6 +2339,33 @@ export async function transitionProject(
 
 // ── Get Project by ID ──
 
+/**
+ * Every recorded step of one project, its consultation and ocular appointments, their visit
+ * reports, and its blueprints (who did what, and when). Staff only.
+ */
+export async function getProjectHistory(projectId: string) {
+  const project = await Project.findById(projectId).select('appointmentId ocularAppointmentId').lean();
+  if (!project) throw AppError.notFound('Project not found');
+
+  const appointmentIds = [project.appointmentId, project.ocularAppointmentId].filter(Boolean);
+  const [reports, blueprints] = await Promise.all([
+    VisitReport.find({
+      $or: [
+        { linkedProjectId: project._id },
+        ...(appointmentIds.length ? [{ appointmentId: { $in: appointmentIds } }] : []),
+      ],
+    }).select('_id').lean(),
+    Blueprint.find({ projectId: project._id }).select('_id').lean(),
+  ]);
+
+  return getActivityHistory([
+    { targetType: 'project', ids: [project._id] },
+    { targetType: 'appointment', ids: appointmentIds },
+    { targetType: 'visit_report', ids: reports.map((report) => report._id) },
+    { targetType: 'blueprint', ids: blueprints.map((blueprint) => blueprint._id) },
+  ]);
+}
+
 export async function getProjectById(
   projectId: string,
   actorId: string,
@@ -2673,7 +2769,16 @@ export async function uploadSignedContract(
   });
 
   if (project.status === ProjectStatus.DRAFT) {
-    // Nothing to announce yet; the customer is notified once the ocular visit is scheduled.
+    // Confirm receipt; the ocular visit is scheduled next.
+    await createAndSendNotification(
+      project.customerId,
+      NotificationCategory.PROJECT,
+      wasMissing ? 'Signed Contract Received' : 'Signed Contract Updated',
+      wasMissing
+        ? `Your signed contract for "${project.title}" is on file. Your sales staff will schedule the ocular visit next.`
+        : `The signed contract for "${project.title}" has been replaced.`,
+      `/projects/${project._id}`,
+    );
   } else if (wasMissing) {
     await notifyProjectSubmittedAfterContract(project);
   } else {
@@ -3193,6 +3298,15 @@ export async function confirmInstallation(
     `Customer ${customerName} confirmed installation for "${selectedItem?.title || project.title}".`,
     buildProjectItemLink(project._id.toString(), 'fabrication', selectedItem?._id?.toString()),
   );
+  if (project.salesStaffId) {
+    await createAndSendNotification(
+      (project.salesStaffId as any)._id ?? project.salesStaffId,
+      NotificationCategory.PROJECT,
+      'Installation Confirmed',
+      `Customer ${customerName} confirmed installation for "${selectedItem?.title || project.title}".`,
+      buildProjectItemLink(project._id.toString(), 'fabrication', selectedItem?._id?.toString()),
+    );
+  }
 
   return attachProjectItems(project);
 }

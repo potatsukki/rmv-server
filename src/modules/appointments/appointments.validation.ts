@@ -120,6 +120,8 @@ export const declineOcularFeeSchema = z.object({
 export const availableSlotsQuerySchema = z.object({
   date: z.string().regex(dateRegex),
   type: z.nativeEnum(AppointmentType),
+  /** Staff only: show the days this sales staff member is free (e.g. a project's ocular visit). */
+  salesStaffId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
 });
 
 export const appointmentQueueQuerySchema = z.object({
