@@ -691,6 +691,72 @@ async function countUnpaidProjects(projectIds: Types.ObjectId[] | null) {
   return unpaidProjects.size;
 }
 
+// Same key as DESIGN_FEE_STAGE_PREFIX in projects/design-fee.service.ts (not imported to keep this module light).
+const DESIGN_FEE_STAGE_PREFIX = 'design-fee-';
+
+/**
+ * Customer "Pending Payments": items the customer must act on now.
+ * - payment stages that are due (activated) and still pending or declined, with a balance left
+ *   (same rule as the "Due Now" badge on the Payments page)
+ * - design fees still unpaid, unless a GCash proof is already waiting for cashier review
+ */
+async function countCustomerPaymentsDue(projectIds: Types.ObjectId[]) {
+  if (projectIds.length === 0) return 0;
+
+  const [plans, designFeeProjects] = await Promise.all([
+    PaymentPlan.find({
+      projectId: { $in: projectIds },
+      stages: {
+        $elemMatch: {
+          activatedAt: { $ne: null },
+          status: { $in: [PaymentStageStatus.PENDING, PaymentStageStatus.DECLINED] },
+        },
+      },
+    })
+      .select('projectId stages.status stages.activatedAt stages.amount stages.amountPaid stages.creditApplied')
+      .populate<{ projectId: { _id: Types.ObjectId; status: ProjectStatus; deletedAt?: Date | null } | null }>(
+        'projectId', 'status deletedAt',
+      )
+      .lean()
+      .exec(),
+    Project.find({
+      _id: { $in: projectIds },
+      'designFee.status': 'pending',
+      status: { $ne: ProjectStatus.CANCELLED },
+      deletedAt: null,
+    })
+      .select('_id')
+      .lean()
+      .exec(),
+  ]);
+
+  let dueStages = 0;
+  for (const plan of plans) {
+    const project = plan.projectId;
+    if (!project || project.deletedAt || project.status === ProjectStatus.CANCELLED) continue;
+    for (const stage of plan.stages) {
+      const isDue = Boolean(stage.activatedAt)
+        && (stage.status === PaymentStageStatus.PENDING || stage.status === PaymentStageStatus.DECLINED);
+      const balanceCents = Math.round(stage.amount * 100)
+        - Math.round((stage.amountPaid ?? 0) * 100)
+        - Math.round((stage.creditApplied ?? 0) * 100);
+      if (isDue && balanceCents > 0) dueStages += 1;
+    }
+  }
+
+  let dueDesignFees = 0;
+  if (designFeeProjects.length > 0) {
+    const stageIds = designFeeProjects.map((project) => `${DESIGN_FEE_STAGE_PREFIX}${String(project._id)}`);
+    const awaitingReview = new Set(
+      (await Payment.distinct('stageId', { stageId: { $in: stageIds }, paymentStatus: 'pending_verification' }).exec())
+        .map(String),
+    );
+    dueDesignFees = stageIds.filter((stageId) => !awaitingReview.has(stageId)).length;
+  }
+
+  return dueStages + dueDesignFees;
+}
+
 export async function getDashboardSummary(userId?: string, userRoles?: string[]) {
   try {
     const now = new Date();
@@ -746,9 +812,9 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
                 : {}),
       }).exec(),
       Project.countDocuments({ deletedAt: null, status: ProjectStatus.COMPLETED, ...customerProjectFilter }).exec(),
-      // For customers, only count payments linked to their projects
+      // Customers: payments they must act on now. Staff: proofs waiting for cashier review.
       customerProjectIds
-        ? Payment.countDocuments({ status: PaymentStageStatus.PROOF_SUBMITTED, projectId: { $in: customerProjectIds } }).exec()
+        ? countCustomerPaymentsDue(customerProjectIds)
         : Payment.countDocuments({ status: PaymentStageStatus.PROOF_SUBMITTED }).exec(),
       // Count projects with an unsettled balance, independently of submitted payment records.
       countUnpaidProjects(customerProjectIds),

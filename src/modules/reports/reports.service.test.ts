@@ -5,6 +5,7 @@ const dashboardMocks = vi.hoisted(() => ({
   projectFind: vi.fn(),
   paymentCount: vi.fn(),
   paymentAggregate: vi.fn(),
+  paymentDistinct: vi.fn(),
   planFind: vi.fn(),
   appointmentCount: vi.fn(),
   userCount: vi.fn(),
@@ -34,7 +35,7 @@ vi.mock('../visit-reports/visit-reports.service.js', () => ({
 
 vi.mock('../../models/index.js', () => ({
   Project: { countDocuments: dashboardMocks.projectCount, find: dashboardMocks.projectFind },
-  Payment: { countDocuments: dashboardMocks.paymentCount, aggregate: dashboardMocks.paymentAggregate },
+  Payment: { countDocuments: dashboardMocks.paymentCount, aggregate: dashboardMocks.paymentAggregate, distinct: dashboardMocks.paymentDistinct },
   PaymentPlan: { find: dashboardMocks.planFind },
   Appointment: { countDocuments: dashboardMocks.appointmentCount },
   FabricationUpdate: { countDocuments: dashboardMocks.fabricationCount, aggregate: dashboardMocks.fabricationAggregate },
@@ -151,6 +152,62 @@ describe('dashboard pending payment projects', () => {
     expect(dashboardMocks.planFind).toHaveBeenCalledWith(expect.objectContaining({
       projectId: { $in: ['own-project'] },
     }));
+  });
+
+  describe('customer pending payments (items needing the customer to pay)', () => {
+    const activatedAt = new Date('2026-11-01');
+
+    function customerProjects(designFeeProjectIds: string[] = []) {
+      dashboardMocks.projectFind.mockImplementation((filter: Record<string, unknown>) => ({
+        distinct: () => mockExecValue(['p1', 'p2', 'p3']),
+        select: () => mockLeanExecValue(
+          filter['designFee.status'] === 'pending' ? designFeeProjectIds.map((_id) => ({ _id })) : [],
+        ),
+      }));
+    }
+
+    it('counts only due stages with a balance, not upcoming, submitted, paid or cancelled ones', async () => {
+      customerProjects();
+      plansQuery([
+        plan('p1', [
+          { status: 'pending', amount: 3000, amountPaid: 0, activatedAt },
+          { status: 'pending', amount: 4000, amountPaid: 0, activatedAt: null },
+        ]),
+        plan('p2', [
+          { status: 'declined', amount: 1000, amountPaid: 0, activatedAt },
+          { status: 'proof_submitted', amount: 1000, amountPaid: 0, activatedAt },
+          { status: 'pending', amount: 1000, amountPaid: 1000, activatedAt },
+          { status: 'pending', amount: 1000, amountPaid: 0, creditApplied: 1000, activatedAt },
+        ]),
+        plan('p3', [{ status: 'pending', amount: 3000, amountPaid: 0, activatedAt }], 'cancelled'),
+      ]);
+
+      const summary = await getDashboardSummary('customer-1', ['customer']);
+
+      expect(summary.pendingPayments).toBe(2);
+      expect(dashboardMocks.paymentCount).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'proof_submitted' }));
+    });
+
+    it('adds unpaid design fees unless a proof is already waiting for the cashier', async () => {
+      customerProjects(['p1', 'p2']);
+      plansQuery([]);
+      dashboardMocks.paymentDistinct.mockReturnValue(mockExecValue(['design-fee-p2']));
+
+      const summary = await getDashboardSummary('customer-1', ['customer']);
+
+      expect(summary.pendingPayments).toBe(1);
+      expect(dashboardMocks.paymentDistinct).toHaveBeenCalledWith('stageId', {
+        stageId: { $in: ['design-fee-p1', 'design-fee-p2'] },
+        paymentStatus: 'pending_verification',
+      });
+    });
+
+    it('keeps the cashier count as proofs awaiting verification', async () => {
+      dashboardMocks.paymentCount.mockReturnValue(mockExecValue(4));
+      const summary = await getDashboardSummary('cashier-1', ['cashier']);
+      expect(summary.pendingPayments).toBe(4);
+      expect(dashboardMocks.paymentCount).toHaveBeenCalledWith({ status: 'proof_submitted' });
+    });
   });
 });
 
