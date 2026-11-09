@@ -13,7 +13,7 @@ import { createAndSendNotification, notifyBookingAgentAppointmentSuccessful, not
 import { sendOcularAddressNeededEmail, sendOcularFeeDueEmail, sendOcularVisitScheduledEmail } from '../notifications/email.service.js';
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
-import { resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { assertConsultationOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
 import { assertOcularAfterConsultation } from '../appointments/ocular-schedule-rules.js';
 import { assertAppointmentDayReached } from '../appointments/appointment-date-guards.js';
 import { assertOcularLocationAccepted } from '../maps/maps.service.js';
@@ -1204,6 +1204,7 @@ async function submitSiblingConsultationReports(
 async function completeOcularAppointmentForReport(appt: any, salesStaffId: string, ip?: string, ua?: string) {
   if (appt.status === AppointmentStatus.COMPLETED) return;
 
+  const fromStatus = appt.status;
   appointmentStateMachine.assertTransition(appt.status, AppointmentStatus.COMPLETED);
   appt.status = AppointmentStatus.COMPLETED;
   await appt.save();
@@ -1221,7 +1222,7 @@ async function completeOcularAppointmentForReport(appt: any, salesStaffId: strin
     actorId: salesStaffId,
     targetType: 'appointment',
     targetId: appt._id,
-    details: { reason: 'ocular_report_submitted' },
+    details: { reason: 'ocular_report_submitted', fromStatus, toStatus: AppointmentStatus.COMPLETED },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1789,8 +1790,24 @@ export async function submitReport(
         ErrorCode.VALIDATION_ERROR,
       );
     }
-    if (consultationOutcome === 'schedule_ocular' && report.recommendedOcularDate) {
-      assertOcularAfterConsultation(report.recommendedOcularDate.toISOString().split('T')[0]!, appt.date);
+    if (consultationOutcome === 'schedule_ocular' && report.recommendedOcularDate && report.recommendedOcularSlot) {
+      const ocularDate = report.recommendedOcularDate.toISOString().split('T')[0]!;
+      assertOcularAfterConsultation(ocularDate, appt.date);
+      // The ocular visit must not overlap anything else on the sales staff's or customer's day.
+      const existingOcular = await Appointment.findOne({
+        customerId: report.customerId,
+        type: AppointmentType.OCULAR,
+        sourceConsultationAppointmentId: appt._id,
+        status: { $nin: [AppointmentStatus.COMPLETED, AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
+      }).select('_id').lean();
+      await assertConsultationOcularSchedule({
+        customerId: String(report.customerId),
+        salesStaffId: String(report.salesStaffId),
+        date: ocularDate,
+        slotCode: report.recommendedOcularSlot,
+        consultationAppointmentId: String(appt._id),
+        existingOcularId: existingOcular?._id ? String(existingOcular._id) : undefined,
+      });
     }
     // Reject sites outside mainland Luzon before the report or ocular appointment is saved.
     if (consultationOutcome === 'schedule_ocular' && hasRecommendedOcularAddress) {
@@ -1884,10 +1901,13 @@ export async function submitReport(
   if (isConsultationReport) {
     // Submitting the consultation report is what finishes the consultation.
     const finishedAt = new Date();
+    const consultationStatusBefore = appt.status;
+    const attendanceStatusBefore = appt.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
     appt.attendanceStatus = AppointmentAttendanceStatus.COMPLETED;
     appt.consultationStartedAt ||= finishedAt;
     appt.consultationCompletedAt = finishedAt;
     appt.attendanceUpdatedAt = finishedAt;
+    appt.attendanceUpdatedBy = salesStaffId as unknown as Types.ObjectId;
 
     // Record the consultation outcome independently of project creation.
     const serviceLabel = report.serviceTypeCustom || report.serviceType || 'General Fabrication';
@@ -1996,6 +2016,8 @@ export async function submitReport(
         });
       } else {
         let changedExistingOcular = false;
+        const previousOcularDate = ocularAppointment.date;
+        const previousOcularSlot = ocularAppointment.slotCode;
 
         if (recommendedOcularDate && ocularAppointment.date !== recommendedOcularDate) {
           ocularAppointment.date = recommendedOcularDate;
@@ -2051,6 +2073,24 @@ export async function submitReport(
 
         if (changedExistingOcular) {
           await ocularAppointment.save();
+        }
+        if (previousOcularDate !== ocularAppointment.date || previousOcularSlot !== ocularAppointment.slotCode) {
+          await AuditLog.create({
+            action: AuditAction.APPOINTMENT_RESCHEDULED,
+            actorId: salesStaffId,
+            targetType: 'appointment',
+            targetId: ocularAppointment._id,
+            details: {
+              reason: 'consultation_report_recommended_ocular',
+              oldDate: previousOcularDate,
+              oldSlotCode: previousOcularSlot,
+              newDate: ocularAppointment.date,
+              newSlotCode: ocularAppointment.slotCode,
+              sourceVisitReportId: report._id,
+            },
+            ipAddress: ip,
+            userAgent: ua,
+          });
         }
       }
 
@@ -2193,14 +2233,34 @@ export async function submitReport(
     if (!siblingConsultationReportsSubmitted) {
       await submitSiblingConsultationReports(report, appt, salesStaffId, ip, ua);
     }
+
+    // Record that this report finished the consultation appointment (who and when).
+    await AuditLog.create({
+      action: AuditAction.APPOINTMENT_COMPLETED,
+      actorId: salesStaffId,
+      targetType: 'appointment',
+      targetId: appt._id,
+      details: {
+        reason: 'consultation_report_submitted',
+        visitReportId: report._id,
+        consultationOutcome,
+        fromStatus: consultationStatusBefore,
+        toStatus: appt.status,
+        previousAttendanceStatus: attendanceStatusBefore,
+        attendanceStatus: AppointmentAttendanceStatus.COMPLETED,
+      },
+      ipAddress: ip,
+      userAgent: ua,
+    });
   } else {
     // Use the linked project, or the pending ocular draft for this appointment. Ocular visits
     // booked from a consultation have no project yet, so save a draft the sales staff can return to.
-    const linkedProject = (report.linkedProjectId
+    let linkedProject = (report.linkedProjectId
       ? await Project.findById(report.linkedProjectId)
       : await Project.findOne({ visitReportId: report._id, customerId: report.customerId }))
-      || await Project.findOne({ ocularAppointmentId: appt._id })
-      || await Project.create({
+      || await Project.findOne({ ocularAppointmentId: appt._id });
+    if (!linkedProject) {
+      linkedProject = await Project.create({
         appointmentId: appt.sourceConsultationAppointmentId,
         visitReportId: report._id,
         projectNumber: await generateProjectNumber(),
@@ -2215,6 +2275,22 @@ export async function submitReport(
         contractStatus: ContractStatus.MISSING,
         ocularAppointmentId: appt._id,
       });
+      // The system created this draft project from the ocular report: record it like any other.
+      await AuditLog.create({
+        action: AuditAction.PROJECT_CREATED,
+        actorId: salesStaffId,
+        targetType: 'project',
+        targetId: linkedProject._id,
+        details: {
+          automatic: true,
+          reason: 'ocular_report_submitted',
+          ocularAppointmentId: appt._id,
+          visitReportId: report._id,
+        },
+        ipAddress: ip,
+        userAgent: ua,
+      });
+    }
 
     if (linkedProject) {
       // Update project with ocular data

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ServiceType, MeasurementUnit, Environment } from '../../utils/constants.js';
+import { ServiceType, MeasurementUnit, Environment, SLOT_CODES } from '../../utils/constants.js';
 import { isSafeLocalCatalogImagePath } from '../../utils/selectedDesign.js';
 
 // ── Line Item ──
@@ -124,7 +124,8 @@ export const updateVisitReportSchema = z.object({
     )
     .optional(),
   recommendedOcularDate: z.string().datetime().optional(),
-  recommendedOcularSlot: z.string().max(20).trim().optional(),
+  // Must be a real time slot, so the ocular visit is compared against the staff's schedule.
+  recommendedOcularSlot: z.enum(SLOT_CODES as unknown as [string, ...string[]]).optional(),
   recommendedOcularAddressId: z.string().max(80).trim().optional(),
   recommendedOcularAddress: ocularAddressSnapshotSchema,
   linkedProjectId: z.string().optional(),

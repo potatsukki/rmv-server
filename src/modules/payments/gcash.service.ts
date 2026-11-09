@@ -11,6 +11,7 @@ import { handleInitialFabricationPaymentVerified, issueGcashReceipt } from './pa
 import { completeDesignFeeOnlinePayment, DESIGN_FEE_STAGE_PREFIX } from '../projects/design-fee.service.js';
 import type { GcashTarget, SubmitGcashInput } from './gcash.validation.js';
 import { gcashSettingsSchema } from './gcash.validation.js';
+import { logger } from '../../utils/logger.js';
 
 const DUPLICATE_REFERENCE_MESSAGE = 'This GCash reference number has already been used. Please check your payment details.';
 
@@ -159,6 +160,7 @@ export async function submitGcash(input: SubmitGcashInput, customerId: string) {
 }
 
 export async function selectCash(target: GcashTarget, customerId: string) {
+  let cashNotice: { amount: number; label: string; link: string } | null = null;
   await mongoose.connection.transaction(async (session) => {
     const scope = await resolveGcashTarget(target, customerId, session);
     if (scope.booking?.ocularFeePaid || scope.stage?.status === PaymentStageStatus.VERIFIED || scope.designFeePaid) throw AppError.badRequest('Payment is already paid');
@@ -179,7 +181,25 @@ export async function selectCash(target: GcashTarget, customerId: string) {
     if (!existing) await Payment.create([{ bookingId: scope.booking?._id, projectId: scope.project?._id, projectItemId: scope.plan?.projectItemId,
       customerId, stageId: scope.stageId, method: PaymentMethod.CASH, amountRequired: scope.amount, amountPaid: 0,
       status: PaymentStageStatus.PENDING, paymentStatus: 'unpaid' }], { session });
+    cashNotice = {
+      amount: Number(scope.amount) || 0,
+      label: scope.booking
+        ? `ocular fee for ${scope.booking.appointmentNumber || 'an ocular visit'}`
+        : `${scope.stage?.label || 'payment stage'} of ${scope.project?.title || 'a project'}`,
+      link: scope.booking ? `/appointments/${scope.booking._id}` : `/projects/${scope.project?._id}/payments`,
+    };
   });
+  // The cashiers should expect this cash payment.
+  if (cashNotice) {
+    const notice = cashNotice as { amount: number; label: string; link: string };
+    await notifyRole(
+      Role.CASHIER,
+      NotificationCategory.PAYMENT,
+      'Cash Payment Expected',
+      `A customer chose to pay ₱${notice.amount.toLocaleString('en-PH')} in cash for the ${notice.label}.`,
+      notice.link,
+    );
+  }
   return { paymentMethod: 'cash', paymentStatus: 'unpaid' };
 }
 
@@ -297,5 +317,26 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
     decision === 'paid' ? 'Payment Approved' : 'Payment Verification Failed',
     decision === 'paid' ? 'Your payment is paid and has been approved by the cashier.' : `Reason: ${reason!.trim()}`,
     reviewed!.bookingId ? `/appointments/${reviewed!.bookingId}/pay-ocular-fee` : `/projects/${reviewed!.projectId}/payments`);
+  // The sales staff handling the booking or project hears about the review as well. A failed
+  // notice never undoes the cashier's decision.
+  try {
+    const owner = reviewed!.bookingId
+      ? await Appointment.findById(reviewed!.bookingId).select('salesStaffId appointmentNumber')
+      : reviewed!.projectId ? await Project.findById(reviewed!.projectId).select('salesStaffId title') : null;
+    const ownerSalesStaffId = owner?.salesStaffId ? String(owner.salesStaffId) : undefined;
+    if (ownerSalesStaffId && ownerSalesStaffId !== cashierId) {
+      const what = reviewed!.bookingId
+        ? `the ocular fee for ${(owner as { appointmentNumber?: string }).appointmentNumber || 'the ocular visit'}`
+        : `"${(owner as { title?: string }).title || 'the project'}"`;
+      await createAndSendNotification(ownerSalesStaffId, NotificationCategory.PAYMENT,
+        decision === 'paid' ? 'Customer GCash Payment Approved' : 'Customer GCash Payment Rejected',
+        decision === 'paid'
+          ? `The customer's GCash payment for ${what} was approved by the cashier.`
+          : `The customer's GCash payment for ${what} was rejected. Reason: ${reason!.trim()}`,
+        reviewed!.bookingId ? `/appointments/${reviewed!.bookingId}` : `/projects/${reviewed!.projectId}/payments`);
+    }
+  } catch (error) {
+    logger.error('Failed to notify sales staff of a GCash review:', error);
+  }
   return reviewed!;
 }

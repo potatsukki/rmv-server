@@ -1,11 +1,14 @@
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import { Appointment } from '../../models/index.js';
+import { Appointment, AuditLog } from '../../models/index.js';
 import {
   AppointmentAttendanceStatus,
   AppointmentStatus,
   AppointmentType,
+  AuditAction,
 } from '../../utils/constants.js';
+import { logger } from '../../utils/logger.js';
+import type { Types } from 'mongoose';
 
 const TIME_ZONE = 'Asia/Manila';
 const CONSULTATION_DURATION_MS = 60 * 60 * 1000;
@@ -71,6 +74,23 @@ export async function synchronizeConsultationAttendanceByTime(
 
   appointment.attendanceUpdatedAt = now;
   await appointment.save();
+
+  // Every step is recorded: the automatic start has no human actor, so it is logged as System.
+  try {
+    await AuditLog.create({
+      action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+      targetType: 'appointment',
+      targetId: appointment._id as Types.ObjectId,
+      details: {
+        previousAttendanceStatus: currentStatus,
+        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+        automatic: true,
+        reason: 'consultation_start_time_reached',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to record the automatic consultation start:', error);
+  }
   return true;
 }
 

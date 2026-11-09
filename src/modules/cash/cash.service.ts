@@ -136,6 +136,14 @@ export async function receiveCash(
       `Discrepancy of ${formatCurrency(Math.abs(difference))} detected. Collected: ${formatCurrency(collection.amountCollected)}, Received: ${formatCurrency(input.amountReceived)}`,
       `/cash/discrepancies/${discrepancy._id}`,
     );
+    // The sales staff who handed over the cash learns about the difference too.
+    await createAndSendNotification(
+      collection.salesStaffId,
+      NotificationCategory.PAYMENT,
+      'Cash Turnover Discrepancy',
+      `The cashier received ${formatCurrency(input.amountReceived)} of the ${formatCurrency(collection.amountCollected)} you collected. An admin will review the difference.`,
+      '/cash',
+    );
 
     return { collection, discrepancy };
   }
@@ -153,6 +161,14 @@ export async function receiveCash(
     ipAddress: ip,
     userAgent: ua,
   });
+
+  await createAndSendNotification(
+    collection.salesStaffId,
+    NotificationCategory.PAYMENT,
+    'Cash Received by Cashier',
+    `The cashier received the ${formatCurrency(input.amountReceived)} you collected.`,
+    '/cash',
+  );
 
   return { collection };
 }

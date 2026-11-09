@@ -72,6 +72,7 @@ vi.mock('../notifications/socket.service.js', () => ({
   getIO: vi.fn(() => ({
     to: vi.fn(() => ({ emit: vi.fn() })),
   })),
+  notifyUsers: vi.fn(),
 }));
 
 vi.mock('../notifications/email.service.js', () => ({

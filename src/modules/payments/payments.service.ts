@@ -8,7 +8,7 @@ import {
   PaymentStageStatus, PaymentMethod, ProjectStatus, AuditAction, NotificationCategory, Role,
 } from '../../utils/constants.js';
 import { paymentStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyRole, emitRoleEvent } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyRole, notifyUsers, emitRoleEvent } from '../notifications/socket.service.js';
 import { sendPaymentVerifiedEmail, sendPaymentDeclinedEmail } from '../notifications/email.service.js';
 import { formatCurrency, generateReceiptNumber } from '../../utils/helpers.js';
 import { createStageCheckoutSession } from '../../services/paymongo.service.js';
@@ -322,6 +322,19 @@ export async function updatePaymentPlan(
     userAgent: ua,
   });
 
+  // The customer (and the assigned sales staff) see the new amounts before paying.
+  const planProject = await Project.findById(plan.projectId).select('customerId salesStaffId title projectNumber');
+  if (planProject) {
+    await notifyUsers(
+      [planProject.customerId, planProject.salesStaffId],
+      NotificationCategory.PAYMENT,
+      'Payment Plan Updated',
+      `The payment plan for "${planProject.title}" was updated: ${formatCurrency(plan.totalAmount)} in ${plan.stages.length} ${plan.stages.length === 1 ? 'payment' : 'stages'}.`,
+      `/projects/${planProject._id}/payments`,
+      { excludeUserId: actorId },
+    );
+  }
+
   return plan;
 }
 
@@ -478,6 +491,16 @@ export async function verifyPayment(
     }, receipt.buffer.length > 0 ? receipt.buffer : undefined);
   }
 
+  // The assigned sales staff follows the customer's payments too.
+  await notifyUsers(
+    [project.salesStaffId],
+    NotificationCategory.PAYMENT,
+    'Customer Payment Verified',
+    `${formatCurrency(payment.amountPaid)} for "${project.title}" - ${stage.label} was verified. Receipt: ${receiptNumber}`,
+    buildProjectPaymentsLink(project._id.toString(), payment.projectItemId?.toString()),
+    { excludeUserId: actorId },
+  );
+
   await handleInitialFabricationPaymentVerified(
     project,
     plan,
@@ -559,6 +582,15 @@ export async function declinePayment(
       paymentStageId: stage.stageId,
     });
   }
+
+  await notifyUsers(
+    [project.salesStaffId],
+    NotificationCategory.PAYMENT,
+    'Customer Payment Declined',
+    `The customer's payment for "${project.title}" - ${stage.label} was declined. Reason: ${input.reason}`,
+    buildProjectPaymentsLink(project._id.toString(), payment.projectItemId?.toString()),
+    { excludeUserId: actorId },
+  );
 
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
     type: 'payment_declined',

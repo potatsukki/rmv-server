@@ -297,6 +297,13 @@ router.get(
 );
 
 router.get(
+  '/:id/history',
+  authenticate,
+  authorize(Role.APPOINTMENT_AGENT, Role.SALES_STAFF, Role.CASHIER, Role.ADMIN),
+  ctrl.getAppointmentHistory,
+);
+
+router.get(
   '/:id',
   authenticate,
   authorize(Role.CUSTOMER, Role.APPOINTMENT_AGENT, Role.SALES_STAFF, Role.CASHIER, Role.ADMIN),

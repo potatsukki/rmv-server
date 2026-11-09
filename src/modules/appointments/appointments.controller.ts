@@ -60,7 +60,11 @@ function formatAppointment(appt: any) {
 
 // ── Get Available Slots ──
 export const getAvailableSlots = asyncHandler(async (req: Request, res: Response) => {
-  const result = await appointmentsService.getAvailableSlots(req.query as any);
+  const query = { ...(req.query as any) };
+  // Only staff may look up one sales staff member's own free days.
+  const isStaff = (req.userRoles || []).some((role) => role !== Role.CUSTOMER);
+  if (!isStaff) delete query.salesStaffId;
+  const result = await appointmentsService.getAvailableSlots(query);
   res.set('Cache-Control', 'no-store');
   res.json({ success: true, data: result });
 });
@@ -331,6 +335,13 @@ export const listPendingOcularFees = asyncHandler(async (_req: Request, res: Res
   res.json({ success: true, data: appointments.map(formatAppointment) });
 });
 
+
+// ── Activity history (staff) ──
+export const getAppointmentHistory = asyncHandler(async (req: Request, res: Response) => {
+  const items = await appointmentsService.getAppointmentHistory(req.params.id as string, req.userId!, req.userRoles!);
+  res.set('Cache-Control', 'no-store');
+  res.json({ success: true, data: items });
+});
 
 // ── Get By ID ──
 export const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {

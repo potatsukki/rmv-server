@@ -10,7 +10,7 @@ import {
   AuditAction, NotificationCategory, Role, PaymentStageStatus, DeliveryType,
 } from '../../utils/constants.js';
 import { blueprintStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyRole, notifyUsers } from '../notifications/socket.service.js';
 import { sendBlueprintUploadedEmail } from '../notifications/email.service.js';
 import { getInstallmentConfig } from '../config/config.service.js';
 import { deleteFile } from '../uploads/upload.service.js';
@@ -454,10 +454,19 @@ async function restoreReleasedQuotation<T extends IBlueprint | null>(blueprint: 
 }
 
 async function notifyCustomerAndCashierQuotationReady(
-  project: { _id: Types.ObjectId; title: string; customerId: Types.ObjectId | string },
+  project: { _id: Types.ObjectId; title: string; customerId: Types.ObjectId | string; salesStaffId?: Types.ObjectId | string | null },
   projectItemId?: Types.ObjectId | string | null,
 ) {
   const link = buildProjectBlueprintLink(project._id.toString(), projectItemId?.toString());
+
+  // The assigned sales staff follows the customer's quotation too.
+  await notifyUsers(
+    [project.salesStaffId],
+    NotificationCategory.BLUEPRINT,
+    'Quotation Sent to Customer',
+    `The blueprint and quotation for "${project.title}" were sent to the customer for review.`,
+    link,
+  );
 
   await createAndSendNotification(
     project.customerId,
@@ -866,8 +875,8 @@ export async function approveComponent(
     ? `Blueprint and costing for "${project.title}" have been fully approved.`
     : `Customer approved the ${input.component} for "${project.title}".`;
 
-  await createAndSendNotification(
-    blueprint.uploadedBy,
+  await notifyUsers(
+    [blueprint.uploadedBy, project.salesStaffId],
     NotificationCategory.BLUEPRINT,
     blueprint.status === BlueprintStatus.APPROVED ? 'Blueprint Fully Approved' : 'Component Approved',
     notifyMessage,
@@ -936,8 +945,8 @@ export async function requestRevision(
   });
 
   // Notify engineer
-  await createAndSendNotification(
-    blueprint.uploadedBy,
+  await notifyUsers(
+    [blueprint.uploadedBy, project.salesStaffId],
     NotificationCategory.BLUEPRINT,
     'Revision Requested',
     `Customer requested a ${blueprint.revisionComponent} revision for V${blueprint.version} of "${project.title}". Notes: ${input.notes}`,
@@ -1385,8 +1394,8 @@ export async function acceptBlueprint(
   });
 
   // Notify engineer
-  await createAndSendNotification(
-    blueprint.uploadedBy,
+  await notifyUsers(
+    [blueprint.uploadedBy, project.salesStaffId],
     NotificationCategory.BLUEPRINT,
     'Blueprint Accepted',
     `Customer accepted the blueprint for "${project.title}". Payment-plan selection is next.`,

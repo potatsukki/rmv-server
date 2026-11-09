@@ -10,7 +10,11 @@ import {
   NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, emitRoleEvent, notifyBookingAgentAppointmentSuccessful, notifyRole } from '../notifications/socket.service.js';
+import {
+  createAndSendNotification, emitRoleEvent, notifyBookingAgentAppointmentSuccessful, notifyBookingAgents, notifyRole,
+  notifyRoleExcept, notifyUsers,
+} from '../notifications/socket.service.js';
+import { describeAppointmentForNotification, formatNotificationDate } from '../../utils/notification-format.js';
 import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
 import { assertOcularLocationAccepted, computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
@@ -24,6 +28,7 @@ import {
   evaluateSalesAssignmentEligibility,
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
+  SALES_ACTIVE_ASSIGNMENT_STATUSES,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import type {
@@ -46,6 +51,7 @@ import type {
 import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
 import { assertOcularAfterConsultation } from './ocular-schedule-rules.js';
 import { assertAppointmentDayReached } from './appointment-date-guards.js';
+import { getActivityHistory } from '../reports/activity-history.js';
 import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
@@ -416,11 +422,15 @@ function assertAttendanceTransition(
   }
 }
 
-async function assertNoActiveAppointment(customerId: string): Promise<void> {
-  const active = await Appointment.findOne({
+async function assertNoActiveAppointment(customerId: string, excludeAppointmentIds: string[] = []): Promise<void> {
+  // Every not-yet-finished status counts, including an ocular visit already under way, so a
+  // customer never holds a consultation and an ocular visit at the same time.
+  const filter: Record<string, unknown> = {
     customerId,
-    status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.ASSIGNED, AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULE_REQUESTED] },
-  });
+    status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+  };
+  if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
+  const active = await Appointment.findOne(filter);
   if (active) {
     throw AppError.conflict(
       'You already have an active appointment. Please complete or cancel it first.',
@@ -464,6 +474,31 @@ export async function prepareProjectOcularSchedule(input: {
   return salesStaffId;
 }
 
+/**
+ * The same checks for an ocular visit that a consultation report schedules (or moves): a real
+ * slot on an open date, and a sales staff member with no other appointment that day. The source
+ * consultation and the ocular visit being moved never block themselves.
+ */
+export async function assertConsultationOcularSchedule(input: {
+  customerId: string;
+  salesStaffId: string;
+  date: string;
+  slotCode: string;
+  consultationAppointmentId: string;
+  existingOcularId?: string;
+}): Promise<void> {
+  if (!(SLOT_CODES as readonly string[]).includes(input.slotCode)) {
+    throw AppError.badRequest('Choose a valid ocular visit time.', ErrorCode.VALIDATION_ERROR);
+  }
+  await assertNoActiveAppointment(
+    input.customerId,
+    [input.consultationAppointmentId, input.existingOcularId].filter((id): id is string => Boolean(id)),
+  );
+  await assertDateAvailable(input.date);
+  await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
+  await assertSalesAvailable(input.salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
+}
+
 async function assertDateAvailable(dateStr: string): Promise<void> {
   // Check it's not in the past
   const now = toZonedTime(new Date(), TZ);
@@ -496,12 +531,15 @@ async function getSlotAvailability(
   dateStr: string,
   slotCode: string,
   appointmentId?: string,
+  /** Only count this sales staff (e.g. the project's own staff scheduling its ocular visit). */
+  onlySalesStaffId?: string,
 ) {
   // Sales staff are available by default unless an admin marked them Unavailable or On Leave.
   const salesStaff = await User.find({
     roles: Role.SALES_STAFF,
     isActive: true,
     availabilityStatus: { $nin: [StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE] },
+    ...(onlySalesStaffId ? { _id: onlySalesStaffId } : {}),
   }).select('_id roles availabilityStatus').lean();
 
   const sessionsByUserId = await getOpenAvailabilitySessionsByUserIds(
@@ -533,10 +571,16 @@ async function getSlotAvailability(
   const eligibleIds = new Set(salesStaffIds.filter((id) => !unavailableIds.has(id)));
   if (eligibleIds.size === 0) return { available: false, remaining: 0 };
 
+  // One appointment per sales staff per day (office consultation or ocular visit): a staff member
+  // with an active appointment anywhere on this date is taken for the whole day, and so is one
+  // still holding this exact slot. Every unassigned request on this date will need a staff member
+  // of its own, so it uses one up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
-    slotCode,
-    status: { $nin: SLOT_CAPACITY_FINAL_STATUSES },
+    $or: [
+      { status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES } },
+      { slotCode, status: { $nin: SLOT_CAPACITY_FINAL_STATUSES } },
+    ],
   };
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
@@ -548,7 +592,10 @@ async function getSlotAvailability(
       .map((appointment) => appointment.salesStaffId?.toString())
       .filter((id): id is string => Boolean(id && eligibleIds.has(id))),
   );
-  const awaitingAssignment = scheduledAppointments.filter((appointment) => !appointment.salesStaffId).length;
+  // Unassigned requests compete for the whole pool, not for one specific staff member.
+  const awaitingAssignment = onlySalesStaffId
+    ? 0
+    : scheduledAppointments.filter((appointment) => !appointment.salesStaffId).length;
   const remaining = Math.max(0, eligibleIds.size - assignedStaffIds.size - awaitingAssignment);
 
   return { available: remaining > 0, remaining, salesStaffIds: [...eligibleIds].filter((id) => !assignedStaffIds.has(id)) };
@@ -580,8 +627,8 @@ async function assertSalesAvailable(
   dateStr: string,
   slotCode: SlotCode | string,
   appointmentType: AppointmentType,
+  /** The appointment being assigned or moved, so it never blocks itself. */
   appointmentId?: string,
-  options: { enforceSingleActiveAssignment?: boolean } = {},
 ): Promise<void> {
   const salesUser = await User.findOne({
     _id: salesId,
@@ -601,7 +648,6 @@ async function assertSalesAvailable(
     slotCode,
     appointmentType,
     appointmentId,
-    enforceSingleActiveAssignment: options.enforceSingleActiveAssignment,
   });
 
   if (!eligibility.assignmentEligible) {
@@ -738,14 +784,17 @@ async function releaseSlotLock(
 // ── Get Available Slots ──
 
 export async function getAvailableSlots(query: AvailableSlotsQuery) {
-  const { date, type } = query;
+  const { date, type, salesStaffId } = query;
   await assertDateAvailable(date);
 
-  // 1 booking per slot; also check admin/agent blocked slots
+  // One appointment per sales staff per day; also check admin/agent blocked slots.
+  // With salesStaffId, only that staff member's own day counts.
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
       const blocked = await BlockedSlot.exists({ date, slotCode, type });
-      const capacity = blocked ? { available: false, remaining: 0 } : await getSlotAvailability(date, slotCode);
+      const capacity = blocked
+        ? { available: false, remaining: 0 }
+        : await getSlotAvailability(date, slotCode, undefined, salesStaffId);
       return {
         slotCode,
         time: formatSlotTime(slotCode),
@@ -958,7 +1007,6 @@ export async function reassignAppointmentSales(
     appointment.slotCode as SlotCode,
     appointment.type,
     appointment._id.toString(),
-    { enforceSingleActiveAssignment: true },
   );
 
   if (appointment.type === AppointmentType.OCULAR && appointment.status !== AppointmentStatus.REQUESTED) {
@@ -1008,13 +1056,17 @@ export async function reassignAppointmentSales(
   });
 
   const isNewAssignment = confirmsOnAssignment || wasRequested;
+  // Staff messages name the appointment, customer and schedule, so two notices never read the same.
+  const reference = await describeAppointmentForNotification(appointment);
+  const when = formatNotificationDate(appointment.date, appointment.slotCode);
+  const customerRef = [appointment.appointmentNumber, when].filter(Boolean).join(' on ');
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
     isNewAssignment ? 'New Appointment Assigned' : 'Appointment Reassigned',
     confirmsOnAssignment
-      ? `You have been assigned to the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. It is now confirmed on your schedule.`
-      : `You were assigned to an appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}.`,
+      ? `You have been assigned to ${reference}. It is now confirmed on your schedule.`
+      : `You were assigned to ${reference}.`,
     `/appointments/${appointment._id}`,
   );
 
@@ -1024,7 +1076,7 @@ export async function reassignAppointmentSales(
       previousSalesStaffId,
       NotificationCategory.APPOINTMENT,
       'Appointment Reassignment',
-      `You have been replaced by ${nextSalesStaffName} for the appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)}. You no longer have access to this customer appointment.`,
+      `You have been replaced by ${nextSalesStaffName} for ${reference}. You no longer have access to this customer appointment.`,
       `/appointments/${appointment._id}`,
     );
   }
@@ -1034,7 +1086,7 @@ export async function reassignAppointmentSales(
       appointment.customerId,
       NotificationCategory.APPOINTMENT,
       'Appointment Confirmed',
-      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has been confirmed and a sales staff member has been assigned to you.`,
+      `Your appointment ${customerRef} has been confirmed and a sales staff member has been assigned to you.`,
       `/appointments/${appointment._id}`,
     );
   } else if (!wasRequested) {
@@ -1042,10 +1094,20 @@ export async function reassignAppointmentSales(
       appointment.customerId,
       NotificationCategory.APPOINTMENT,
       'Appointment Team Update',
-      `Your appointment on ${appointment.date} at ${formatSlotTime(appointment.slotCode)} has an updated assigned sales staff.`,
+      `Your appointment ${customerRef} has an updated assigned sales staff.`,
       `/appointments/${appointment._id}`,
     );
   }
+
+  // The agent who booked it hears about the assignment when someone else (e.g. admin) made it.
+  await notifyBookingAgents(
+    appointment,
+    NotificationCategory.APPOINTMENT,
+    isNewAssignment ? 'Sales Staff Assigned' : 'Sales Staff Changed',
+    `${fullName(nextSalesStaff) || 'A sales staff member'} is now assigned to ${reference}.`,
+    `/appointments/${appointment._id}`,
+    actorId,
+  );
 
   if (confirmsOnAssignment) {
     await autoCreateVisitReport(
@@ -1294,6 +1356,8 @@ export async function agentCreateOcular(
   }
 
   const preassignedSalesStaffId: string | undefined = actorId;
+  // The ocular visit takes the sales staff's whole day, so they must be free that date.
+  await assertSalesAvailable(actorId, input.date, input.slotCode, AppointmentType.OCULAR);
   const sourceConsultation = consultationContext.consultation;
   const sourceConsultationReport = consultationContext.consultationReport;
   const serviceTypes = [...new Set([
@@ -1432,17 +1496,14 @@ export async function customerSubmitOcularLocation(
     }).sort({ updatedAt: -1, createdAt: -1 });
 
     if (!ocularAppointment) {
+      // An existing ocular visit keeps its own schedule: it may have been rescheduled since the
+      // consultation, and moving it back here would skip the sales staff's schedule checks.
       ocularAppointment = await Appointment.findOne({
         customerId: appointment.customerId,
         type: AppointmentType.OCULAR,
         sourceConsultationAppointmentId: appointment._id,
         status: { $in: activeOcularStatuses },
       }).sort({ updatedAt: -1, createdAt: -1 });
-
-      if (ocularAppointment) {
-        ocularAppointment.date = recommendedOcularDate;
-        ocularAppointment.slotCode = consultationReport.recommendedOcularSlot as any;
-      }
     }
 
     if (!ocularAppointment) {
@@ -1453,6 +1514,22 @@ export async function customerSubmitOcularLocation(
         ]),
       ].filter(Boolean);
       const salesStaffId = consultationReport.salesStaffId || appointment.salesStaffId;
+      if (salesStaffId) {
+        // One appointment per sales staff per day: the recommended day must still be free.
+        try {
+          await assertSalesAvailable(
+            salesStaffId.toString(),
+            recommendedOcularDate,
+            consultationReport.recommendedOcularSlot,
+            AppointmentType.OCULAR,
+          );
+        } catch {
+          throw AppError.badRequest(
+            'The recommended ocular visit schedule is no longer available. Please wait for your sales staff to set a new schedule.',
+            ErrorCode.VALIDATION_ERROR,
+          );
+        }
+      }
 
       ocularAppointment = await Appointment.create({
         customerId: appointment.customerId,
@@ -1802,6 +1879,7 @@ export async function completeAppointment(
   assertAppointmentDayReached(appointment.date, 'complete this appointment');
 
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
+  const statusBeforeComplete = appointment.status;
 
   // Completing a consultation does not select the project's ocular workflow.
   appointment.status = AppointmentStatus.COMPLETED;
@@ -1818,6 +1896,7 @@ export async function completeAppointment(
     actorId,
     targetType: 'appointment',
     targetId: appointment._id,
+    details: { fromStatus: statusBeforeComplete, toStatus: AppointmentStatus.COMPLETED, type: appointment.type },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1900,6 +1979,7 @@ export async function updateVisitStatus(
   }
 
   appointmentStateMachine.assertTransition(appointment.status, newStatus);
+  const statusBeforeStep = appointment.status;
 
   // Arriving at the site starts the visit; there is no separate "Start Site Visit" step.
   appointment.status = newStatus === AppointmentStatus.ARRIVED_AT_SITE ? AppointmentStatus.IN_PROGRESS : newStatus;
@@ -1938,6 +2018,7 @@ export async function updateVisitStatus(
     actorId,
     targetType: 'appointment',
     targetId: appointment._id,
+    details: { fromStatus: statusBeforeStep, toStatus: appointment.status, step: newStatus },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -1978,12 +2059,14 @@ export async function markNoShow(
     throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
   }
 
+  const statusBeforeNoShow = appointment.status;
   if (appointment.type === AppointmentType.OFFICE) {
     // Office consultations close as completed; attendanceStatus keeps the no-show outcome.
     appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
     appointment.status = AppointmentStatus.COMPLETED;
     appointment.attendanceStatus = AppointmentAttendanceStatus.NO_SHOW;
     appointment.attendanceUpdatedAt = new Date();
+    appointment.attendanceUpdatedBy = actorId as unknown as Types.ObjectId;
     appointment.consultationCompletedAt = new Date();
   } else {
     appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.NO_SHOW);
@@ -2002,6 +2085,7 @@ export async function markNoShow(
     actorId,
     targetType: 'appointment',
     targetId: appointment._id,
+    details: { fromStatus: statusBeforeNoShow, toStatus: appointment.status, type: appointment.type, notes: internalNotes || undefined },
     ipAddress: ip,
     userAgent: ua,
   });
@@ -2011,7 +2095,17 @@ export async function markNoShow(
     appointment.customerId,
     NotificationCategory.APPOINTMENT,
     'Appointment Marked as No-Show',
-    `Your appointment on ${appointment.date} was marked as a no-show.`,
+    `Your appointment ${appointment.appointmentNumber ? `${appointment.appointmentNumber} ` : ''}on ${formatNotificationDate(appointment.date, appointment.slotCode)} was marked as a no-show.`,
+    `/appointments/${appointment._id}`,
+  );
+  // ...and the agent who booked it, so the schedule can be followed up.
+  await notifyBookingAgents(
+    appointment,
+    NotificationCategory.APPOINTMENT,
+    'Appointment No-Show',
+    `${await describeAppointmentForNotification(appointment)} was marked as a no-show by the sales staff.`,
+    `/appointments/${appointment._id}`,
+    actorId,
   );
 
   return appointment;
@@ -2142,6 +2236,41 @@ export async function updateConsultationAttendance(
       `You are checked in for today's consultation. Your queue number is ${appointment.queueNumber}.`,
       `/appointments/${appointment._id}`,
     );
+  }
+
+  // Outcomes that close the consultation reach everyone affected, never the person who recorded them.
+  if (input.action === 'no_show' || input.action === 'customer_declined') {
+    const reference = await describeAppointmentForNotification(appointment);
+    const link = `/appointments/${appointment._id}`;
+    if (input.action === 'no_show') {
+      await notifyUsers(
+        [appointment.customerId],
+        NotificationCategory.APPOINTMENT,
+        'Consultation Marked as No-Show',
+        `Your consultation ${appointment.appointmentNumber ? `${appointment.appointmentNumber} ` : ''}on ${formatNotificationDate(appointment.date, appointment.slotCode)} was marked as a no-show. Book a new consultation when you are ready.`,
+        link,
+        { excludeUserId: actorId },
+      );
+    }
+    await notifyBookingAgents(
+      appointment,
+      NotificationCategory.APPOINTMENT,
+      input.action === 'no_show' ? 'Consultation No-Show' : 'Customer Declined Consultation',
+      input.action === 'no_show'
+        ? `${reference} was marked as a no-show by the sales staff.`
+        : `The customer declined to proceed: ${reference}.${input.notes ? ` Notes: ${input.notes}` : ''}`,
+      link,
+      actorId,
+    );
+    if (appointment.salesStaffId && appointment.salesStaffId.toString() !== actorId) {
+      await createAndSendNotification(
+        appointment.salesStaffId,
+        NotificationCategory.APPOINTMENT,
+        input.action === 'no_show' ? 'Consultation No-Show' : 'Customer Declined Consultation',
+        `${reference} was closed as ${input.action === 'no_show' ? 'a no-show' : 'customer declined'}.`,
+        link,
+      );
+    }
   }
 
   return appointment;
@@ -3004,6 +3133,36 @@ export async function recordOcularFee(
     userAgent: ua,
   });
 
+  // The customer gets confirmation of the payment, the cashiers keep their records, and the
+  // sales staff knows the visit is cleared (each skipping whoever recorded it).
+  const amount = formatCurrency(appointment.ocularFee || 0);
+  const reference = await describeAppointmentForNotification(appointment);
+  const link = `/appointments/${appointment._id}`;
+  await notifyUsers(
+    [appointment.customerId],
+    NotificationCategory.PAYMENT,
+    'Ocular Fee Payment Recorded',
+    `Your ${amount} ocular fee payment (${input.paymentMethod}) for ${appointment.appointmentNumber || 'your ocular visit'} has been recorded.`,
+    link,
+    { excludeUserId: actorId },
+  );
+  await notifyRoleExcept(
+    Role.CASHIER,
+    NotificationCategory.PAYMENT,
+    'Ocular Fee Recorded',
+    `${amount} ocular fee (${input.paymentMethod}) was recorded for ${reference}.`,
+    link,
+    actorId,
+  );
+  await notifyUsers(
+    [appointment.salesStaffId],
+    NotificationCategory.PAYMENT,
+    'Ocular Fee Paid',
+    `The ${amount} ocular fee for ${reference} is paid.`,
+    link,
+    { excludeUserId: actorId },
+  );
+
   return appointment;
 }
 
@@ -3026,9 +3185,23 @@ export async function setOcularFee(
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
+  const previousFee = appointment.ocularFee;
   appointment.ocularFee = fee;
   appointment.ocularFeeBreakdown = breakdown;
   await appointment.save();
+
+  // Tell the customer when their ocular fee is set or changes.
+  if (previousFee !== fee) {
+    await createAndSendNotification(
+      appointment.customerId,
+      NotificationCategory.PAYMENT,
+      fee > 0 ? 'Ocular Fee Updated' : 'No Ocular Fee',
+      fee > 0
+        ? `The ocular fee for ${appointment.appointmentNumber || 'your ocular visit'} is ${formatCurrency(fee)} (${breakdown.label}).`
+        : `No ocular fee is required for ${appointment.appointmentNumber || 'your ocular visit'}.`,
+      `/appointments/${appointment._id}`,
+    );
+  }
 
   return appointment;
 }
@@ -3094,6 +3267,25 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
   }
 
   return appointmentObject;
+}
+
+/**
+ * Every recorded step of one appointment and its visit reports (who did what, and when).
+ * Staff only; a sales staff member sees only appointments assigned to them.
+ */
+export async function getAppointmentHistory(appointmentId: string, actorId: string, actorRoles: Role[]) {
+  const appointment = await Appointment.findById(appointmentId).select('salesStaffId').lean();
+  if (!appointment) throw AppError.notFound('Appointment not found');
+  const isPrivilegedStaff = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT, Role.CASHIER].includes(role));
+  if (!isPrivilegedStaff && appointment.salesStaffId?.toString() !== actorId) {
+    throw AppError.forbidden('This appointment is no longer assigned to you');
+  }
+
+  const reports = await VisitReport.find({ appointmentId: appointment._id }).select('_id').lean();
+  return getActivityHistory([
+    { targetType: 'appointment', ids: [appointment._id] },
+    { targetType: 'visit_report', ids: reports.map((report) => report._id) },
+  ]);
 }
 
 async function getRecommendedOcularScheduleForAppointment(appointment: any) {

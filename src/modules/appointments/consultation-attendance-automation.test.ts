@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { mockAppointmentFind } = vi.hoisted(() => ({
+const { mockAppointmentFind, mockAuditCreate } = vi.hoisted(() => ({
   mockAppointmentFind: vi.fn(),
+  mockAuditCreate: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
   Appointment: {
     find: mockAppointmentFind,
+  },
+  AuditLog: {
+    create: mockAuditCreate,
   },
 }));
 
@@ -47,6 +51,17 @@ describe('consultation attendance automation', () => {
     expect(record.attendanceStatus).toBe(AppointmentAttendanceStatus.IN_PROGRESS);
     expect(record.consultationStartedAt).toEqual(now);
     expect(record.save).toHaveBeenCalledTimes(1);
+    // The automatic step is recorded too, with no human actor (System).
+    expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      targetType: 'appointment',
+      targetId: record._id,
+      details: expect.objectContaining({
+        previousAttendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+        attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+        automatic: true,
+      }),
+    }));
+    expect(mockAuditCreate.mock.calls[0]![0]).not.toHaveProperty('actorId');
   });
 
   it('never completes a consultation just because its one-hour slot has passed', async () => {
