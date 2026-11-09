@@ -10,6 +10,8 @@ const dashboardMocks = vi.hoisted(() => ({
   appointmentCount: vi.fn(),
   userCount: vi.fn(),
   blueprintCount: vi.fn(),
+  blueprintDistinct: vi.fn(),
+  projectItemFind: vi.fn(),
   fabricationCount: vi.fn(),
   fabricationAggregate: vi.fn(),
 }));
@@ -42,7 +44,8 @@ vi.mock('../../models/index.js', () => ({
   User: { countDocuments: dashboardMocks.userCount },
   CashCollection: {},
   VisitReport: {},
-  Blueprint: { countDocuments: dashboardMocks.blueprintCount },
+  Blueprint: { countDocuments: dashboardMocks.blueprintCount, distinct: dashboardMocks.blueprintDistinct },
+  ProjectItem: { find: dashboardMocks.projectItemFind },
   AuditLog: {
     aggregate: mockAuditAggregate,
     countDocuments: mockAuditCountDocuments,
@@ -59,6 +62,7 @@ import {
   getLifecycleMismatchHotspots,
   getDashboardSummary,
 } from './reports.service.js';
+import { buildAppointmentStatusGroupFilter } from '../appointments/appointment-status-groups.js';
 
 function mockExecValue<T>(value: T) {
   return { exec: vi.fn().mockResolvedValue(value) };
@@ -141,64 +145,126 @@ describe('dashboard pending payment projects', () => {
       .toMatchObject({ unpaidProjects: 1 });
   });
 
-  it('scopes customer plan queries to their own projects', async () => {
-    dashboardMocks.projectFind.mockImplementation(() => ({
-      distinct: () => mockExecValue(['own-project']),
-      select: () => mockLeanExecValue([]),
-    }));
-    plansQuery([plan('own-project', [pending])]);
-    const summary = await getDashboardSummary('customer-1', ['customer']);
-    expect(summary.unpaidProjects).toBe(1);
-    expect(dashboardMocks.planFind).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: { $in: ['own-project'] },
-    }));
-  });
-
-  describe('customer pending payments (items needing the customer to pay)', () => {
+  describe('customer dashboard counts (same rules as the lists the cards open)', () => {
     const activatedAt = new Date('2026-11-01');
 
-    function customerProjects(designFeeProjectIds: string[] = []) {
-      dashboardMocks.projectFind.mockImplementation((filter: Record<string, unknown>) => ({
-        distinct: () => mockExecValue(['p1', 'p2', 'p3']),
-        select: () => mockLeanExecValue(
-          filter['designFee.status'] === 'pending' ? designFeeProjectIds.map((_id) => ({ _id })) : [],
-        ),
-      }));
+    type TestProject = { _id: string; status: string; designFee?: { status: string } };
+
+    function customerProjects(projects: TestProject[], items: Array<{ projectId: string; status: string }> = []) {
+      dashboardMocks.projectFind.mockImplementation(() => ({ select: () => mockLeanExecValue(projects) }));
+      dashboardMocks.projectItemFind.mockReturnValue({ select: () => mockLeanExecValue(items) });
     }
 
-    it('counts only due stages with a balance, not upcoming, submitted, paid or cancelled ones', async () => {
-      customerProjects();
+    // Payment plans as both plan queries read them: populated for the unpaid-balance count,
+    // and stringifying to the project id for the payment-due rules.
+    function customerPlan(projectId: string, stages: object[], status = 'payment_pending') {
+      return { projectId: { _id: projectId, status, deletedAt: null, toString: () => projectId }, stages };
+    }
+
+    function appointmentCounts({ unpaidOcularFees = 0, pendingVisits = 0 } = {}) {
+      dashboardMocks.appointmentCount.mockImplementation((filter: Record<string, unknown>) => mockExecValue(
+        filter.ocularFeeStatus === 'pending' ? unpaidOcularFees : filter.$or ? pendingVisits : 0,
+      ));
+    }
+
+    beforeEach(() => {
+      dashboardMocks.blueprintDistinct.mockReturnValue(mockExecValue([]));
+      dashboardMocks.paymentDistinct.mockReturnValue(mockExecValue([]));
+      appointmentCounts();
+    });
+
+    it('counts only projects the customer can see, by the Projects page listing stage', async () => {
+      customerProjects(
+        [
+          { _id: 'p1', status: 'draft' },
+          { _id: 'p2', status: 'submitted' },
+          { _id: 'p3', status: 'fabrication' },
+          { _id: 'p4', status: 'blueprint' },
+          { _id: 'p5', status: 'completed' },
+          { _id: 'p6', status: 'cancelled' },
+          { _id: 'p7', status: 'payment_pending' },
+        ],
+        [
+          { projectId: 'p4', status: 'fabrication' },
+          { projectId: 'p4', status: 'blueprint' },
+          { projectId: 'p7', status: 'completed' },
+        ],
+      );
+
+      const summary = await getDashboardSummary('customer-1', ['customer']);
+
+      expect(summary).toMatchObject({
+        totalProjects: 7,
+        activeProjects: 4,
+        fabricationInProgress: 2,
+        completedProjects: 2,
+      });
+      expect(dashboardMocks.projectFind).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'customer-1',
+        $and: expect.any(Array),
+      }));
+      expect(dashboardMocks.projectCount).not.toHaveBeenCalled();
+    });
+
+    it('counts each project needing payment once, plus unpaid ocular fees', async () => {
+      customerProjects([
+        { _id: 'p1', status: 'payment_pending' },
+        { _id: 'p2', status: 'approved' },
+        { _id: 'p3', status: 'approved' },
+        { _id: 'p4', status: 'submitted', designFee: { status: 'pending' } },
+        { _id: 'p5', status: 'blueprint', designFee: { status: 'pending' } },
+        { _id: 'p6', status: 'blueprint' },
+        { _id: 'p7', status: 'cancelled' },
+        { _id: 'p8', status: 'fabrication' },
+      ]);
       plansQuery([
-        plan('p1', [
+        customerPlan('p1', [
           { status: 'pending', amount: 3000, amountPaid: 0, activatedAt },
+          { status: 'declined', amount: 1000, amountPaid: 0, activatedAt },
           { status: 'pending', amount: 4000, amountPaid: 0, activatedAt: null },
         ]),
-        plan('p2', [
-          { status: 'declined', amount: 1000, amountPaid: 0, activatedAt },
+        customerPlan('p3', [{ status: 'pending', amount: 3000, amountPaid: 0, activatedAt: null }], 'approved'),
+        customerPlan('p8', [
           { status: 'proof_submitted', amount: 1000, amountPaid: 0, activatedAt },
           { status: 'pending', amount: 1000, amountPaid: 1000, activatedAt },
           { status: 'pending', amount: 1000, amountPaid: 0, creditApplied: 1000, activatedAt },
-        ]),
-        plan('p3', [{ status: 'pending', amount: 3000, amountPaid: 0, activatedAt }], 'cancelled'),
+        ], 'fabrication'),
       ]);
+      dashboardMocks.paymentDistinct.mockReturnValue(mockExecValue(['design-fee-p5']));
+      dashboardMocks.blueprintDistinct.mockReturnValue(mockExecValue(['p6']));
+      appointmentCounts({ unpaidOcularFees: 2 });
 
       const summary = await getDashboardSummary('customer-1', ['customer']);
 
-      expect(summary.pendingPayments).toBe(2);
+      // p1 (due stages), p2 (needs a payment plan), p4 (design fee), p6 (revision fee) + 2 ocular fees
+      expect(summary.pendingPayments).toBe(6);
+      expect(dashboardMocks.paymentDistinct).toHaveBeenCalledWith('stageId', {
+        stageId: { $in: ['design-fee-p4', 'design-fee-p5'] },
+        paymentStatus: 'pending_verification',
+      });
+      expect(dashboardMocks.appointmentCount).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'customer-1',
+        type: 'ocular',
+        ocularFeeStatus: 'pending',
+        ocularFee: { $gt: 0 },
+        status: { $nin: ['cancelled', 'completed', 'no_show'] },
+      }));
       expect(dashboardMocks.paymentCount).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'proof_submitted' }));
+      expect(dashboardMocks.planFind).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: { $in: ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p8'] },
+      }));
     });
 
-    it('adds unpaid design fees unless a proof is already waiting for the cashier', async () => {
-      customerProjects(['p1', 'p2']);
-      plansQuery([]);
-      dashboardMocks.paymentDistinct.mockReturnValue(mockExecValue(['design-fee-p2']));
+    it('counts pending visits as the Requested and Assigned appointment groups', async () => {
+      customerProjects([]);
+      appointmentCounts({ pendingVisits: 3 });
 
       const summary = await getDashboardSummary('customer-1', ['customer']);
 
-      expect(summary.pendingPayments).toBe(1);
-      expect(dashboardMocks.paymentDistinct).toHaveBeenCalledWith('stageId', {
-        stageId: { $in: ['design-fee-p1', 'design-fee-p2'] },
-        paymentStatus: 'pending_verification',
+      expect(summary.pendingAppointments).toBe(3);
+      expect(dashboardMocks.appointmentCount).toHaveBeenCalledWith({
+        customerId: 'customer-1',
+        $or: [buildAppointmentStatusGroupFilter('requested'), buildAppointmentStatusGroupFilter('assigned')],
       });
     });
 

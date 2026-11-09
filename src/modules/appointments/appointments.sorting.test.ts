@@ -20,6 +20,19 @@ describe('defaultAppointmentSort', () => {
     });
   });
 
+  it('sorts the Completed status group newest first', () => {
+    expect(defaultAppointmentSort(undefined, 'completed')).toEqual({
+      date: -1,
+      slotCode: -1,
+      createdAt: -1,
+    });
+    expect(defaultAppointmentSort(undefined, 'requested')).toEqual({
+      date: 1,
+      slotCode: 1,
+      createdAt: 1,
+    });
+  });
+
   it('sorts cancelled history by appointment date descending', () => {
     expect(defaultAppointmentSort(AppointmentStatus.CANCELLED)).toEqual({
       date: -1,

@@ -44,8 +44,25 @@ import { seedFabricationItems } from '../fabrication/fabrication.service.js';
 import { prepareProjectOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
 import {
   activeProjectStatusesForRoles,
+  customerVisibleProjectsFilter,
   maskProjectTotalCostForActor,
 } from './projects.list-policy.js';
+import {
+  isProjectListingStage,
+  matchesListingStage,
+  resolveProjectStages,
+  type ProjectWorkflowStage,
+} from './project-stage.js';
+import { getProjectPaymentDue, NO_PAYMENT_DUE, type ProjectPaymentDue } from '../payments/payment-due.js';
+
+// Stages the Payments page lists even when nothing is due right now (billing history included).
+const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
+
+function appendAndCondition(filter: Record<string, unknown>, condition: Record<string, unknown>) {
+  const andFilters = Array.isArray(filter.$and) ? [...(filter.$and as Record<string, unknown>[])] : [];
+  andFilters.push(condition);
+  filter.$and = andFilters;
+}
 
 function readableServiceTitle(serviceType?: string, custom?: string) {
   if (serviceType === 'custom' && custom?.trim()) return custom.trim();
@@ -2342,6 +2359,10 @@ export async function listProjects(
     salesStaffId?: string;
     engineerId?: string;
     search?: string;
+    /** One of PROJECT_LISTING_STAGES; filtered before paging so every match can be listed. */
+    stage?: string;
+    /** "relevant": only projects the Payments page lists, each with its paymentDue summary. */
+    payment?: string;
     page?: string;
     limit?: string;
     sortBy?: string;
@@ -2356,17 +2377,7 @@ export async function listProjects(
 
   // Role-based filtering
   if (actorRoles.includes(Role.CUSTOMER) && !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r))) {
-    filter.customerId = actorId;
-    filter.$and = [
-      {
-        $or: [
-          { contractStatus: ContractStatus.UPLOADED },
-          { contractStatus: { $exists: false }, status: { $ne: ProjectStatus.DRAFT } },
-          // A project waiting on its ocular visit has no contract yet, but the customer can see it.
-          { status: ProjectStatus.DRAFT, ocularAppointmentId: { $exists: true, $ne: null } },
-        ],
-      },
-    ];
+    Object.assign(filter, customerVisibleProjectsFilter(actorId));
   } else if (actorRoles.includes(Role.SALES_STAFF) && !actorRoles.some(r => [Role.ADMIN].includes(r))) {
     filter.salesStaffId = actorId;
   } else if (actorRoles.includes(Role.ENGINEER) && !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r))) {
@@ -2392,6 +2403,31 @@ export async function listProjects(
     appendSearchCondition(filter, searchOr);
   }
 
+  // Stage and payment filters depend on item statuses and payment records, so the matching
+  // ids are resolved first and the page is taken from them (no match is cut off by the limit).
+  const stage = isProjectListingStage(query.stage) ? query.stage : null;
+  const isPaymentView = query.payment === 'relevant';
+  let paymentDueByProject: Map<string, ProjectPaymentDue> | null = null;
+  if (stage || isPaymentView) {
+    const candidates = await Project.find(filter).select('_id status designFee').lean();
+    const stages = await resolveProjectStages(candidates);
+    if (isPaymentView) paymentDueByProject = await getProjectPaymentDue(candidates);
+
+    const matchingIds = candidates
+      .filter((project) => {
+        const projectId = String(project._id);
+        const projectStage = stages.get(projectId) ?? 'review';
+        if (stage && !matchesListingStage(projectStage, stage)) return false;
+        if (isPaymentView) {
+          return PAYMENT_VIEW_STAGES.has(projectStage)
+            || Boolean(paymentDueByProject?.get(projectId)?.needsPayment);
+        }
+        return true;
+      })
+      .map((project) => project._id);
+    appendAndCondition(filter, { _id: { $in: matchingIds } });
+  }
+
   const sortField = query.sortBy || 'createdAt';
   const sortOrder = query.sortOrder === 'asc' ? 1 : -1;
 
@@ -2409,7 +2445,10 @@ export async function listProjects(
   ]);
 
   const items = (await enrichProjectsForList(projects))
-    .map((item) => maskProjectTotalCostForActor(item, actorId, actorRoles));
+    .map((item) => maskProjectTotalCostForActor(item, actorId, actorRoles))
+    .map((item) => (paymentDueByProject
+      ? { ...item, paymentDue: paymentDueByProject.get(String(item._id)) ?? NO_PAYMENT_DUE }
+      : item));
 
   return {
     items,
