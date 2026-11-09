@@ -164,7 +164,20 @@ export async function register(input: RegisterInput, ip?: string, ua?: string) {
   const existing = await User.findOne({ email });
   if (existing) {
     if (!existing.isEmailVerified) {
+      // Nobody has proven ownership of this email yet, so the latest registration wins.
+      // Keeping the old record's name/password made re-registrations show a stale name.
+      existing.firstName = firstName;
+      existing.lastName = lastName;
+      existing.phone = phone;
+      existing.password = await bcrypt.hash(password, 12);
+      if (defaultAddress) {
+        existing.address = defaultAddress.formattedAddress;
+        existing.addressData = defaultAddress;
+        existing.savedAddresses = savedAddresses;
+      }
+
       await createAndSendOtp(email, OtpPurpose.EMAIL_VERIFICATION);
+      await existing.save();
       return { message: 'Registration already exists but email is not verified. A new verification code has been sent.' };
     }
 
@@ -845,6 +858,17 @@ export async function googleAuth(input: GoogleAuthInput, ip?: string, ua?: strin
 
   // 2. Check if a user with the same email exists (local user)
   user = await User.findOne({ email });
+  if (user && !user.isEmailVerified) {
+    // Unverified local signup: its name/password were never proven by the email owner.
+    // Let the Google owner confirm their own profile; googleComplete claims the record.
+    return {
+      needsProfile: true,
+      email,
+      firebaseUid,
+      googleName: decoded.name || '',
+      googlePhoto: decoded.picture || '',
+    };
+  }
   if (user) {
     if (!user.isActive) throw AppError.forbidden('Your account has been disabled. Contact support.', ErrorCode.ACCOUNT_DISABLED);
 
@@ -893,7 +917,39 @@ export async function googleComplete(input: GoogleCompleteInput, ip?: string, ua
   const firebaseUid = decoded.uid;
 
   // Make sure user doesn't already exist
-  const existing = await User.findOne({ $or: [{ firebaseUid }, { email }] });
+  const existing = await User.findOne({ $or: [{ firebaseUid }, { email }] }).select('+password');
+  if (existing && !existing.isEmailVerified && !existing.firebaseUid) {
+    // Claim an unverified local signup: the Google owner's details replace the unproven ones.
+    if (!existing.isActive) throw AppError.forbidden('Your account has been disabled. Contact support.', ErrorCode.ACCOUNT_DISABLED);
+
+    existing.firstName = firstName;
+    existing.lastName = lastName;
+    existing.phone = phone;
+    if (defaultAddress) {
+      existing.address = defaultAddress.formattedAddress;
+      existing.addressData = defaultAddress;
+      existing.savedAddresses = savedAddresses;
+    }
+    existing.set('password', undefined);
+    existing.provider = 'google';
+    existing.firebaseUid = firebaseUid;
+    if (decoded.picture) existing.photoURL = decoded.picture;
+    existing.isEmailVerified = true;
+    await existing.save();
+
+    await AuditLog.create({
+      action: AuditAction.USER_CREATED,
+      actorId: existing._id,
+      actorEmail: email,
+      targetType: 'user',
+      targetId: existing._id,
+      details: { provider: 'google', claimedUnverified: true },
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    return issueGoogleLogin(existing, ip, ua, hints);
+  }
   if (existing) {
     // If they somehow already registered, just log them in
     if (!existing.isActive) throw AppError.forbidden('Your account has been disabled. Contact support.', ErrorCode.ACCOUNT_DISABLED);

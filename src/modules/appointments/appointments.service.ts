@@ -45,6 +45,7 @@ import type {
 } from './appointments.validation.js';
 import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
 import { assertOcularAfterConsultation } from './ocular-schedule-rules.js';
+import { assertAppointmentDayReached } from './appointment-date-guards.js';
 import type { Types } from 'mongoose';
 
 const TZ = 'Asia/Manila';
@@ -1786,6 +1787,7 @@ export async function completeAppointment(
   if (appointment.salesStaffId?.toString() !== actorId) {
     throw AppError.forbidden('Only the currently assigned sales staff can complete this appointment');
   }
+  assertAppointmentDayReached(appointment.date, 'complete this appointment');
 
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
 
@@ -1849,6 +1851,7 @@ export async function updateVisitStatus(
   if (appointment.salesStaffId?.toString() !== actorId) {
     throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
   }
+  assertAppointmentDayReached(appointment.date, 'start this visit');
 
   if (
     appointment.type === AppointmentType.OCULAR
@@ -2024,6 +2027,7 @@ export async function updateConsultationAttendance(
   if (!isAdmin && !isAssignedSales) {
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
   }
+  assertAppointmentDayReached(appointment.date, 'update consultation attendance');
 
   await synchronizeConsultationAttendanceByTime(appointment);
   const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
