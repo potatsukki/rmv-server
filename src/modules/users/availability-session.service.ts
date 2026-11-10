@@ -23,17 +23,17 @@ export const INTERNAL_AVAILABILITY_ROLES: Role[] = [
 ];
 
 const INTERNAL_AVAILABILITY_ROLE_SET = new Set<Role>(INTERNAL_AVAILABILITY_ROLES);
-const FINAL_APPOINTMENT_STATUSES = [
-  AppointmentStatus.COMPLETED,
+// A sales staff member takes ONE appointment per day — an office consultation or an ocular
+// visit, never both — so consultations and ocular visits can't overlap. Only a cancelled or
+// no-show appointment gives the day back: a completed (or ready-for-ocular) appointment still
+// took that day, even when it was finished early. An appointment on another date never blocks.
+export const SALES_DAY_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
 ];
 
-// A sales staff member takes ONE appointment per day — an office consultation or an ocular
-// visit, never both — so consultations and ocular visits can't overlap. These statuses still
-// need them on that date; an appointment on another date never blocks them. They become
-// assignable for that date again once it is completed, cancelled, a no-show, or the
-// consultation report is submitted (ready for ocular).
+// Appointments still waiting on their sales staff (any date). Used for the customer's
+// "one active appointment" rule, not for the per-day staff rule above.
 export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
   AppointmentStatus.ASSIGNED,
@@ -45,19 +45,26 @@ export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.RESCHEDULE_REQUESTED,
 ];
 
+/** The staff member's other appointment on this date (YYYY-MM-DD), if any; cancelled and no-show don't count. */
 export async function findActiveSalesAssignment(
   salesStaffId: string,
-  excludeAppointmentId?: string,
-  /** Only count active appointments on this date (YYYY-MM-DD). */
-  dateStr?: string,
+  excludeAppointmentId: string | undefined,
+  dateStr: string,
 ) {
   const filter: Record<string, unknown> = {
     salesStaffId,
-    status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+    date: dateStr,
+    status: { $nin: SALES_DAY_FREEING_STATUSES },
   };
-  if (dateStr) filter.date = dateStr;
   if (excludeAppointmentId) filter._id = { $ne: excludeAppointmentId };
   return Appointment.findOne(filter).select('appointmentNumber date type status').lean();
+}
+
+function formatAppointmentDay(dateStr: string) {
+  const [year = 0, month = 1, day = 1] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  });
 }
 const PH_TIMEZONE_OFFSET = '+08:00';
 
@@ -269,7 +276,6 @@ export async function evaluateSalesAssignmentEligibility(input: {
     userAvailabilityStatus,
     session,
     dateStr,
-    slotCode,
     appointmentId,
   } = input;
 
@@ -300,30 +306,17 @@ export async function evaluateSalesAssignmentEligibility(input: {
     }
   }
 
-  // One appointment per day: any other active consultation or ocular visit that date blocks.
+  // One appointment per day: any other consultation or ocular visit that date blocks,
+  // including one already completed. This also covers the same time slot.
   const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr);
   if (activeAssignment) {
+    const day = formatAppointmentDay(dateStr);
     return {
       assignmentEligible: false,
       assignmentBlockedReason: activeAssignment.appointmentNumber
-        ? `Already has an appointment on this date (${activeAssignment.appointmentNumber})`
-        : 'Already has an appointment on this date',
+        ? `Already has an appointment on ${day} (${activeAssignment.appointmentNumber})`
+        : `Already has an appointment on ${day}`,
     };
-  }
-
-  const conflictFilter: Record<string, unknown> = {
-    salesStaffId,
-    date: dateStr,
-    slotCode,
-    status: { $nin: FINAL_APPOINTMENT_STATUSES },
-  };
-  if (appointmentId) {
-    conflictFilter._id = { $ne: appointmentId };
-  }
-
-  const conflictingAppointment = await Appointment.exists(conflictFilter);
-  if (conflictingAppointment) {
-    return { assignmentEligible: false, assignmentBlockedReason: 'Booked in another appointment' };
   }
 
   return { assignmentEligible: true };

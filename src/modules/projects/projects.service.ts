@@ -44,6 +44,8 @@ import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { designItemKey, projectItemFilterForReport } from '../../services/project-item-identity.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
 import { prepareProjectOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { withSalesDayLocks, type SalesDayLocks } from '../appointments/sales-day-lock.js';
+import { snapshotConsultationReport } from '../../services/consultation-snapshot.js';
 import {
   activeProjectStatusesForRoles,
   customerVisibleProjectsFilter,
@@ -660,6 +662,7 @@ async function attachOcularAppointmentToProject({
   await project.save();
 
   for (const report of reports) {
+    snapshotConsultationReport(report);
     report.appointmentId = ocularAppointment._id;
     report.visitType = 'ocular';
     report.status = VisitReportStatus.DRAFT;
@@ -717,6 +720,18 @@ export async function createProject(
   ua?: string,
   actorRoles: Role[] = [],
 ) {
+  // The sales staff's day stays locked until the ocular appointment is saved (no double booking).
+  return withSalesDayLocks((locks) => createProjectLocked(input, actorId, locks, ip, ua, actorRoles));
+}
+
+async function createProjectLocked(
+  input: CreateProjectInput,
+  actorId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+  actorRoles: Role[] = [],
+) {
   const appointment = input.appointmentId ? await Appointment.findById(input.appointmentId) : null;
   let appointmentReports: any[] = [];
   if (input.appointmentId && !appointment) throw AppError.notFound('Appointment not found');
@@ -763,6 +778,8 @@ export async function createProject(
       salesStaffId: appointment?.salesStaffId?.toString()
         || (actorRoles.includes(Role.SALES_STAFF) ? actorId : undefined),
       consultationDate: appointment?.type === AppointmentType.OFFICE ? appointment.date : undefined,
+      locks,
+      lockedBy: actorId,
     })
     : appointment?.salesStaffId || actorId;
   // Resolve the site and fee before creating anything so a routing failure leaves no partial project.
@@ -851,6 +868,18 @@ export async function createProject(
     contractUploadedAt,
     contractUploadedBy: input.contractFileKey ? actorId : undefined,
   });
+
+  // The form's main item IS the chosen report's item. When sales re-classifies it there (e.g.
+  // Railings → Custom "Stainless Steel Balcony Railings"), the report follows, so it stays one item
+  // instead of a fallback item plus the report's own. The consultation answers stay in its snapshot.
+  if (input.visitReportId && primaryReport && primaryReport.serviceType !== serviceType) {
+    snapshotConsultationReport(primaryReport);
+    primaryReport.serviceType = serviceType;
+    primaryReport.serviceTypeCustom = serviceType === ServiceType.CUSTOM
+      ? input.serviceTypeCustom || primaryReport.serviceTypeCustom
+      : undefined;
+    await primaryReport.save();
+  }
 
   for (const report of appointmentReports) {
     if (report.serviceType && serviceTypes.includes(report.serviceType)) {
@@ -1036,6 +1065,18 @@ export async function scheduleProjectOcular(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => scheduleProjectOcularLocked(projectId, input, actorId, actorRoles, locks, ip, ua));
+}
+
+async function scheduleProjectOcularLocked(
+  projectId: string,
+  input: ProjectOcularVisitInput,
+  actorId: string,
+  actorRoles: Role[],
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
   assertAssignedSalesOrAdmin(project, actorId, actorRoles, 'Only the assigned sales staff can schedule the ocular visit');
@@ -1068,6 +1109,8 @@ export async function scheduleProjectOcular(
     slotCode: input.slotCode,
     salesStaffId: project.salesStaffId.toString(),
     consultationDate: sourceAppointment?.date,
+    locks,
+    lockedBy: actorId,
   });
   const ocularSite = await resolveOcularVisitData(AppointmentType.OCULAR, input.formattedAddress, input.customerLocation);
   const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);
