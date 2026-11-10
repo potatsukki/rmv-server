@@ -18,6 +18,7 @@ const {
   mockSalesAvailabilityFind,
   mockAutoCreateDraft,
   mockQueueCounterFindOneAndUpdate,
+  mockProjectFindOne,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
@@ -36,6 +37,7 @@ const {
   mockSalesAvailabilityFind: vi.fn(),
   mockAutoCreateDraft: vi.fn(),
   mockQueueCounterFindOneAndUpdate: vi.fn(),
+  mockProjectFindOne: vi.fn(() => ({ select: () => ({ lean: async () => null }) })),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -69,7 +71,7 @@ vi.mock('../../models/index.js', () => ({
   },
   VisitReport: {},
   VisitReportStatus: {},
-  Project: {},
+  Project: { findOne: mockProjectFindOne },
   AppointmentQueueCounter: {
     findOneAndUpdate: mockQueueCounterFindOneAndUpdate,
   },
@@ -169,7 +171,21 @@ describe('prepareProjectOcularSchedule', () => {
 
   it('rejects a second active appointment before scheduling a pending ocular', async () => {
     mockAppointmentFindOne.mockResolvedValue({ _id: 'active-1', status: AppointmentStatus.REQUESTED });
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('already have an active appointment');
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('This customer already has an active');
+  });
+
+  it("names the blocking appointment, including another project's ocular hidden from the Appointments page", async () => {
+    mockAppointmentFindOne.mockResolvedValue({
+      _id: 'ocular-other', appointmentNumber: 'APT-20261113-0002', type: AppointmentType.OCULAR,
+      date: '2026-11-13', slotCode: '09:00', status: AppointmentStatus.CONFIRMED,
+    });
+    mockProjectFindOne.mockReturnValueOnce({ select: () => ({ lean: async () => ({ projectNumber: 'PRJ-2026-00091' }) }) });
+
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-11-28', slotCode: '11:00', salesStaffId: 'sales-1' }))
+      .rejects.toMatchObject({
+        message: 'This customer already has an active ocular visit (APT-20261113-0002 · Nov 13, 2026, 9:00 AM · Confirmed · PRJ-2026-00091). Complete or cancel it first.',
+        details: expect.objectContaining({ activeAppointmentNumber: 'APT-20261113-0002', activeProjectNumber: 'PRJ-2026-00091' }),
+      });
   });
 
   it('rejects an ocular scheduled less than 3 days after its consultation', async () => {
@@ -611,7 +627,7 @@ describe('sales staff availability per time slot', () => {
     mockAppointmentFindOne.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.ON_THE_WAY });
 
     await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' }))
-      .rejects.toThrow('already have an active appointment');
+      .rejects.toThrow('This customer already has an active');
     expect(mockAppointmentFindOne).toHaveBeenCalledWith({
       customerId: 'customer-1',
       status: { $in: expect.arrayContaining([AppointmentStatus.ON_THE_WAY, AppointmentStatus.IN_PROGRESS]) },
@@ -631,7 +647,7 @@ describe('sales staff availability per time slot', () => {
     await expect(assertConsultationOcularSchedule({
       customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-10-08', slotCode: '09:00',
       consultationAppointmentId: 'consult-1', existingOcularId: 'ocular-1',
-    })).rejects.toThrow('already have an active appointment');
+    })).rejects.toThrow('This customer already has an active');
     expect(mockAppointmentFindOne).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
       _id: { $nin: ['consult-1', 'ocular-1'] },

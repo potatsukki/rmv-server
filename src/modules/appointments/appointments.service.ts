@@ -425,7 +425,12 @@ function assertAttendanceTransition(
   }
 }
 
-async function assertNoActiveAppointment(customerId: string, excludeAppointmentIds: string[] = []): Promise<void> {
+async function assertNoActiveAppointment(
+  customerId: string,
+  excludeAppointmentIds: string[] = [],
+  /** Who sees the error: the customer ("You already have…") or staff acting for them. */
+  options: { audience?: 'customer' | 'staff' } = {},
+): Promise<void> {
   // Every not-yet-finished status counts, including an ocular visit already under way, so a
   // customer never holds a consultation and an ocular visit at the same time.
   const filter: Record<string, unknown> = {
@@ -435,18 +440,46 @@ async function assertNoActiveAppointment(customerId: string, excludeAppointmentI
   if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
   const active = await Appointment.findOne(filter);
   if (active) {
+    // Name the blocking appointment: a project's ocular visit is not listed on the Appointments page.
+    const owningProject = await Project.findOne({
+      $or: [{ ocularAppointmentId: active._id }, { appointmentId: active._id }],
+      status: { $ne: ProjectStatus.CANCELLED },
+    }).select('projectNumber').lean();
+    const kind = active.type === AppointmentType.OCULAR ? 'ocular visit' : 'consultation';
+    const when = active.date
+      ? `${formatAppointmentDate(active.date)}${active.slotCode ? `, ${formatSlotTime(active.slotCode)}` : ''}`
+      : '';
+    const statusLabel = String(active.status || '').replace(/_/g, ' ');
+    const detail = [
+      active.appointmentNumber,
+      when,
+      statusLabel && statusLabel.charAt(0).toUpperCase() + statusLabel.slice(1),
+      owningProject?.projectNumber,
+    ].filter(Boolean).join(' · ');
+    const message = options.audience === 'staff'
+      ? `This customer already has an active ${kind}${detail ? ` (${detail})` : ''}. Complete or cancel it first.`
+      : `You already have an active appointment${detail ? ` (${detail})` : ''}. Please complete or cancel it first.`;
     throw AppError.conflict(
-      'You already have an active appointment. Please complete or cancel it first.',
+      message,
       ErrorCode.DUPLICATE_ENTRY,
       {
         activeAppointmentId: active._id.toString(),
+        activeAppointmentNumber: active.appointmentNumber,
         activeAppointmentStatus: active.status,
         activeAppointmentType: active.type,
         activeAppointmentDate: active.date,
         activeAppointmentSlotCode: active.slotCode,
+        activeProjectNumber: owningProject?.projectNumber,
       },
     );
   }
+}
+
+function formatAppointmentDate(dateStr: string) {
+  const [year = 0, month = 1, day = 1] = dateStr.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  });
 }
 
 /** Consultation date behind an ocular appointment, when it came from one. */
@@ -471,7 +504,7 @@ export async function prepareProjectOcularSchedule(input: {
   lockedBy?: string;
 }): Promise<string> {
   assertOcularAfterConsultation(input.date, input.consultationDate);
-  await assertNoActiveAppointment(input.customerId);
+  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
   await assertDateAvailable(input.date);
   const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
   const salesStaffId = input.salesStaffId || freeSalesStaffIds[0];
@@ -502,6 +535,7 @@ export async function assertConsultationOcularSchedule(input: {
   await assertNoActiveAppointment(
     input.customerId,
     [input.consultationAppointmentId, input.existingOcularId].filter((id): id is string => Boolean(id)),
+    { audience: 'staff' },
   );
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
@@ -906,7 +940,7 @@ export async function agentCreateAppointment(
     throw AppError.notFound('Customer not found');
   }
 
-  await assertNoActiveAppointment(input.customerId);
+  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
 
@@ -1342,7 +1376,7 @@ export async function agentCreateOcular(
     throw AppError.notFound('Customer not found');
   }
 
-  await assertNoActiveAppointment(input.customerId);
+  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
 
