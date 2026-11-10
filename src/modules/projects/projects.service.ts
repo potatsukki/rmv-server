@@ -2451,9 +2451,11 @@ export async function getProjectById(
 
   // The ocular visit pin is the project site; nobody edits it on the project itself.
   let ocularVisitStatus: string | undefined;
+  let ocularAppointmentNumber: string | undefined;
   if (project.ocularAppointmentId) {
-    const ocular = await Appointment.findById(project.ocularAppointmentId).select('formattedAddress customerAddress status').lean();
+    const ocular = await Appointment.findById(project.ocularAppointmentId).select('formattedAddress customerAddress status appointmentNumber').lean();
     ocularVisitStatus = ocular?.status;
+    ocularAppointmentNumber = ocular?.appointmentNumber;
     const ocularAddress = ocular?.formattedAddress?.trim() || ocular?.customerAddress?.trim();
     if (ocularAddress && ocularAddress !== project.siteAddress) {
       project.siteAddress = ocularAddress;
@@ -2474,8 +2476,15 @@ export async function getProjectById(
     }
   }
 
+  // Public appointment IDs (APT-…) of the source consultation and the ocular visit, for display.
+  const consultation = project.appointmentId
+    ? await Appointment.findById(project.appointmentId).select('appointmentNumber').lean()
+    : null;
+
   const projectWithItems: any = await attachProjectItems(project);
   if (ocularVisitStatus) projectWithItems.ocularVisitStatus = ocularVisitStatus;
+  if (consultation?.appointmentNumber) projectWithItems.appointmentNumber = consultation.appointmentNumber;
+  if (ocularAppointmentNumber) projectWithItems.ocularAppointmentNumber = ocularAppointmentNumber;
   return maskProjectTotalCostForActor(projectWithItems, actorId, actorRoles);
 }
 
