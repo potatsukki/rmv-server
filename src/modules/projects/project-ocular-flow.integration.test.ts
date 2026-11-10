@@ -180,18 +180,41 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('blocks a second appointment for the sales staff on a day that already has a completed one', async () => {
+  it('blocks the sales staff only in a slot that already has an active appointment that day', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
-    // Another completed appointment of the same sales staff on Nov 16.
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
+    // Same sales staff on Nov 16: an active 9:00 consultation and a completed 13:00 one.
+    await Appointment.create({
+      customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
+      status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
+    });
     await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '13:00',
       status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
+    // Same date + same slot is blocked.
     await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '09:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
-      .rejects.toThrow(/No sales staff is available|Already has an appointment on Nov 16, 2026/);
+      .rejects.toThrow(/No sales staff is available|Already has an appointment at this time/);
+    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
+
+    // The completed 13:00 appointment does not block its slot.
+    await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
+    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
+  });
+
+  it('lets the sales staff take the next slot on the same date (9:00 booked → 10:00 allowed)', async () => {
+    const { consultationId, reportId } = await completeConsultation();
+    const projectId = await createProjectWithContract(consultationId, reportId);
+    const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
+    await Appointment.create({
+      customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
+      status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
+    });
+
+    await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
+    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR, date: '2026-11-16', slotCode: '10:00' })).toBe(1);
   });
 
   /** Schedules the ocular, travels, fills and submits the ocular report. */

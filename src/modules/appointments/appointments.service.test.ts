@@ -324,7 +324,7 @@ describe('reassignAppointmentSales', () => {
     mockSalesStaffLookup();
     vi.mocked(evaluateSalesAssignmentEligibility).mockResolvedValueOnce({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on (APT-20261109-0006)',
+      assignmentBlockedReason: 'Already has an appointment at this time (9:00 AM, Nov 9, 2026 · APT-20261109-0006)',
     });
 
     await expect(reassignAppointmentSales(
@@ -332,7 +332,7 @@ describe('reassignAppointmentSales', () => {
       { salesStaffId: 'sales-1' },
       'agent-1',
       [Role.APPOINTMENT_AGENT],
-    )).rejects.toThrow('Already has an appointment on (APT-20261109-0006)');
+    )).rejects.toThrow('Already has an appointment at this time (9:00 AM, Nov 9, 2026 · APT-20261109-0006)');
 
     expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();
@@ -527,7 +527,7 @@ describe('getAvailableSlots', () => {
   });
 });
 
-describe('one appointment per sales staff per day', () => {
+describe('sales staff availability per time slot', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
@@ -546,51 +546,60 @@ describe('one appointment per sales staff per day', () => {
     mockSalesAvailabilityFind.mockImplementation(() => selectLeanResult([]));
   }
 
-  it('takes a staff member with any appointment that day out of every slot of the day', async () => {
+  const slotByCode = (slots: Array<{ slotCode: string; available: boolean; remaining: number }>, code: string) =>
+    slots.find((slot) => slot.slotCode === code)!;
+
+  it('takes a staff member out of only the slot of their appointment, not the whole day', async () => {
     twoAvailableStaff();
     // sales-a has an ocular visit at 14:00 that day.
-    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a' }]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '14:00' }]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
-    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
-    // Completed appointments still take the day; only cancelled and no-show free it.
+    expect(slotByCode(result.slots, '14:00')).toMatchObject({ available: true, remaining: 1 });
+    expect(result.slots.filter((slot) => slot.slotCode !== '14:00')
+      .every((slot) => slot.available && slot.remaining === 2)).toBe(true);
+    // Cancelled, completed and no-show appointments never take a slot.
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
       date: '2026-09-10',
-      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW] },
     }));
   });
 
-  it("hides the staff member's day after their consultation that day was completed (PRJ-2026-00094)", async () => {
+  it('keeps the next slot open for a staff member booked 9:00–10:00 (same date, different slot)', async () => {
     twoAvailableStaff();
     mockUserFind.mockImplementation(() => selectLeanResult([
       { _id: 'sales-a', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
     ]));
-    // sales-a's Nov 13 consultation is completed, but it still holds Nov 13.
-    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', status: AppointmentStatus.COMPLETED }]));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '09:00' }]));
 
-    const result = await getAvailableSlots({ date: '2026-11-13', type: AppointmentType.OCULAR, salesStaffId: 'sales-a' });
+    const result = await getAvailableSlots({ date: '2026-11-14', type: AppointmentType.OFFICE, salesStaffId: 'sales-a' });
 
-    expect(result.slots.every((slot) => !slot.available)).toBe(true);
+    expect(slotByCode(result.slots, '09:00')).toMatchObject({ available: false, remaining: 0 });
+    expect(slotByCode(result.slots, '10:00')).toMatchObject({ available: true, remaining: 1 });
   });
 
-  it('closes the day for customers once every staff member is taken or awaited', async () => {
+  it('closes a slot for customers once every staff member is taken or awaited in it', async () => {
     twoAvailableStaff();
-    // sales-a is booked that day and one request is still waiting for a staff member.
-    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a' }, { salesStaffId: undefined }]));
+    // At 10:00, sales-a is booked and one request is still waiting for a staff member.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: 'sales-a', slotCode: '10:00' },
+      { salesStaffId: undefined, slotCode: '10:00' },
+    ]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
-    expect(result.slots.every((slot) => !slot.available && slot.remaining === 0)).toBe(true);
+    expect(slotByCode(result.slots, '10:00')).toMatchObject({ available: false, remaining: 0 });
+    expect(slotByCode(result.slots, '11:00')).toMatchObject({ available: true, remaining: 2 });
   });
 
-  it("shows only the given sales staff member's own free day", async () => {
+  it("shows only the given sales staff member's own free slots", async () => {
     twoAvailableStaff();
     mockUserFind.mockImplementation(() => selectLeanResult([
       { _id: 'sales-b', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
     ]));
-    // An unassigned request that day does not take sales-b's own day.
-    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: undefined }]));
+    // An unassigned request does not take sales-b's own slot.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: undefined, slotCode: '09:00' }]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR, salesStaffId: 'sales-b' });
 

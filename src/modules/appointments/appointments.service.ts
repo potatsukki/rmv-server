@@ -29,7 +29,8 @@ import {
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
-  SALES_DAY_FREEING_STATUSES,
+  SALES_SLOT_FREEING_STATUSES,
+  slotsOverlap,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import { acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
@@ -482,7 +483,7 @@ export async function prepareProjectOcularSchedule(input: {
 
 /**
  * The same checks for an ocular visit that a consultation report schedules (or moves): a real
- * slot on an open date, and a sales staff member with no other appointment that day. The source
+ * slot on an open date, and a sales staff member with no other appointment at that time. The source
  * consultation and the ocular visit being moved never block themselves.
  */
 export async function assertConsultationOcularSchedule(input: {
@@ -574,19 +575,21 @@ async function getSlotAvailability(
   const eligibleIds = new Set(salesStaffIds.filter((id) => !unavailableIds.has(id)));
   if (eligibleIds.size === 0) return { available: false, remaining: 0 };
 
-  // One appointment per sales staff per day (office consultation or ocular visit): a staff member
-  // with any appointment on this date (even a completed one) is taken for the whole day; only
-  // cancelled and no-show appointments give the day back. Every unassigned request on this date
-  // will need a staff member of its own, so it uses one up too.
+  // A sales staff member is taken only for slots that overlap one of their appointments on this
+  // date (office consultation or ocular visit); other slots that day stay open. Cancelled,
+  // completed and no-show appointments free their slot. Every unassigned request in an
+  // overlapping slot will need a staff member of its own, so it uses one up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
-    status: { $nin: SALES_DAY_FREEING_STATUSES },
+    status: { $nin: SALES_SLOT_FREEING_STATUSES },
   };
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
-  const scheduledAppointments = await Appointment.find(appointmentFilter)
-    .select('salesStaffId')
+  const sameDayAppointments = await Appointment.find(appointmentFilter)
+    .select('salesStaffId slotCode')
     .lean();
+  const scheduledAppointments = sameDayAppointments
+    .filter((appointment) => slotsOverlap(appointment.slotCode, slotCode));
   const assignedStaffIds = new Set(
     scheduledAppointments
       .map((appointment) => appointment.salesStaffId?.toString())
@@ -787,8 +790,8 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
   const { date, type, salesStaffId } = query;
   await assertDateAvailable(date);
 
-  // One appointment per sales staff per day; also check admin/agent blocked slots.
-  // With salesStaffId, only that staff member's own day counts.
+  // A sales staff member is free in every slot that doesn't overlap one of their appointments;
+  // also check admin/agent blocked slots. With salesStaffId, only that staff member counts.
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
       const blocked = await BlockedSlot.exists({ date, slotCode, type });

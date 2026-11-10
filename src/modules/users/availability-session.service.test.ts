@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   mockAppointmentExists,
   mockAppointmentCountDocuments,
-  mockAppointmentFindOne,
+  mockAppointmentFind,
   mockSalesAvailabilityFindOne,
 } = vi.hoisted(() => ({
   mockAppointmentExists: vi.fn(),
   mockAppointmentCountDocuments: vi.fn(),
-  mockAppointmentFindOne: vi.fn(),
+  mockAppointmentFind: vi.fn(),
   mockSalesAvailabilityFindOne: vi.fn(),
 }));
 
@@ -16,7 +16,7 @@ vi.mock('../../models/index.js', () => ({
   Appointment: {
     exists: mockAppointmentExists,
     countDocuments: mockAppointmentCountDocuments,
-    findOne: mockAppointmentFindOne,
+    find: mockAppointmentFind,
   },
   AvailabilitySession: {},
   SalesAvailability: {
@@ -27,7 +27,8 @@ vi.mock('../../models/index.js', () => ({
 import {
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
-  SALES_DAY_FREEING_STATUSES,
+  SALES_SLOT_FREEING_STATUSES,
+  slotsOverlap,
 } from './availability-session.service.js';
 import { AppointmentStatus, AppointmentType, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
@@ -37,8 +38,9 @@ function mockSelectable<T>(value: T) {
   };
 }
 
-function mockActiveAssignment(value: unknown) {
-  mockAppointmentFindOne.mockReturnValueOnce({
+/** The staff member's other (non-freeing) appointments on the queried date. */
+function mockSameDayAppointments(value: unknown[]) {
+  mockAppointmentFind.mockReturnValueOnce({
     select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(value) }),
   });
 }
@@ -118,8 +120,8 @@ describe('availability-session.service sales assignment eligibility', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-04-23T00:30:00.000Z'));
     // By default the staff has no other appointment that day.
-    mockAppointmentFindOne.mockReturnValue({
-      select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(null) }),
+    mockAppointmentFind.mockReturnValue({
+      select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue([]) }),
     });
   });
 
@@ -142,7 +144,7 @@ describe('availability-session.service sales assignment eligibility', () => {
       assignmentBlockedReason: 'Unavailable',
     });
     expect(mockSalesAvailabilityFindOne).not.toHaveBeenCalled();
-    expect(mockAppointmentExists).not.toHaveBeenCalled();
+    expect(mockAppointmentFind).not.toHaveBeenCalled();
   });
 
   it('blocks sales staff when the admin date block matches the appointment date', async () => {
@@ -162,62 +164,11 @@ describe('availability-session.service sales assignment eligibility', () => {
       assignmentEligible: false,
       assignmentBlockedReason: 'Blocked on this date',
     });
-    expect(mockAppointmentExists).not.toHaveBeenCalled();
-  });
-
-  it('blocks the staff over a COMPLETED consultation on the same date (PRJ-2026-00094)', async () => {
-    // The Nov 13 consultation was completed early (Nov 10); an ocular on Nov 13 must still be blocked.
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment({ _id: 'consultation-1', appointmentNumber: 'APT-20261113-0004', status: AppointmentStatus.COMPLETED });
-
-    const result = await evaluateSalesAssignmentEligibility({
-      salesStaffId: 'sales-1',
-      userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      session: buildSession() as never,
-      dateStr: '2026-11-13',
-      slotCode: '09:00',
-      appointmentType: AppointmentType.OCULAR,
-    });
-
-    expect(result).toEqual({
-      assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on Nov 13, 2026 (APT-20261113-0004)',
-    });
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
-      salesStaffId: 'sales-1',
-      date: '2026-11-13',
-      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
-    });
-  });
-
-  it.each([
-    ['an ocular visit on a day with an office consultation', AppointmentType.OCULAR, 'office'],
-    ['an office consultation on a day with an ocular visit', AppointmentType.OFFICE, 'ocular'],
-    ['a second ocular visit on the same day', AppointmentType.OCULAR, 'ocular'],
-    ['a second office consultation on the same day', AppointmentType.OFFICE, 'office'],
-  ])('blocks %s (one appointment per day)', async (_label, appointmentType, existingType) => {
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment({ _id: 'appt-same-day', appointmentNumber: 'APT-20260423-0001', type: existingType });
-
-    const result = await evaluateSalesAssignmentEligibility({
-      salesStaffId: 'sales-1',
-      userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      session: buildSession() as never,
-      dateStr: '2026-04-23',
-      slotCode: '14:00',
-      appointmentType,
-    });
-
-    expect(result).toEqual({
-      assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on Apr 23, 2026 (APT-20260423-0001)',
-    });
-    expect(mockAppointmentExists).not.toHaveBeenCalled();
+    expect(mockAppointmentFind).not.toHaveBeenCalled();
   });
 
   it('returns eligible when status, shift, date blocks, and conflicts all pass', async () => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce(null);
 
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1',
@@ -233,7 +184,6 @@ describe('availability-session.service sales assignment eligibility', () => {
 
   it('allows a timed-in employee without a scheduled shift end', async () => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce(null);
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1', userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       session: buildSession({ shiftEndAt: undefined }) as never,
@@ -249,7 +199,6 @@ describe('availability-session.service sales assignment eligibility', () => {
     ['a shift that starts after the slot', buildSession({ shiftStartAt: new Date('2026-04-23T03:00:00Z') })],
   ])('keeps staff assignable with %s now that there is no time-in', async (_label, session) => {
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce(null);
 
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1', userAvailabilityStatus: undefined,
@@ -267,14 +216,33 @@ describe('availability-session.service sales assignment eligibility', () => {
       session: null, dateStr: '2026-04-23', slotCode: '09:00', appointmentType: AppointmentType.OFFICE,
     });
     expect(result).toEqual({ assignmentEligible: false, assignmentBlockedReason: reason });
-    expect(mockAppointmentExists).not.toHaveBeenCalled();
+    expect(mockAppointmentFind).not.toHaveBeenCalled();
   });
 });
 
-describe('availability-session.service one appointment per day per sales staff', () => {
+describe('slotsOverlap', () => {
+  it.each([
+    ['09:00', '10:00', false],
+    ['10:00', '09:00', false],
+    ['09:00', '09:00', true],
+    ['09:30', '10:00', true],
+    ['11:00', '13:00', false],
+  ])('%s vs %s → %s', (a, b, expected) => {
+    expect(slotsOverlap(a, b)).toBe(expected);
+  });
+
+  it('only matches identical codes when a slot cannot be parsed', () => {
+    expect(slotsOverlap('sales-day', 'sales-day')).toBe(true);
+    expect(slotsOverlap('sales-day', '09:00')).toBe(false);
+    expect(slotsOverlap(undefined, '09:00')).toBe(false);
+  });
+});
+
+describe('availability-session.service sales staff appointment conflicts per time slot', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-04-23T00:30:00.000Z'));
+    vi.setSystemTime(new Date('2026-11-10T02:00:00.000Z'));
+    mockSalesAvailabilityFindOne.mockReturnValue(mockSelectable(null));
   });
 
   afterEach(() => {
@@ -282,71 +250,94 @@ describe('availability-session.service one appointment per day per sales staff',
     vi.useRealTimers();
   });
 
+  // Bugoy's case: an existing Nov 14, 2026 9:00–10:00 AM appointment.
   const newAssignment = {
     salesStaffId: 'sales-1',
     userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-    dateStr: '2026-04-23',
-    slotCode: '09:00',
+    dateStr: '2026-11-14',
+    slotCode: '10:00',
     appointmentType: AppointmentType.OFFICE,
     appointmentId: 'appt-new',
   };
+  const nineAm = { _id: 'appt-9am', appointmentNumber: 'APT-20261114-0001', slotCode: '09:00', status: AppointmentStatus.CONFIRMED };
 
-  it('blocks a new assignment while the staff has another active appointment on the same date', async () => {
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment({ _id: 'appt-active', appointmentNumber: 'APT-20260423-0006' });
+  it.each([
+    ['an office consultation next to an office consultation', AppointmentType.OFFICE, AppointmentType.OFFICE],
+    ['an ocular visit next to an office consultation', AppointmentType.OCULAR, AppointmentType.OFFICE],
+    ['an office consultation next to an ocular visit', AppointmentType.OFFICE, AppointmentType.OCULAR],
+    ['an ocular visit next to an ocular visit', AppointmentType.OCULAR, AppointmentType.OCULAR],
+  ])('allows the same date + a different slot: %s', async (_label, appointmentType, existingType) => {
+    mockSameDayAppointments([{ ...nineAm, type: existingType }]);
 
-    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, appointmentType, session: buildSession() as never });
+
+    expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  it('blocks the same date + the same slot', async () => {
+    mockSameDayAppointments([nineAm]);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
 
     expect(result).toEqual({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on Apr 23, 2026 (APT-20260423-0006)',
+      assignmentBlockedReason: 'Already has an appointment at this time (9:00 AM, Nov 14, 2026 · APT-20261114-0001)',
     });
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
+    expect(mockAppointmentFind).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
-      status: { $nin: SALES_DAY_FREEING_STATUSES },
-      date: '2026-04-23',
+      date: '2026-11-14',
+      status: { $nin: SALES_SLOT_FREEING_STATUSES },
       _id: { $ne: 'appt-new' },
     });
   });
 
-  it('does not block the staff over an active appointment on another date', async () => {
-    // e.g. a project ocular on Nov 11 must not block an office appointment on Nov 12:
-    // the lookup only matches the target date, so nothing is found.
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment(null);
-    mockAppointmentExists.mockResolvedValueOnce(null);
+  it('blocks a truly overlapping time range on the same date', async () => {
+    mockSameDayAppointments([{ ...nineAm, slotCode: '09:30', appointmentNumber: undefined }]);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '10:00', session: buildSession() as never });
+
+    expect(result).toEqual({
+      assignmentEligible: false,
+      assignmentBlockedReason: 'Already has an appointment at this time (9:30 AM, Nov 14, 2026)',
+    });
+  });
+
+  it('allows a different date (the lookup only matches the target date)', async () => {
+    mockSameDayAppointments([]);
 
     const result = await evaluateSalesAssignmentEligibility({
-      ...newAssignment,
-      dateStr: '2026-11-12',
-      session: buildSession() as never,
+      ...newAssignment, dateStr: '2026-11-15', slotCode: '09:00', session: buildSession() as never,
     });
 
     expect(result).toEqual({ assignmentEligible: true });
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-12' }));
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-15' }));
   });
 
-  it('makes the staff assignable again once their appointment is no longer active', async () => {
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment(null);
-    mockAppointmentExists.mockResolvedValueOnce(null);
-
-    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
-
-    expect(result).toEqual({ assignmentEligible: true });
-  });
-
-  it('frees the day only for cancelled and no-show appointments', () => {
-    expect(SALES_DAY_FREEING_STATUSES).toEqual([AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW]);
-    for (const occupying of [AppointmentStatus.COMPLETED, AppointmentStatus.READY_FOR_OCULAR, AppointmentStatus.CONFIRMED]) {
-      expect(SALES_DAY_FREEING_STATUSES).not.toContain(occupying);
+  it('does not let cancelled, completed or no-show appointments block their slot', () => {
+    expect(SALES_SLOT_FREEING_STATUSES).toEqual([
+      AppointmentStatus.CANCELLED,
+      AppointmentStatus.COMPLETED,
+      AppointmentStatus.NO_SHOW,
+    ]);
+    for (const occupying of [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.IN_PROGRESS, AppointmentStatus.READY_FOR_OCULAR]) {
+      expect(SALES_SLOT_FREEING_STATUSES).not.toContain(occupying);
     }
   });
 
+  it('allows the same slot once the earlier appointment is final (excluded by the status filter)', async () => {
+    // The completed/cancelled 9:00 appointment is filtered out by `$nin`, so nothing comes back.
+    mockSameDayAppointments([]);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
+
+    expect(result).toEqual({ assignmentEligible: true });
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW] },
+    }));
+  });
+
   it('applies the rule to a brand-new appointment too (no id to exclude)', async () => {
-    mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockActiveAssignment(null);
-    mockAppointmentExists.mockResolvedValueOnce(null);
+    mockSameDayAppointments([]);
 
     const { appointmentId: _omit, ...withoutId } = newAssignment;
     const result = await evaluateSalesAssignmentEligibility({
@@ -356,10 +347,10 @@ describe('availability-session.service one appointment per day per sales staff',
     });
 
     expect(result).toEqual({ assignmentEligible: true });
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
+    expect(mockAppointmentFind).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
-      status: { $nin: SALES_DAY_FREEING_STATUSES },
-      date: '2026-04-23',
+      status: { $nin: SALES_SLOT_FREEING_STATUSES },
+      date: '2026-11-14',
     });
   });
 });
