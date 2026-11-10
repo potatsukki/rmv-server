@@ -27,7 +27,7 @@ vi.mock('../../models/index.js', () => ({
 import {
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
-  SALES_ACTIVE_ASSIGNMENT_STATUSES,
+  SALES_DAY_FREEING_STATUSES,
 } from './availability-session.service.js';
 import { AppointmentStatus, AppointmentType, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
@@ -165,30 +165,28 @@ describe('availability-session.service sales assignment eligibility', () => {
     expect(mockAppointmentExists).not.toHaveBeenCalled();
   });
 
-  it('blocks sales staff who already have another non-final appointment in the same slot', async () => {
+  it('blocks the staff over a COMPLETED consultation on the same date (PRJ-2026-00094)', async () => {
+    // The Nov 13 consultation was completed early (Nov 10); an ocular on Nov 13 must still be blocked.
     mockSalesAvailabilityFindOne.mockReturnValueOnce(mockSelectable(null));
-    mockAppointmentExists.mockResolvedValueOnce({ _id: 'appt-conflict' });
+    mockActiveAssignment({ _id: 'consultation-1', appointmentNumber: 'APT-20261113-0004', status: AppointmentStatus.COMPLETED });
 
     const result = await evaluateSalesAssignmentEligibility({
       salesStaffId: 'sales-1',
       userAvailabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       session: buildSession() as never,
-      dateStr: '2026-04-23',
+      dateStr: '2026-11-13',
       slotCode: '09:00',
-      appointmentType: AppointmentType.OFFICE,
-      appointmentId: 'appt-current',
+      appointmentType: AppointmentType.OCULAR,
     });
 
     expect(result).toEqual({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Booked in another appointment',
+      assignmentBlockedReason: 'Already has an appointment on Nov 13, 2026 (APT-20261113-0004)',
     });
-    expect(mockAppointmentExists).toHaveBeenCalledWith({
+    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
-      date: '2026-04-23',
-      slotCode: '09:00',
-      status: { $nin: ['completed', 'cancelled', 'no_show'] },
-      _id: { $ne: 'appt-current' },
+      date: '2026-11-13',
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
     });
   });
 
@@ -212,7 +210,7 @@ describe('availability-session.service sales assignment eligibility', () => {
 
     expect(result).toEqual({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on this date (APT-20260423-0001)',
+      assignmentBlockedReason: 'Already has an appointment on Apr 23, 2026 (APT-20260423-0001)',
     });
     expect(mockAppointmentExists).not.toHaveBeenCalled();
   });
@@ -301,11 +299,11 @@ describe('availability-session.service one appointment per day per sales staff',
 
     expect(result).toEqual({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on this date (APT-20260423-0006)',
+      assignmentBlockedReason: 'Already has an appointment on Apr 23, 2026 (APT-20260423-0006)',
     });
     expect(mockAppointmentFindOne).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
-      status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+      status: { $nin: SALES_DAY_FREEING_STATUSES },
       date: '2026-04-23',
       _id: { $ne: 'appt-new' },
     });
@@ -338,20 +336,11 @@ describe('availability-session.service one appointment per day per sales staff',
     expect(result).toEqual({ assignmentEligible: true });
   });
 
-  it('treats completed, cancelled, no-show, and ready-for-ocular appointments as finished', () => {
-    for (const finished of [
-      AppointmentStatus.COMPLETED,
-      AppointmentStatus.CANCELLED,
-      AppointmentStatus.NO_SHOW,
-      AppointmentStatus.READY_FOR_OCULAR,
-    ]) {
-      expect(SALES_ACTIVE_ASSIGNMENT_STATUSES).not.toContain(finished);
+  it('frees the day only for cancelled and no-show appointments', () => {
+    expect(SALES_DAY_FREEING_STATUSES).toEqual([AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW]);
+    for (const occupying of [AppointmentStatus.COMPLETED, AppointmentStatus.READY_FOR_OCULAR, AppointmentStatus.CONFIRMED]) {
+      expect(SALES_DAY_FREEING_STATUSES).not.toContain(occupying);
     }
-    expect(SALES_ACTIVE_ASSIGNMENT_STATUSES).toEqual(expect.arrayContaining([
-      AppointmentStatus.CONFIRMED,
-      AppointmentStatus.IN_PROGRESS,
-      AppointmentStatus.RESCHEDULE_REQUESTED,
-    ]));
   });
 
   it('applies the rule to a brand-new appointment too (no id to exclude)', async () => {
@@ -369,7 +358,7 @@ describe('availability-session.service one appointment per day per sales staff',
     expect(result).toEqual({ assignmentEligible: true });
     expect(mockAppointmentFindOne).toHaveBeenCalledWith({
       salesStaffId: 'sales-1',
-      status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
+      status: { $nin: SALES_DAY_FREEING_STATUSES },
       date: '2026-04-23',
     });
   });

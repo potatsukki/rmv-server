@@ -55,6 +55,21 @@ export interface IOcularAddressSnapshot {
   isDefault?: boolean;
 }
 
+export interface IConsultationSnapshot {
+  appointmentId?: Types.ObjectId;
+  status?: string;
+  serviceType?: string;
+  serviceTypeCustom?: string;
+  actualVisitDateTime?: Date;
+  discussionNotes?: string;
+  consultationOutcome?: 'schedule_ocular' | 'no_ocular';
+  noOcularReason?: string;
+  recommendedOcularDate?: Date;
+  recommendedOcularSlot?: string;
+  recommendedOcularAddress?: IOcularAddressSnapshot;
+  capturedAt: Date;
+}
+
 export interface IVisitReport extends Document {
   _id: Types.ObjectId;
   appointmentId: Types.ObjectId;
@@ -109,6 +124,11 @@ export interface IVisitReport extends Document {
   recommendedOcularAddress?: IOcularAddressSnapshot;
   linkedProjectId?: Types.ObjectId;
   projectItemId?: Types.ObjectId;
+  /**
+   * Read-only copy of the consultation answers, taken when this report moves on to the ocular
+   * visit (same report id) so the consultation record is not lost when those fields are cleared.
+   */
+  consultationSnapshot?: IConsultationSnapshot;
 
   // File uploads (R2 keys)
   photoKeys: string[];
@@ -222,6 +242,7 @@ const visitReportSchema = new Schema<IVisitReport>(
     recommendedOcularSlot: { type: String },
     recommendedOcularAddressId: { type: String, trim: true },
     recommendedOcularAddress: { type: Schema.Types.Mixed },
+    consultationSnapshot: { type: Schema.Types.Mixed },
     linkedProjectId: { type: Schema.Types.ObjectId, ref: 'Project' },
     projectItemId: { type: Schema.Types.ObjectId, ref: 'ProjectItem' },
 

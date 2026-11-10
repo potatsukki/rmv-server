@@ -46,7 +46,7 @@ vi.mock('../../models/index.js', () => ({
     create: mockAppointmentCreate,
     countDocuments: mockAppointmentCountDocuments,
   },
-  SlotLock: {},
+  SlotLock: { deleteOne: vi.fn().mockResolvedValue(undefined), create: vi.fn().mockResolvedValue({}) },
   User: {
     find: mockUserFind,
     findOne: mockUserFindOne,
@@ -179,18 +179,19 @@ describe('prepareProjectOcularSchedule', () => {
     // Consultation held Nov 7 → the ocular opens on Nov 10.
     await expect(prepareProjectOcularSchedule({
       customerId: 'customer-1', date: '2026-11-09', slotCode: '09:00', salesStaffId: 'sales-1', consultationDate: '2026-11-07',
-    })).rejects.toThrow('at least 3 days after the consultation (2026-11-07)');
+    })).rejects.toThrow('at least 3 days after the consultation on Nov 7, 2026');
     expect(mockAppointmentFindOne).not.toHaveBeenCalled();
   });
 
-  it('counts from today when the consultation finished before its scheduled date', async () => {
+  it('counts from the booked consultation date even when the consultation finished early', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-11-08T01:00:00Z'));
-    mockAppointmentFindOne.mockResolvedValue({ _id: 'active-1', status: AppointmentStatus.REQUESTED });
-    // Scheduled Nov 17 but held on Nov 8: Nov 11 passes the consultation rule and reaches the next check.
+    vi.setSystemTime(new Date('2026-11-10T01:00:00Z'));
+    mockAppointmentFindOne.mockResolvedValue(null);
+    // PRJ-2026-00094: consultation booked Nov 13, completed early on Nov 10 → an ocular on Nov 13 is rejected.
     await expect(prepareProjectOcularSchedule({
-      customerId: 'customer-1', date: '2026-11-11', slotCode: '09:00', salesStaffId: 'sales-1', consultationDate: '2026-11-17',
-    })).rejects.toThrow('already have an active appointment');
+      customerId: 'customer-1', date: '2026-11-13', slotCode: '09:00', salesStaffId: 'sales-1', consultationDate: '2026-11-13',
+    })).rejects.toThrow('Choose Nov 16, 2026 or later.');
+    expect(mockAppointmentFindOne).not.toHaveBeenCalled();
   });
 
   it('enforces the existing advance booking rule', async () => {
@@ -323,7 +324,7 @@ describe('reassignAppointmentSales', () => {
     mockSalesStaffLookup();
     vi.mocked(evaluateSalesAssignmentEligibility).mockResolvedValueOnce({
       assignmentEligible: false,
-      assignmentBlockedReason: 'Already has an appointment on this date (APT-20261109-0006)',
+      assignmentBlockedReason: 'Already has an appointment on (APT-20261109-0006)',
     });
 
     await expect(reassignAppointmentSales(
@@ -331,7 +332,7 @@ describe('reassignAppointmentSales', () => {
       { salesStaffId: 'sales-1' },
       'agent-1',
       [Role.APPOINTMENT_AGENT],
-    )).rejects.toThrow('Already has an appointment on this date (APT-20261109-0006)');
+    )).rejects.toThrow('Already has an appointment on (APT-20261109-0006)');
 
     expect(appointment.save).not.toHaveBeenCalled();
     expect(mockAutoCreateDraft).not.toHaveBeenCalled();
@@ -553,13 +554,24 @@ describe('one appointment per sales staff per day', () => {
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
     expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+    // Completed appointments still take the day; only cancelled and no-show free it.
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
       date: '2026-09-10',
-      $or: [
-        { status: { $in: expect.arrayContaining([AppointmentStatus.CONFIRMED, AppointmentStatus.ON_THE_WAY]) } },
-        { slotCode: '09:00', status: { $nin: ['completed', 'cancelled', 'no_show'] } },
-      ],
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
     }));
+  });
+
+  it("hides the staff member's day after their consultation that day was completed (PRJ-2026-00094)", async () => {
+    twoAvailableStaff();
+    mockUserFind.mockImplementation(() => selectLeanResult([
+      { _id: 'sales-a', roles: [Role.SALES_STAFF], availabilityStatus: StaffAvailabilityStatus.AVAILABLE },
+    ]));
+    // sales-a's Nov 13 consultation is completed, but it still holds Nov 13.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', status: AppointmentStatus.COMPLETED }]));
+
+    const result = await getAvailableSlots({ date: '2026-11-13', type: AppointmentType.OCULAR, salesStaffId: 'sales-a' });
+
+    expect(result.slots.every((slot) => !slot.available)).toBe(true);
   });
 
   it('closes the day for customers once every staff member is taken or awaited', async () => {

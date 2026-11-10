@@ -14,6 +14,8 @@ import { sendOcularAddressNeededEmail, sendOcularFeeDueEmail, sendOcularVisitSch
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
 import { assertConsultationOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { withSalesDayLocks, type SalesDayLocks } from '../appointments/sales-day-lock.js';
+import { snapshotConsultationReport } from '../../services/consultation-snapshot.js';
 import { assertOcularAfterConsultation } from '../appointments/ocular-schedule-rules.js';
 import { assertAppointmentDayReached } from '../appointments/appointment-date-guards.js';
 import { assertOcularLocationAccepted } from '../maps/maps.service.js';
@@ -895,6 +897,7 @@ async function transitionConsultationReportsToOcularAppointment(
       await VisitReport.deleteOne({ _id: duplicate._id });
     }
 
+    snapshotConsultationReport(canonical);
     canonical.appointmentId = ocularAppointmentId as Types.ObjectId;
     canonical.visitType = 'ocular';
     if (isConsultationTransition) canonical.status = VisitReportStatus.DRAFT;
@@ -1724,6 +1727,17 @@ export async function submitReport(
   ip?: string,
   ua?: string,
 ) {
+  // An ocular visit scheduled from this report keeps the sales staff's day locked until it is saved.
+  return withSalesDayLocks((locks) => submitReportLocked(reportId, salesStaffId, locks, ip, ua));
+}
+
+async function submitReportLocked(
+  reportId: string,
+  salesStaffId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const report = await VisitReport.findById(reportId);
   if (!report) throw AppError.notFound('Visit report not found');
 
@@ -1807,6 +1821,7 @@ export async function submitReport(
         slotCode: report.recommendedOcularSlot,
         consultationAppointmentId: String(appt._id),
         existingOcularId: existingOcular?._id ? String(existingOcular._id) : undefined,
+        locks,
       });
     }
     // Reject sites outside mainland Luzon before the report or ocular appointment is saved.

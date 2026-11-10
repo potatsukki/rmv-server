@@ -29,8 +29,10 @@ import {
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
+  SALES_DAY_FREEING_STATUSES,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
+import { acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -463,6 +465,9 @@ export async function prepareProjectOcularSchedule(input: {
   salesStaffId?: string;
   /** Date of the consultation this ocular follows; the ocular must be 3+ days after it. */
   consultationDate?: string;
+  /** Holds the staff member's day until the caller has saved the ocular appointment. */
+  locks?: SalesDayLocks;
+  lockedBy?: string;
 }): Promise<string> {
   assertOcularAfterConsultation(input.date, input.consultationDate);
   await assertNoActiveAppointment(input.customerId);
@@ -470,6 +475,7 @@ export async function prepareProjectOcularSchedule(input: {
   const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
   const salesStaffId = input.salesStaffId || freeSalesStaffIds[0];
   if (!salesStaffId) throw AppError.badRequest('No sales staff available for this ocular visit');
+  await acquireSalesDayLock(input.locks, salesStaffId, input.date, input.lockedBy || salesStaffId);
   await assertSalesAvailable(salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR);
   return salesStaffId;
 }
@@ -486,6 +492,8 @@ export async function assertConsultationOcularSchedule(input: {
   slotCode: string;
   consultationAppointmentId: string;
   existingOcularId?: string;
+  /** Holds the staff member's day until the caller has saved the ocular appointment. */
+  locks?: SalesDayLocks;
 }): Promise<void> {
   if (!(SLOT_CODES as readonly string[]).includes(input.slotCode)) {
     throw AppError.badRequest('Choose a valid ocular visit time.', ErrorCode.VALIDATION_ERROR);
@@ -496,6 +504,7 @@ export async function assertConsultationOcularSchedule(input: {
   );
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
+  await acquireSalesDayLock(input.locks, input.salesStaffId, input.date, input.salesStaffId);
   await assertSalesAvailable(input.salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
 }
 
@@ -520,12 +529,6 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
     throw AppError.badRequest(`${dateStr} is a holiday: ${holiday.name}`);
   }
 }
-
-const SLOT_CAPACITY_FINAL_STATUSES = [
-  AppointmentStatus.COMPLETED,
-  AppointmentStatus.CANCELLED,
-  AppointmentStatus.NO_SHOW,
-];
 
 async function getSlotAvailability(
   dateStr: string,
@@ -572,15 +575,12 @@ async function getSlotAvailability(
   if (eligibleIds.size === 0) return { available: false, remaining: 0 };
 
   // One appointment per sales staff per day (office consultation or ocular visit): a staff member
-  // with an active appointment anywhere on this date is taken for the whole day, and so is one
-  // still holding this exact slot. Every unassigned request on this date will need a staff member
-  // of its own, so it uses one up too.
+  // with any appointment on this date (even a completed one) is taken for the whole day; only
+  // cancelled and no-show appointments give the day back. Every unassigned request on this date
+  // will need a staff member of its own, so it uses one up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
-    $or: [
-      { status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES } },
-      { slotCode, status: { $nin: SLOT_CAPACITY_FINAL_STATUSES } },
-    ],
+    status: { $nin: SALES_DAY_FREEING_STATUSES },
   };
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
@@ -973,6 +973,18 @@ export async function reassignAppointmentSales(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => reassignAppointmentSalesLocked(appointmentId, input, actorId, actorRoles, locks, ip, ua));
+}
+
+async function reassignAppointmentSalesLocked(
+  appointmentId: string,
+  input: ReassignAppointmentSalesInput,
+  actorId: string,
+  actorRoles: Role[],
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
@@ -1001,6 +1013,7 @@ export async function reassignAppointmentSales(
   }
 
   // A sales staff member takes one appointment per day; other dates don't block them.
+  await acquireSalesDayLock(locks, input.salesStaffId, appointment.date, actorId);
   await assertSalesAvailable(
     input.salesStaffId,
     appointment.date,

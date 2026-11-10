@@ -188,7 +188,7 @@ describe('appointment report submission without project creation', () => {
     // The ocular visit goes through the same schedule checks as any other (one appointment per day).
     expect(mocks.assertConsultationOcularSchedule).toHaveBeenCalledWith({
       customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-09-20', slotCode: '09:00',
-      consultationAppointmentId: 'appointment-1', existingOcularId: undefined,
+      consultationAppointmentId: 'appointment-1', existingOcularId: undefined, locks: expect.anything(),
     });
     expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
       type: 'ocular', date: '2026-09-20', slotCode: '09:00', sourceConsultationAppointmentId: 'appointment-1',
