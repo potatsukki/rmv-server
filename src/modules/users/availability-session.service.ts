@@ -23,17 +23,42 @@ export const INTERNAL_AVAILABILITY_ROLES: Role[] = [
 ];
 
 const INTERNAL_AVAILABILITY_ROLE_SET = new Set<Role>(INTERNAL_AVAILABILITY_ROLES);
-// A sales staff member takes ONE appointment per day — an office consultation or an ocular
-// visit, never both — so consultations and ocular visits can't overlap. Only a cancelled or
-// no-show appointment gives the day back: a completed (or ready-for-ocular) appointment still
-// took that day, even when it was finished early. An appointment on another date never blocks.
-export const SALES_DAY_FREEING_STATUSES: AppointmentStatus[] = [
+// A sales staff member can't hold two appointments (office consultation or ocular visit) whose
+// time slots overlap on the same date. Other slots that day stay open, and an appointment on
+// another date never blocks. Cancelled, completed and no-show appointments free their slot.
+export const SALES_SLOT_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
+  AppointmentStatus.COMPLETED,
   AppointmentStatus.NO_SHOW,
 ];
 
+/** Every appointment slot (SLOT_CODES) is one hour long. */
+export const APPOINTMENT_SLOT_MINUTES = 60;
+
+function slotStartMinutes(slotCode: string | undefined | null): number | undefined {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(slotCode ?? '').trim());
+  if (!match) return undefined;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+/** True when two slots on the same date overlap in time ([start, start + 60 min)). */
+export function slotsOverlap(a: string | undefined | null, b: string | undefined | null): boolean {
+  const startA = slotStartMinutes(a);
+  const startB = slotStartMinutes(b);
+  if (startA === undefined || startB === undefined) return Boolean(a) && a === b;
+  return startA < startB + APPOINTMENT_SLOT_MINUTES && startB < startA + APPOINTMENT_SLOT_MINUTES;
+}
+
+function formatSlotLabel(slotCode: string) {
+  const start = slotStartMinutes(slotCode);
+  if (start === undefined) return slotCode;
+  const hour = Math.floor(start / 60);
+  const minute = start % 60;
+  return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
 // Appointments still waiting on their sales staff (any date). Used for the customer's
-// "one active appointment" rule, not for the per-day staff rule above.
+// "one active appointment" rule, not for the per-slot staff rule above.
 export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.REQUESTED,
   AppointmentStatus.ASSIGNED,
@@ -45,19 +70,24 @@ export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.RESCHEDULE_REQUESTED,
 ];
 
-/** The staff member's other appointment on this date (YYYY-MM-DD), if any; cancelled and no-show don't count. */
+/**
+ * The staff member's other appointment on this date (YYYY-MM-DD) whose time overlaps this slot,
+ * if any; cancelled, completed and no-show appointments don't count.
+ */
 export async function findActiveSalesAssignment(
   salesStaffId: string,
   excludeAppointmentId: string | undefined,
   dateStr: string,
+  slotCode: string,
 ) {
   const filter: Record<string, unknown> = {
     salesStaffId,
     date: dateStr,
-    status: { $nin: SALES_DAY_FREEING_STATUSES },
+    status: { $nin: SALES_SLOT_FREEING_STATUSES },
   };
   if (excludeAppointmentId) filter._id = { $ne: excludeAppointmentId };
-  return Appointment.findOne(filter).select('appointmentNumber date type status').lean();
+  const sameDay = await Appointment.find(filter).select('appointmentNumber date slotCode type status').lean();
+  return sameDay.find((appointment) => slotsOverlap(appointment.slotCode, slotCode)) ?? null;
 }
 
 function formatAppointmentDay(dateStr: string) {
@@ -276,6 +306,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
     userAvailabilityStatus,
     session,
     dateStr,
+    slotCode,
     appointmentId,
   } = input;
 
@@ -306,16 +337,16 @@ export async function evaluateSalesAssignmentEligibility(input: {
     }
   }
 
-  // One appointment per day: any other consultation or ocular visit that date blocks,
-  // including one already completed. This also covers the same time slot.
-  const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr);
+  // Only another consultation or ocular visit whose time overlaps this slot on the same date
+  // blocks; the staff stays assignable to the other slots that day.
+  const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr, slotCode);
   if (activeAssignment) {
-    const day = formatAppointmentDay(dateStr);
+    const when = `${formatSlotLabel(activeAssignment.slotCode || slotCode)}, ${formatAppointmentDay(dateStr)}`;
     return {
       assignmentEligible: false,
       assignmentBlockedReason: activeAssignment.appointmentNumber
-        ? `Already has an appointment on ${day} (${activeAssignment.appointmentNumber})`
-        : `Already has an appointment on ${day}`,
+        ? `Already has an appointment at this time (${when} · ${activeAssignment.appointmentNumber})`
+        : `Already has an appointment at this time (${when})`,
     };
   }
 

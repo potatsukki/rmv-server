@@ -185,7 +185,7 @@ describe('appointment report submission without project creation', () => {
     mocks.userFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ email: 'customer@example.com' }) });
     await submitReport('report-1', 'sales-1');
     expect(appointment.status).toBe('completed');
-    // The ocular visit goes through the same schedule checks as any other (one appointment per day).
+    // The ocular visit goes through the same schedule checks as any other (no overlapping slot for the sales staff).
     expect(mocks.assertConsultationOcularSchedule).toHaveBeenCalledWith({
       customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-09-20', slotCode: '09:00',
       consultationAppointmentId: 'appointment-1', existingOcularId: undefined, locks: expect.anything(),
