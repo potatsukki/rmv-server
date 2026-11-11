@@ -503,6 +503,21 @@ describe('existing on-site fabrication tracking', () => {
     expect(result.allowedTransitions).toEqual(['finishing']);
   });
 
+  it('lets a cashier read the updates timeline of any project (QA: "Failed to load updates")', async () => {
+    const record = { _id: 'update-1', projectId: 'project-1', status: FabricationStatus.WELDING_ASSEMBLY, notes: 'Welded', createdAt: new Date('2026-11-10'), updatedBy: 'lead-1' };
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ customerId: 'customer-1', salesStaffId: 'sales-1', fabricationLeadId: 'lead-1', fabricationAssistantIds: [], deliveryType: DeliveryType.ON_SITE_INSTALLATION }) });
+    mockFabricationUpdateFind.mockReturnValue({ populate: vi.fn().mockReturnValue({ sort: vi.fn().mockResolvedValue([{ ...record, toObject: () => ({ ...record }) }]) }) });
+
+    await expect(listFabricationUpdates('project-1', 'cashier-1', [Role.CASHIER]))
+      .resolves.toEqual([expect.objectContaining({ notes: 'Welded' })]);
+  });
+
+  it('still denies a customer who does not own the project', async () => {
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ customerId: 'customer-1', salesStaffId: 'sales-1', fabricationAssistantIds: [], deliveryType: DeliveryType.ON_SITE_INSTALLATION }) });
+
+    await expect(listFabricationUpdates('project-1', 'customer-2', [Role.CUSTOMER])).rejects.toThrow('Access denied');
+  });
+
   it('maps an edited historical update in the response while preserving its stored status', async () => {
     const document = {
       projectId: 'project-1', updatedBy: 'lead-1', status: FabricationStatus.FABRICATION_INSTALLATION,
