@@ -90,6 +90,7 @@ import {
   recordCashPayment,
   listPendingPayments,
   listGcashPayments,
+  getReceiptDownloadUrl,
 } from './payments.service.js';
 import { PaymentMethod, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
@@ -295,5 +296,24 @@ describe('recordCashPayment amount limits', () => {
     stage.remainingBalance = 0.2;
     await recordCashPayment('stage-1', 0.2, 'cashier-1');
     expect(stage).toMatchObject({ status: PaymentStageStatus.VERIFIED, amountPaid: 0.3, remainingBalance: 0 });
+  });
+});
+
+describe('receipt download for an ocular booking payment (no project)', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const { generateDownloadUrl } = await import('../../modules/uploads/upload.service.js');
+    vi.mocked(generateDownloadUrl).mockResolvedValue('https://files.test/receipt.pdf');
+    mockPaymentFindById.mockResolvedValue({ _id: 'pay-1', bookingId: 'appt-1', customerId: 'customer-1', receiptKey: 'receipts/1.pdf' });
+  });
+
+  it.each([[Role.CASHIER], [Role.ADMIN]])('lets a %s open it', async (role) => {
+    await expect(getReceiptDownloadUrl('pay-1', 'staff-1', [role])).resolves.toEqual({ url: 'https://files.test/receipt.pdf', key: 'receipts/1.pdf' });
+    expect(mockProjectFindById).not.toHaveBeenCalled();
+  });
+
+  it('lets the customer who paid open it, and denies another customer', async () => {
+    await expect(getReceiptDownloadUrl('pay-1', 'customer-1', [Role.CUSTOMER])).resolves.toMatchObject({ key: 'receipts/1.pdf' });
+    await expect(getReceiptDownloadUrl('pay-1', 'customer-2', [Role.CUSTOMER])).rejects.toThrow('Access denied');
   });
 });

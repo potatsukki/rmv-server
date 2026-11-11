@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as paymentsService from './payments.service.js';
+import * as transactionsService from './transactions.service.js';
+import { transactionQuerySchema } from './payments.validation.js';
 import { Payment } from '../../models/Payment.js';
 import { reviewGcash } from './gcash.service.js';
 import { PaymentMethod, Role } from '../../utils/constants.js';
@@ -157,4 +159,19 @@ export const getReceiptDownloadUrl = asyncHandler(async (req: Request, res: Resp
 export const listOverduePayments = asyncHandler(async (_req: Request, res: Response) => {
   const result = await paymentsService.listOverduePayments();
   res.json({ success: true, data: result });
+});
+
+// ── Admin/Cashier: Transaction History ──
+export const listTransactions = asyncHandler(async (req: Request, res: Response) => {
+  const query = transactionQuerySchema.parse(req.query);
+  res.json({ success: true, data: await transactionsService.listTransactions(query) });
+});
+
+export const exportTransactions = asyncHandler(async (req: Request, res: Response) => {
+  const { page: _page, limit: _limit, ...query } = transactionQuerySchema.parse(req.query);
+  const rows = (await transactionsService.listTransactionRows(query)).slice(0, transactionsService.TRANSACTION_EXPORT_LIMIT);
+  const today = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="transactions-${today}.csv"`);
+  res.send(transactionsService.buildTransactionsCsv(rows));
 });

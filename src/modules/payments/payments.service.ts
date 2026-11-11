@@ -1436,7 +1436,14 @@ export async function getReceiptDownloadUrl(
   if (!payment) throw AppError.notFound('Payment not found');
   if (!payment.receiptKey) throw AppError.badRequest('No receipt available for this payment');
 
-  await assertPaymentProjectAccess(payment.projectId.toString(), actorId, actorRoles);
+  if (payment.projectId) {
+    await assertPaymentProjectAccess(payment.projectId.toString(), actorId, actorRoles);
+  } else {
+    // Ocular booking payments have no project: cashier/admin, or the customer who paid.
+    const isStaff = actorRoles.some((role) => [Role.ADMIN, Role.CASHIER].includes(role));
+    const isOwner = actorRoles.includes(Role.CUSTOMER) && payment.customerId?.toString() === actorId;
+    if (!isStaff && !isOwner) throw AppError.forbidden('Access denied');
+  }
 
   const url = await generateDownloadUrl(payment.receiptKey);
   return { url, key: payment.receiptKey };
