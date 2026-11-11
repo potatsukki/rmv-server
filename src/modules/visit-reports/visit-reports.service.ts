@@ -138,6 +138,7 @@ async function applyRecommendedOcularAddress(appointment: any, addressInput: Use
   appointment.customerAddress = ocularVisitData.formattedAddress;
   appointment.customerLocation = ocularVisitData.customerLocation;
   appointment.distanceKm = ocularVisitData.distanceKm;
+  appointment.travelDurationMinutes = ocularVisitData.travelDurationMinutes;
   appointment.ocularFee = ocularVisitData.ocularFee;
   appointment.ocularFeeBreakdown = ocularVisitData.ocularFeeBreakdown;
   appointment.addressStructured = getAddressStructured(address);

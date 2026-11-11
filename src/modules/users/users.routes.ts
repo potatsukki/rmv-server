@@ -69,11 +69,11 @@ router.get(
   usersController.getSalesAvailability,
 );
 
-// ── Sales Staff lookup (for agents assigning staff) ──
+// ── Sales Staff lookup (agents assigning staff; sales staff choosing who takes a project's ocular visit) ──
 router.get(
   '/sales-staff',
   authenticate,
-  authorize(Role.APPOINTMENT_AGENT, Role.ADMIN),
+  authorize(Role.APPOINTMENT_AGENT, Role.ADMIN, Role.SALES_STAFF),
   validate(salesStaffLookupQuerySchema, 'query'),
   usersController.listSalesStaff,
 );

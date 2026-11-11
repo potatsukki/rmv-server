@@ -1184,7 +1184,7 @@ async function assertBlueprintProjectAccess(
   actorRoles: Role[],
 ): Promise<void> {
   const project = await Project.findById(projectId)
-    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds status');
+    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds deliveryCrewIds status');
   if (!project) throw AppError.notFound('Project not found');
 
   // The cashier reads every project's billing summary and quotation for payment records.
@@ -1203,7 +1203,8 @@ async function assertBlueprintProjectAccess(
   if (
     actorRoles.includes(Role.FABRICATION_STAFF) &&
     (project.fabricationLeadId?.toString() === actorId ||
-      project.fabricationAssistantIds.some((id) => id.toString() === actorId))
+      project.fabricationAssistantIds.some((id) => id.toString() === actorId) ||
+      (project.deliveryCrewIds || []).some((id) => id.toString() === actorId))
   ) return;
 
   throw AppError.forbidden('Access denied');

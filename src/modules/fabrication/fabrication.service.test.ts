@@ -205,6 +205,30 @@ describe('createFabricationUpdate', () => {
     expect(save).toHaveBeenCalled();
   });
 
+  it('lets the delivery / installation crew post an update, but not unassigned fabrication staff', async () => {
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1',
+      customerId: 'customer-1',
+      title: 'Deliverable Project',
+      status: ProjectStatus.FABRICATION,
+      deliveryType: DeliveryType.SHOP_FABRICATED,
+      fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [],
+      deliveryCrewIds: [{ toString: () => 'crew-1' }],
+      engineerIds: [],
+      installationConfirmedAt: null,
+      save: vi.fn(),
+    });
+    const update = { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Delivered.' };
+
+    await expect(createFabricationUpdate(update, 'outsider-1', [Role.FABRICATION_STAFF]))
+      .rejects.toThrow('You are not assigned to this project');
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+
+    await createFabricationUpdate(update, 'crew-1', [Role.FABRICATION_STAFF]);
+    expect(mockFabricationUpdateCreate).toHaveBeenCalled();
+  });
+
   function setUpOnSiteProject(currentStatus: FabricationStatus | null = null, confirmed = false) {
     mockProjectFindById.mockResolvedValue({
       _id: 'project-1',

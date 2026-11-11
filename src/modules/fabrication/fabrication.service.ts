@@ -107,8 +107,10 @@ export async function createFabricationUpdate(
   const isAdmin = actorRoles.includes(Role.ADMIN);
   const isLead = project.fabricationLeadId?.toString() === actorId;
   const isAssistant = project.fabricationAssistantIds.some(id => id.toString() === actorId);
+  // The delivery / installation crew logs the delivery and on-site work.
+  const isDeliveryCrew = (project.deliveryCrewIds || []).some(id => id.toString() === actorId);
   const isEngineer = project.engineerIds?.some((id: { toString: () => string }) => id.toString() === actorId);
-  if (!isAdmin && !isLead && !isAssistant && !isEngineer) {
+  if (!isAdmin && !isLead && !isAssistant && !isDeliveryCrew && !isEngineer) {
     throw AppError.forbidden('You are not assigned to this project');
   }
 
@@ -271,7 +273,7 @@ export async function createFabricationUpdate(
     if (project.fabricationLeadId && project.fabricationLeadId.toString() !== actorId) {
       rooms.add(`user:${project.fabricationLeadId}`);
     }
-    for (const id of (project.fabricationAssistantIds || [])) {
+    for (const id of [...(project.fabricationAssistantIds || []), ...(project.deliveryCrewIds || [])]) {
       if (id.toString() !== actorId) rooms.add(`user:${id}`);
     }
     for (const id of ((project as any).engineerIds || [])) {
@@ -418,7 +420,7 @@ export async function updateFabricationUpdate(
   }
 
   const project = await Project.findById(update.projectId)
-    .select('customerId fabricationLeadId fabricationAssistantIds engineerIds deliveryType');
+    .select('customerId fabricationLeadId fabricationAssistantIds deliveryCrewIds engineerIds deliveryType');
 
   if (input.notes !== undefined) update.notes = input.notes;
   if (input.photoKeys !== undefined) update.photoKeys = input.photoKeys;
@@ -439,7 +441,7 @@ export async function updateFabricationUpdate(
       const rooms = new Set<string>();
       rooms.add(`user:${project.customerId}`);
       if (project.fabricationLeadId) rooms.add(`user:${project.fabricationLeadId}`);
-      for (const sid of (project.fabricationAssistantIds || [])) rooms.add(`user:${sid}`);
+      for (const sid of [...(project.fabricationAssistantIds || []), ...(project.deliveryCrewIds || [])]) rooms.add(`user:${sid}`);
       for (const sid of ((project as any).engineerIds || [])) rooms.add(`user:${sid}`);
       rooms.delete(`user:${actorId}`);
       for (const room of rooms) io.to(room).emit('fabrication:update', { projectId: String(update.projectId) });
@@ -481,12 +483,12 @@ export async function deleteFabricationUpdate(
   try {
     const io = getIO();
     const project = await Project.findById(projectId)
-      .select('customerId fabricationLeadId fabricationAssistantIds engineerIds');
+      .select('customerId fabricationLeadId fabricationAssistantIds deliveryCrewIds engineerIds');
     if (project) {
       const rooms = new Set<string>();
       rooms.add(`user:${project.customerId}`);
       if (project.fabricationLeadId) rooms.add(`user:${project.fabricationLeadId}`);
-      for (const sid of (project.fabricationAssistantIds || [])) rooms.add(`user:${sid}`);
+      for (const sid of [...(project.fabricationAssistantIds || []), ...(project.deliveryCrewIds || [])]) rooms.add(`user:${sid}`);
       for (const sid of ((project as any).engineerIds || [])) rooms.add(`user:${sid}`);
       rooms.delete(`user:${actorId}`);
       for (const room of rooms) io.to(room).emit('fabrication:update', { projectId });
@@ -506,7 +508,7 @@ async function assertFabricationProjectAccess(
   actorRoles: Role[],
 ): Promise<DeliveryType | undefined> {
   const project = await Project.findById(projectId)
-    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds status deliveryType');
+    .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds deliveryCrewIds status deliveryType');
   if (!project) throw AppError.notFound('Project not found');
 
   if (actorRoles.includes(Role.ADMIN)) return project.deliveryType;
@@ -521,7 +523,8 @@ async function assertFabricationProjectAccess(
   if (
     actorRoles.includes(Role.FABRICATION_STAFF) &&
     (project.fabricationLeadId?.toString() === actorId ||
-      project.fabricationAssistantIds.some((id) => id.toString() === actorId))
+      project.fabricationAssistantIds.some((id) => id.toString() === actorId) ||
+      (project.deliveryCrewIds || []).some((id) => id.toString() === actorId))
   ) return project.deliveryType;
 
   throw AppError.forbidden('Access denied');
