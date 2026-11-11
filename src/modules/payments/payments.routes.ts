@@ -16,6 +16,7 @@ import {
   verifyPaymentSchema,
   declinePaymentSchema,
   recordCashPaymentSchema,
+  transactionQuerySchema,
 } from './payments.validation.js';
 
 const router = Router();
@@ -23,7 +24,8 @@ router.get('/gcash/flagged', authenticate, authorize(Role.CASHIER), asyncHandler
   res.json({ success: true, data: await listPendingPayments(req.query as { page?: string; limit?: string }, true) });
 }));
 const GCASH_QUEUE_FILTERS: GcashQueueFilter[] = ['all', 'pending', 'verified', 'rejected', 'flagged'];
-router.get('/gcash/queue', authenticate, authorize(Role.CASHIER), asyncHandler(async (req, res) => {
+// Admin can view the GCash queue/history (read-only); approving and rejecting stay cashier-only.
+router.get('/gcash/queue', authenticate, authorize(Role.CASHIER, Role.ADMIN), asyncHandler(async (req, res) => {
   const filter = GCASH_QUEUE_FILTERS.find((value) => value === req.query.filter) ?? 'pending';
   res.json({ success: true, data: await listGcashPayments(filter, req.query as { page?: string; limit?: string }) });
 }));
@@ -141,6 +143,23 @@ router.get(
   authenticate,
   authorize(Role.CASHIER, Role.ADMIN),
   ctrl.listOverduePayments,
+);
+
+// ── Admin/Cashier: Transaction History (before '/:id' so "transactions" isn't read as an id) ──
+router.get(
+  '/transactions',
+  authenticate,
+  authorize(Role.CASHIER, Role.ADMIN),
+  validate(transactionQuerySchema, 'query'),
+  ctrl.listTransactions,
+);
+
+router.get(
+  '/transactions/export',
+  authenticate,
+  authorize(Role.CASHIER, Role.ADMIN),
+  validate(transactionQuerySchema, 'query'),
+  ctrl.exportTransactions,
 );
 
 // ── Read ──

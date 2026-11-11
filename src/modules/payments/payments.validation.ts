@@ -58,3 +58,17 @@ export type UpdatePaymentPlanInput = z.infer<typeof updatePaymentPlanSchema>;
 export type SubmitPaymentProofInput = z.infer<typeof submitPaymentProofSchema>;
 export type VerifyPaymentInput = z.infer<typeof verifyPaymentSchema>;
 export type DeclinePaymentInput = z.infer<typeof declinePaymentSchema>;
+
+// ── Admin/Cashier: Transaction History ──
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD');
+export const transactionQuerySchema = z.object({
+  dateFrom: isoDate.optional(),
+  dateTo: isoDate.optional(),
+  type: z.enum(['project_payment', 'design_fee', 'revision_fee', 'ocular_fee']).optional(),
+  method: z.enum(Object.values(PaymentMethod) as [string, ...string[]]).optional(),
+  status: z.enum(['verified', 'pending', 'rejected']).optional(),
+  search: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type TransactionQueryInput = z.infer<typeof transactionQuerySchema>;

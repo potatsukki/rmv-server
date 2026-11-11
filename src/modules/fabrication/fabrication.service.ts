@@ -515,6 +515,8 @@ async function assertFabricationProjectAccess(
   if (actorRoles.includes(Role.SALES_STAFF) && project.salesStaffId?.toString() === actorId) return project.deliveryType;
 
   if (actorRoles.includes(Role.ENGINEER)) return project.deliveryType;
+  // Cashiers follow the project's progress (read-only); posting updates stays fabrication/engineer/admin.
+  if (actorRoles.includes(Role.CASHIER)) return project.deliveryType;
 
   if (
     actorRoles.includes(Role.FABRICATION_STAFF) &&
