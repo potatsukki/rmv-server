@@ -12,6 +12,7 @@ import {
   assignEngineersSchema,
   reassignProjectSalesSchema,
   assignFabricationSchema,
+  assignDeliveryCrewSchema,
   transitionProjectSchema,
   uploadSignedContractSchema,
   reviewInitialDesignSchema,
@@ -112,6 +113,22 @@ router.post(
   authorize(Role.ENGINEER, Role.ADMIN),
   validate(assignFabricationSchema),
   ctrl.assignFabricationStaff,
+);
+
+// Who is free: fabrication staff with the projects they are on (team and delivery crew pickers).
+router.get(
+  '/fabrication-staff/workload',
+  authenticate,
+  authorize(Role.ENGINEER, Role.ADMIN),
+  ctrl.listFabricationStaffWorkload,
+);
+
+router.post(
+  '/:id/assign-delivery-crew',
+  authenticate,
+  authorize(Role.ENGINEER, Role.ADMIN),
+  validate(assignDeliveryCrewSchema),
+  ctrl.assignDeliveryCrew,
 );
 
 // ── Status Transition ──

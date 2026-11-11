@@ -179,13 +179,25 @@ function appendAndFilter(
 /**
  * Ocular visits a project scheduled. They belong to the project (Projects tab), so the
  * Appointments page leaves them out when it asks with excludeProjectOculars=true.
+ *
+ * With ownerSalesStaffId, only that staff member's own projects count: an ocular visit another
+ * project handed to them has no project page of theirs to open it from, so it stays listed.
  */
-async function getProjectOcularAppointmentIds(): Promise<unknown[]> {
+async function getProjectOcularAppointmentIds(ownerSalesStaffId?: string): Promise<unknown[]> {
   const ids = await Project.distinct('ocularAppointmentId', {
     status: { $ne: ProjectStatus.CANCELLED },
     ocularAppointmentId: { $exists: true, $ne: null },
+    ...(ownerSalesStaffId ? { salesStaffId: ownerSalesStaffId } : {}),
   });
   return ids.filter(Boolean);
+}
+
+/** The viewer's ID when they are sales staff only (no admin or agent role), otherwise undefined. */
+function salesOnlyActorId(actorId: string, actorRoles: Role[]): string | undefined {
+  return actorRoles.includes(Role.SALES_STAFF)
+    && !actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT].includes(role))
+    ? actorId
+    : undefined;
 }
 
 export interface AppointmentQueueSampleProject {
@@ -729,6 +741,8 @@ interface OcularVisitComputation {
   formattedAddress: string;
   customerLocation: { lat: number; lng: number };
   distanceKm: number;
+  /** Estimated one-way drive from the RMV shop, in minutes. */
+  travelDurationMinutes: number;
   ocularFee: number;
   ocularFeeBreakdown: {
     label: string;
@@ -768,6 +782,7 @@ export async function resolveOcularVisitData(
     formattedAddress: resolvedAddress,
     customerLocation: location,
     distanceKm: feeResult.route.distanceKm,
+    travelDurationMinutes: feeResult.route.durationMinutes,
     ocularFee: feeResult.fee.total,
     ocularFeeBreakdown: feeResult.fee,
   };
@@ -1691,6 +1706,7 @@ export async function customerSubmitOcularLocation(
   appointment.customerAddress = ocularVisitData.formattedAddress;
   appointment.customerLocation = ocularVisitData.customerLocation;
   appointment.distanceKm = ocularVisitData.distanceKm;
+  appointment.travelDurationMinutes = ocularVisitData.travelDurationMinutes;
   appointment.ocularFee = ocularVisitData.ocularFee;
   appointment.ocularFeeBreakdown = ocularVisitData.ocularFeeBreakdown;
   if (input.addressStructured) appointment.addressStructured = input.addressStructured;
@@ -3273,7 +3289,14 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
     && !isPrivilegedStaff
     && appointment.salesStaffId?._id?.toString() !== actorId
   ) {
-    throw AppError.forbidden('This appointment is no longer assigned to you');
+    // The project's own sales staff can still view an ocular visit another staff member takes.
+    const ownsOcularProject = appointment.type === AppointmentType.OCULAR
+      && await Project.exists({
+        ocularAppointmentId: appointment._id,
+        salesStaffId: actorId,
+        status: { $ne: ProjectStatus.CANCELLED },
+      });
+    if (!ownsOcularProject) throw AppError.forbidden('This appointment is no longer assigned to you');
   }
 
   // Customers can only view their own
@@ -3513,7 +3536,7 @@ export async function listAppointmentQueue(
   }
 
   if (query.excludeProjectOculars === 'true') {
-    const projectOcularIds = await getProjectOcularAppointmentIds();
+    const projectOcularIds = await getProjectOcularAppointmentIds(salesOnlyActorId(actorId, actorRoles));
     if (projectOcularIds.length) andFilters.push({ _id: { $nin: projectOcularIds } });
   }
 
@@ -3913,7 +3936,7 @@ export async function listAppointments(query: {
   }
 
   if (query.excludeProjectOculars === 'true') {
-    const projectOcularIds = await getProjectOcularAppointmentIds();
+    const projectOcularIds = await getProjectOcularAppointmentIds(salesOnlyActorId(actorId, actorRoles));
     if (projectOcularIds.length) appendAndFilter(filter, { _id: { $nin: projectOcularIds } });
   }
 

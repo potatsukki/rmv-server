@@ -96,6 +96,29 @@ describe('listAppointments status groups', () => {
     });
   });
 
+  it('hides only the sales staff member’s own project oculars, so one handed to them stays listed', async () => {
+    mocks.projectDistinct.mockResolvedValueOnce(['own-project-ocular']);
+
+    await listAppointments({ excludeProjectOculars: 'true' }, 'sales-1', [Role.SALES_STAFF]);
+
+    // Only projects this staff member owns are asked for: another project's ocular is not excluded.
+    expect(mocks.projectDistinct).toHaveBeenCalledWith('ocularAppointmentId', expect.objectContaining({
+      salesStaffId: 'sales-1',
+    }));
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({
+      salesStaffId: 'sales-1',
+      $and: [{ _id: { $nin: ['own-project-ocular'] } }],
+    });
+  });
+
+  it('hides every project ocular from agents and admins', async () => {
+    mocks.projectDistinct.mockResolvedValueOnce(['ocular-1']);
+
+    await listAppointments({ excludeProjectOculars: 'true' }, 'admin-1', [Role.ADMIN]);
+
+    expect(mocks.projectDistinct.mock.calls[0]![1]).not.toHaveProperty('salesStaffId');
+  });
+
   it('keeps project oculars for other lists (Projects page, Create Project)', async () => {
     await listAppointments({ type: 'ocular' }, 'customer-1', [Role.CUSTOMER]);
 

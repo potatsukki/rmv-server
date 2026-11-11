@@ -73,6 +73,8 @@ export interface IAppointment extends Document {
     lng: number;
   };
   distanceKm?: number;
+  /** Estimated one-way drive from the RMV shop to the site, in minutes (display only). */
+  travelDurationMinutes?: number;
   ocularFee?: number;
   ocularFeeBreakdown?: {
     label: string;
@@ -196,6 +198,7 @@ const appointmentSchema = new Schema<IAppointment>(
       lng: { type: Number },
     },
     distanceKm: { type: Number },
+    travelDurationMinutes: { type: Number },
     ocularFee: { type: Number },
     ocularFeeBreakdown: {
       label: String,

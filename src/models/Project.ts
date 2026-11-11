@@ -15,6 +15,8 @@ export interface IProject extends Document {
   engineerIds: Types.ObjectId[]; // Multiple engineers can collaborate
   fabricationLeadId?: Types.ObjectId;
   fabricationAssistantIds: Types.ObjectId[];
+  /** Fabrication staff who go with the delivery / on-site installation (separate from the workshop team). */
+  deliveryCrewIds: Types.ObjectId[];
 
   title: string;
   totalCost?: number;
@@ -133,6 +135,7 @@ const projectSchema = new Schema<IProject>(
     engineerIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     fabricationLeadId: { type: Schema.Types.ObjectId, ref: 'User' },
     fabricationAssistantIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+    deliveryCrewIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
 
     title: { type: String, required: true, trim: true },
     totalCost: { type: Number },

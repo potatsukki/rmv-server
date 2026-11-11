@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({
   projectFindById: vi.fn(),
   projectFindOneAndUpdate: vi.fn(),
   projectCreate: vi.fn(),
+  projectFind: vi.fn(),
   userFindOne: vi.fn(),
+  userFind: vi.fn(),
   auditCreate: vi.fn(),
   reportFindOne: vi.fn(),
   reportFind: vi.fn(),
@@ -28,7 +30,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, findOneAndUpdate: mocks.projectFindOneAndUpdate, create: mocks.projectCreate },
+  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, findOneAndUpdate: mocks.projectFindOneAndUpdate, create: mocks.projectCreate, find: mocks.projectFind },
   ProjectItem: {
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
@@ -37,7 +39,7 @@ vi.mock('../../models/index.js', () => ({
     updateMany: mocks.projectItemUpdateMany,
   },
   Appointment: { findById: mocks.appointmentFindById, create: mocks.appointmentCreate },
-  User: { findOne: mocks.userFindOne },
+  User: { findOne: mocks.userFindOne, find: mocks.userFind },
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
 }));
@@ -66,9 +68,10 @@ vi.mock('../appointments/appointments.service.js', () => ({
 }));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 
-import { assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
+import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
-import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role } from '../../utils/constants.js';
+import { createAndSendNotification } from '../notifications/socket.service.js';
+import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const site = { lat: 14.2, lng: 121.1 };
@@ -1084,5 +1087,147 @@ describe('scheduleProjectOcular', () => {
     project.ocularAppointmentId = 'ocular-1';
     await expect(scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]))
       .rejects.toThrow('already scheduled');
+  });
+
+  it('does not notify the sales staff member who schedules their own visit', async () => {
+    await scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]);
+    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ salesStaffId: actorId }));
+    expect(createAndSendNotification).not.toHaveBeenCalledWith(
+      actorId, expect.anything(), 'Ocular Visit Assigned', expect.anything(), expect.anything(),
+    );
+  });
+
+  it('hands only the ocular visit to another sales staff member; the project keeps its own staff', async () => {
+    const otherStaffId = 'dddddddddddddddddddddddd';
+    const report = { _id: 'report-1', serviceType: 'gates', visitType: 'consultation', salesStaffId: actorId, save: vi.fn() };
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([report]) });
+    mocks.prepareOcularSchedule.mockResolvedValue(otherStaffId);
+    mocks.resolveOcularVisitData.mockResolvedValue({ ...siteData, travelDurationMinutes: 55 });
+
+    await scheduleProjectOcular('project-1', { ...visit, salesStaffId: otherStaffId }, actorId, [Role.SALES_STAFF]);
+
+    // The chosen person's day is checked and locked, not the project owner's.
+    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ salesStaffId: otherStaffId }));
+    expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'ocular', salesStaffId: otherStaffId, travelDurationMinutes: 55, distanceKm: 40,
+    }));
+    expect(project.salesStaffId.toString()).toBe(actorId);
+    expect(report.salesStaffId).toBe(otherStaffId);
+    expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      action: AuditAction.PROJECT_UPDATED,
+      details: expect.objectContaining({ action: 'ocular_scheduled', ocularStaffId: otherStaffId, ocularDelegated: true }),
+    }));
+    expect(createAndSendNotification).toHaveBeenCalledWith(
+      otherStaffId, expect.anything(), 'Ocular Visit Assigned', expect.stringContaining('Gate project'), '/appointments/ocular-appointment-1',
+    );
+  });
+});
+
+describe('assignDeliveryCrew', () => {
+  let project: Record<string, any>;
+  const crewIds = ['eeeeeeeeeeeeeeeeeeeeeeee', 'ffffffffffffffffffffffff'];
+  const usersFound = (count: number) => mocks.userFind.mockReturnValue({
+    select: vi.fn().mockResolvedValue(crewIds.slice(0, count).map((_id) => ({ _id }))),
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = {
+      _id: 'project-1', title: 'Gate project', status: ProjectStatus.FABRICATION,
+      engineerIds: [{ toString: () => actorId }],
+      fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [], deliveryCrewIds: [],
+      save: vi.fn(),
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+    usersFound(2);
+  });
+
+  it('saves the crew without touching the project status, and tells the crew and the lead', async () => {
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]);
+
+    expect(project.deliveryCrewIds).toEqual(crewIds);
+    expect(project.status).toBe(ProjectStatus.FABRICATION);
+    expect(project.save).toHaveBeenCalledOnce();
+    expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      action: AuditAction.DELIVERY_CREW_ASSIGNED,
+      details: { deliveryCrewIds: crewIds, previousCrewIds: [] },
+    }));
+    const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
+    expect(notified).toEqual([...crewIds, 'lead-1']);
+  });
+
+  it('only notifies people newly added to the crew', async () => {
+    project.deliveryCrewIds = [{ toString: () => crewIds[0] }];
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]);
+
+    const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
+    expect(notified).toEqual([crewIds[1], 'lead-1']);
+  });
+
+  it('needs the fabrication team first', async () => {
+    project.fabricationLeadId = undefined;
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('Assign the fabrication team first');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('is refused for an engineer who is not assigned to the project', async () => {
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, 'another-engineer', [Role.ENGINEER]))
+      .rejects.toThrow('Only the assigned engineer');
+  });
+
+  it('is refused once the project is completed', async () => {
+    project.status = ProjectStatus.COMPLETED;
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ADMIN]))
+      .rejects.toThrow('before the project is completed');
+  });
+
+  it('rejects a crew member who is not active fabrication staff', async () => {
+    usersFound(1);
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('One or more crew member IDs are invalid');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('listFabricationStaffWorkload', () => {
+  const leanChain = (rows: unknown[]) => ({
+    select: vi.fn().mockReturnValue({ sort: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(rows) }) }),
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('marks each fabricator available, busy, or on leave with the projects they are on', async () => {
+    mocks.userFind.mockReturnValue(leanChain([
+      { _id: 'free', firstName: 'Ana', lastName: 'Reyes' },
+      { _id: 'busy', firstName: 'Juan', lastName: 'Cruz' },
+      { _id: 'leave', firstName: 'Maria', lastName: 'Santos', availabilityStatus: StaffAvailabilityStatus.ON_LEAVE, availabilityNote: 'Back Monday' },
+    ]));
+    mocks.projectFind.mockReturnValue(leanChain([
+      { _id: 'project-1', projectNumber: 'PRJ-2026-00001', title: 'Gate', status: ProjectStatus.FABRICATION, fabricationLeadId: 'busy', fabricationAssistantIds: ['leave'], deliveryCrewIds: ['busy'] },
+      { _id: 'project-2', projectNumber: 'PRJ-2026-00002', title: 'Railings', status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: 'other', fabricationAssistantIds: ['busy'], deliveryCrewIds: [] },
+    ]));
+
+    const staff = await listFabricationStaffWorkload();
+
+    expect(mocks.projectFind.mock.calls[0]![0].status).toEqual({ $in: [ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION] });
+    expect(staff.map((member) => [member._id, member.workloadStatus, member.activeProjectCount])).toEqual([
+      ['free', 'available', 0],
+      ['busy', 'busy', 2],
+      ['leave', 'on_leave', 1],
+    ]);
+    expect(staff[1]!.activeProjects).toEqual([
+      { _id: 'project-1', projectNumber: 'PRJ-2026-00001', title: 'Gate', status: ProjectStatus.FABRICATION, roles: ['lead', 'delivery_crew'] },
+      { _id: 'project-2', projectNumber: 'PRJ-2026-00002', title: 'Railings', status: ProjectStatus.PAYMENT_PENDING, roles: ['assistant'] },
+    ]);
+  });
+
+  it('returns an empty list when there is no fabrication staff', async () => {
+    mocks.userFind.mockReturnValue(leanChain([]));
+    expect(await listFabricationStaffWorkload()).toEqual([]);
+    expect(mocks.projectFind).not.toHaveBeenCalled();
   });
 });

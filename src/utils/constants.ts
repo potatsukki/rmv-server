@@ -281,6 +281,7 @@ export enum AuditAction {
 
   // Fabrication
   FABRICATION_ASSIGNED = 'fabrication_assigned',
+  DELIVERY_CREW_ASSIGNED = 'delivery_crew_assigned',
   FABRICATION_UPDATED = 'fabrication_updated',
 
   // Visit Report

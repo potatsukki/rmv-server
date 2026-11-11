@@ -83,7 +83,10 @@ export const createProjectSchema = z.object({
   path: ['customerId'],
 });
 
-export const scheduleProjectOcularSchema = ocularVisitSchema;
+export const scheduleProjectOcularSchema = ocularVisitSchema.extend({
+  // Who goes to the site. Left out, the project's own sales staff takes the visit.
+  salesStaffId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid sales staff ID').optional(),
+});
 
 export const finalizeOcularProjectSchema = createProjectSchema.refine((input) => !input.ocularVisit, {
   message: 'The ocular visit is already scheduled',
@@ -123,6 +126,10 @@ export const reassignProjectSalesSchema = z.object({
 export const assignFabricationSchema = z.object({
   fabricationLeadId: z.string().min(1),
   fabricationAssistantIds: z.array(z.string().min(1)).default([]),
+});
+
+export const assignDeliveryCrewSchema = z.object({
+  deliveryCrewIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).min(1, 'Select at least one crew member').max(20),
 });
 
 export const transitionProjectSchema = z.object({
@@ -200,6 +207,7 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 export type AssignEngineersInput = z.infer<typeof assignEngineersSchema>;
 export type ReassignProjectSalesInput = z.infer<typeof reassignProjectSalesSchema>;
 export type AssignFabricationInput = z.infer<typeof assignFabricationSchema>;
+export type AssignDeliveryCrewInput = z.infer<typeof assignDeliveryCrewSchema>;
 export type TransitionProjectInput = z.infer<typeof transitionProjectSchema>;
 export type SignContractInput = z.infer<typeof signContractSchema>;
 export type SignEngineerContractInput = z.infer<typeof signEngineerContractSchema>;

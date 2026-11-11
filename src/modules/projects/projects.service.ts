@@ -23,6 +23,7 @@ import type {
   AssignEngineersInput,
   ReassignProjectSalesInput,
   AssignFabricationInput,
+  AssignDeliveryCrewInput,
   TransitionProjectInput,
   SignContractInput,
   SignEngineerContractInput,
@@ -578,6 +579,8 @@ interface ProjectOcularVisitInput {
   slotCode: SlotCode;
   customerLocation: { lat: number; lng: number };
   formattedAddress?: string;
+  /** Schedule Ocular Visit only: the sales staff who takes the visit (default: the project's own). */
+  salesStaffId?: string;
 }
 
 // Creates the confirmed ocular appointment for a pending project and moves its
@@ -648,6 +651,7 @@ async function attachOcularAppointmentToProject({
       customerAddress: ocularSite.formattedAddress,
       customerLocation: ocularSite.customerLocation,
       distanceKm: ocularSite.distanceKm,
+      travelDurationMinutes: ocularSite.travelDurationMinutes,
       ocularFee: ocularSite.ocularFee,
       ocularFeeBreakdown: ocularSite.ocularFeeBreakdown,
     }),
@@ -664,6 +668,8 @@ async function attachOcularAppointmentToProject({
   for (const report of reports) {
     snapshotConsultationReport(report);
     report.appointmentId = ocularAppointment._id;
+    // The ocular report belongs to whoever takes the visit (may differ from the project's sales staff).
+    report.salesStaffId = salesStaffId;
     report.visitType = 'ocular';
     report.status = VisitReportStatus.DRAFT;
     report.consultationOutcome = undefined;
@@ -1103,15 +1109,19 @@ async function scheduleProjectOcularLocked(
   }
 
   const customerId = project.customerId.toString();
+  const projectSalesStaffId = project.salesStaffId.toString();
+  // Another sales staff member may take the visit; the project itself stays with its own staff.
+  // prepareProjectOcularSchedule checks the chosen person is an active, free sales staff member.
   const salesStaffId = await prepareProjectOcularSchedule({
     customerId,
     date: input.date,
     slotCode: input.slotCode,
-    salesStaffId: project.salesStaffId.toString(),
+    salesStaffId: input.salesStaffId || projectSalesStaffId,
     consultationDate: sourceAppointment?.date,
     locks,
     lockedBy: actorId,
   });
+  const ocularDelegated = salesStaffId !== projectSalesStaffId;
   const ocularSite = await resolveOcularVisitData(AppointmentType.OCULAR, input.formattedAddress, input.customerLocation);
   const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);
   if (ocularSite?.formattedAddress) project.siteAddress = ocularSite.formattedAddress;
@@ -1152,6 +1162,8 @@ async function scheduleProjectOcularLocked(
       date: input.date,
       slotCode: input.slotCode,
       ocularFeePending,
+      ocularStaffId: salesStaffId,
+      ocularDelegated,
     },
     ipAddress: ip,
     userAgent: ua,
@@ -1161,6 +1173,16 @@ async function scheduleProjectOcularLocked(
   // ocular fee when one is due. The customer is told by attachOcularAppointmentToProject.
   const when = formatNotificationDate(input.date, input.slotCode);
   const link = `/appointments/${project.ocularAppointmentId}`;
+  // Whoever takes the visit is told, unless they scheduled it themselves.
+  if (salesStaffId !== actorId) {
+    await createAndSendNotification(
+      salesStaffId,
+      NotificationCategory.APPOINTMENT,
+      'Ocular Visit Assigned',
+      `You will take the ocular visit for "${project.title}" (${project.projectNumber}) on ${when}.`,
+      link,
+    );
+  }
   if (sourceAppointment) {
     await notifyBookingAgents(
       sourceAppointment,
@@ -2304,6 +2326,153 @@ export async function assignFabricationStaff(
   return project;
 }
 
+// ── Fabrication staff workload (shown while the engineer picks a team or a delivery crew) ──
+
+/** A project keeps its people occupied from team assignment until fabrication is done. */
+const FABRICATION_WORKLOAD_STATUSES = [ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION];
+
+export type FabricationWorkloadStatus = 'available' | 'busy' | 'on_leave' | 'unavailable';
+export type FabricationWorkloadRole = 'lead' | 'assistant' | 'delivery_crew';
+
+/**
+ * Every active fabrication staff member with the projects they are currently on. Display only:
+ * a busy person can still be assigned, the engineer just sees the load first.
+ */
+export async function listFabricationStaffWorkload() {
+  const staff = await User.find({ roles: Role.FABRICATION_STAFF, isActive: true })
+    .select('firstName lastName availabilityStatus availabilityNote')
+    .sort({ firstName: 1, lastName: 1 })
+    .lean();
+  const staffIds = staff.map((member) => member._id);
+  const projects = staffIds.length
+    ? await Project.find({
+      status: { $in: FABRICATION_WORKLOAD_STATUSES },
+      $or: [
+        { fabricationLeadId: { $in: staffIds } },
+        { fabricationAssistantIds: { $in: staffIds } },
+        { deliveryCrewIds: { $in: staffIds } },
+      ],
+    })
+      .select('projectNumber title status fabricationLeadId fabricationAssistantIds deliveryCrewIds')
+      .sort({ createdAt: 1 })
+      .lean()
+    : [];
+
+  return staff.map((member) => {
+    const memberId = member._id.toString();
+    const includesMember = (ids?: unknown[]) => (ids || []).some((id) => String(id) === memberId);
+    const activeProjects = projects.flatMap((project) => {
+      const roles: FabricationWorkloadRole[] = [];
+      if (project.fabricationLeadId && String(project.fabricationLeadId) === memberId) roles.push('lead');
+      if (includesMember(project.fabricationAssistantIds)) roles.push('assistant');
+      if (includesMember(project.deliveryCrewIds)) roles.push('delivery_crew');
+      return roles.length
+        ? [{
+          _id: project._id.toString(),
+          projectNumber: project.projectNumber,
+          title: project.title,
+          status: project.status,
+          roles,
+        }]
+        : [];
+    });
+    // Same rule as sales staff: available by default, only an admin's On Leave / Unavailable overrides.
+    const workloadStatus: FabricationWorkloadStatus = member.availabilityStatus === StaffAvailabilityStatus.ON_LEAVE
+      ? 'on_leave'
+      : member.availabilityStatus === StaffAvailabilityStatus.UNAVAILABLE
+        ? 'unavailable'
+        : activeProjects.length > 0 ? 'busy' : 'available';
+
+    return {
+      _id: memberId,
+      firstName: member.firstName,
+      lastName: member.lastName,
+      availabilityNote: member.availabilityNote,
+      workloadStatus,
+      activeProjectCount: activeProjects.length,
+      activeProjects,
+    };
+  });
+}
+
+// ── Assign Delivery / Installation Crew ──
+
+/**
+ * The fabrication staff who go with the delivery or on-site installation. Separate from the
+ * workshop team; it never changes the project status or blocks a fabrication stage.
+ */
+export async function assignDeliveryCrew(
+  projectId: string,
+  input: AssignDeliveryCrewInput,
+  actorId: string,
+  actorRoles: Role[],
+  ip?: string,
+  ua?: string,
+) {
+  const project = await Project.findById(projectId);
+  if (!project) throw AppError.notFound('Project not found');
+
+  const isAssignedEngineer = (project.engineerIds || []).some((id) => id.toString() === actorId);
+  if (!actorRoles.includes(Role.ADMIN) && !isAssignedEngineer) {
+    throw AppError.forbidden('Only the assigned engineer can assign the delivery / installation crew');
+  }
+  if (!project.fabricationLeadId) {
+    throw AppError.badRequest('Assign the fabrication team first, then the delivery / installation crew');
+  }
+  if (!FABRICATION_WORKLOAD_STATUSES.includes(project.status)) {
+    throw AppError.badRequest('The delivery / installation crew can only be assigned before the project is completed');
+  }
+
+  const crewIds = [...new Set(input.deliveryCrewIds)];
+  const crew = await User.find({
+    _id: { $in: crewIds },
+    roles: Role.FABRICATION_STAFF,
+    isActive: true,
+  }).select('_id');
+  if (crew.length !== crewIds.length) {
+    throw AppError.badRequest('One or more crew member IDs are invalid');
+  }
+
+  const previousCrewIds = (project.deliveryCrewIds || []).map((id) => id.toString());
+  project.deliveryCrewIds = crewIds as unknown as Types.ObjectId[];
+  await project.save();
+
+  await AuditLog.create({
+    action: AuditAction.DELIVERY_CREW_ASSIGNED,
+    actorId,
+    targetType: 'project',
+    targetId: project._id,
+    details: { deliveryCrewIds: crewIds, previousCrewIds },
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
+  // Tell the people newly put on the crew and the fabrication lead; never the one who did it.
+  const link = `/projects/${project._id}`;
+  const addedCrewIds = crewIds.filter((id) => !previousCrewIds.includes(id) && id !== actorId);
+  for (const crewId of addedCrewIds) {
+    await createAndSendNotification(
+      crewId,
+      NotificationCategory.FABRICATION,
+      'Delivery / Installation Assignment',
+      `You were assigned to the delivery / installation crew for project "${project.title}".`,
+      link,
+    );
+  }
+  const leadId = project.fabricationLeadId.toString();
+  if (leadId !== actorId && !addedCrewIds.includes(leadId)) {
+    await createAndSendNotification(
+      leadId,
+      NotificationCategory.FABRICATION,
+      'Delivery / Installation Crew Assigned',
+      `The delivery / installation crew for project "${project.title}" was assigned.`,
+      link,
+    );
+  }
+
+  return project;
+}
+
 // ── Transition Project Status ──
 
 export async function transitionProject(
@@ -2423,6 +2592,7 @@ export async function getProjectById(
     .populate('initialDesignBackfill.backfilledBy', 'firstName lastName')
     .populate('fabricationLeadId', 'firstName lastName')
     .populate('fabricationAssistantIds', 'firstName lastName')
+    .populate('deliveryCrewIds', 'firstName lastName')
     .populate('visitReportId');
 
   if (!project) throw AppError.notFound('Project not found');

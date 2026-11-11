@@ -30,7 +30,7 @@ vi.mock('../maps/maps.service.js', async (importOriginal) => ({
   assertOcularLocationAccepted: vi.fn(async () => undefined),
   reverseGeocode: vi.fn(async () => ({ formattedAddress: 'Makati City, Metro Manila' })),
   computeOcularFee: vi.fn(async () => ({
-    route: { distanceKm: 5 },
+    route: { distanceKm: 5, durationMinutes: 18 },
     fee: {
       label: 'Within NCR', baseFee: 0, baseCoveredKm: 0, perKmRate: 0,
       additionalDistanceKm: 0, additionalFee: 0, total: 0, isWithinNCR: true,
@@ -217,16 +217,23 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR, date: '2026-11-16', slotCode: '10:00' })).toBe(1);
   });
 
-  /** Schedules the ocular, travels, fills and submits the ocular report. */
-  async function runOcularVisit(projectId: string, options: { qaSameDay?: boolean } = {}) {
-    await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '09:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
+  /**
+   * Schedules the ocular, travels, fills and submits the ocular report. The project's own sales
+   * staff schedules it; with ocularStaffId another sales staff member takes the visit and the report.
+   */
+  async function runOcularVisit(projectId: string, options: { qaSameDay?: boolean; ocularStaffId?: string } = {}) {
+    const visitStaffId = options.ocularStaffId || salesId;
+    await projects.scheduleProjectOcular(projectId, {
+      date: '2026-11-16', slotCode: '09:00', ...SITE,
+      ...(options.ocularStaffId ? { salesStaffId: options.ocularStaffId } : {}),
+    } as never, salesId, [Role.SALES_STAFF]);
     const ocularId = String((await Project.findById(projectId).lean())!.ocularAppointmentId);
     // What the old rules allowed in QA: the ocular on Nov 13, 9 AM, the consultation's own date and time.
     if (options.qaSameDay) await Appointment.updateOne({ _id: ocularId }, { $set: { date: '2026-11-13', slotCode: '09:00' } });
 
     // Sales staff travels to the site (day check is bypassed while APPOINTMENT_DAY_CHECK_BYPASSED is on).
     for (const status of [AppointmentStatus.ON_THE_WAY, AppointmentStatus.ARRIVED_AT_SITE] as const) {
-      await appointments.updateVisitStatus(ocularId, status, salesId);
+      await appointments.updateVisitStatus(ocularId, status, visitStaffId);
     }
 
     // Sales staff opens the ocular report(s), fills each one, and submits.
@@ -248,14 +255,63 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
         selectedDesignTemplateId: ocularReport.selectedDesignTemplateId || undefined,
         selectedDesignTemplateName: ocularReport.selectedDesignTemplateName || undefined,
         selectedDesignTemplateImageUrl: ocularReport.selectedDesignTemplateImageUrl || undefined,
-      } as never, salesId);
+      } as never, visitStaffId);
     }
     for (const ocularReport of ocularReports) {
       const current = await VisitReport.findById(ocularReport._id).lean();
-      if (current?.status === 'draft') await visitReports.submitReport(String(ocularReport._id), salesId);
+      if (current?.status === 'draft') await visitReports.submitReport(String(ocularReport._id), visitStaffId);
     }
     return ocularReports.length;
   }
+
+  it('hands only the ocular visit to another sales staff member; the project keeps its own staff', async () => {
+    const otherSalesId = String((await createUser('salesstaff02@example.test', [Role.SALES_STAFF]))._id);
+    const unrelatedSalesId = String((await createUser('salesstaff03@example.test', [Role.SALES_STAFF]))._id);
+    const { consultationId, reportId } = await completeConsultation();
+    const projectId = await createProjectWithContract(consultationId, reportId);
+
+    await runOcularVisit(projectId, { ocularStaffId: otherSalesId });
+
+    const project = await Project.findById(projectId).lean();
+    const ocularId = String(project!.ocularAppointmentId);
+    const ocular = await Appointment.findById(ocularId).lean();
+    // The visit and its report belong to the chosen staff; the project never changed hands.
+    expect(String(ocular!.salesStaffId)).toBe(otherSalesId);
+    expect(ocular!.travelDurationMinutes).toBe(18);
+    expect(String(project!.salesStaffId)).toBe(salesId);
+    expect(String((await VisitReport.findById(reportId).lean())!.salesStaffId)).toBe(otherSalesId);
+    // Submitting the ocular report still sends the project for review.
+    expect(project!.status).toBe(ProjectStatus.SUBMITTED);
+
+    // The project's own staff can open the visit; a sales staff member with no link to it cannot.
+    await expect(appointments.getAppointmentById(ocularId, salesId, [Role.SALES_STAFF]))
+      .resolves.toMatchObject({ linkedProject: { _id: projectId } });
+    await expect(appointments.getAppointmentById(ocularId, unrelatedSalesId, [Role.SALES_STAFF]))
+      .rejects.toThrow('no longer assigned');
+
+    // It is listed on the ocular staff's Appointments page and stays off the project owner's.
+    const listedIds = async (staffId: string) => (
+      await appointments.listAppointments({ excludeProjectOculars: 'true' }, staffId, [Role.SALES_STAFF])
+    ).items.map((item: { _id: unknown }) => String(item._id));
+    expect(await listedIds(otherSalesId)).toContain(ocularId);
+    expect(await listedIds(salesId)).not.toContain(ocularId);
+  });
+
+  it('refuses an ocular staff member who already has an appointment at that time', async () => {
+    const otherSalesId = String((await createUser('salesstaff02@example.test', [Role.SALES_STAFF]))._id);
+    const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
+    const { consultationId, reportId } = await completeConsultation();
+    const projectId = await createProjectWithContract(consultationId, reportId);
+    await Appointment.create({
+      customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
+      status: AppointmentStatus.CONFIRMED, salesStaffId: otherSalesId, bookedBy: otherCustomer._id,
+    });
+
+    await expect(projects.scheduleProjectOcular(projectId, {
+      date: '2026-11-16', slotCode: '09:00', ...SITE, salesStaffId: otherSalesId,
+    } as never, salesId, [Role.SALES_STAFF])).rejects.toThrow('Already has an appointment at this time');
+    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
+  });
 
   it('keeps one item when sales re-classifies the report item on Create Project (Railings → Custom name)', async () => {
     // QA data: no booked design; on Create Project the item was changed to Custom "Stainless Steel Balcony Railings".
