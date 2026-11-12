@@ -73,7 +73,8 @@ export const createProjectSchema = z.object({
   finishColor: z.string().max(500).optional(),
   quantity: z.number().int().min(1).default(1),
   notes: z.string().max(2000).trim().optional(),
-  contractFileKey: signedContractFileKeySchema.optional(),
+  // Every project is created with the contract the customer signed (also on direct API calls).
+  contractFileKey: signedContractFileKeySchema,
   contractFileName: z.string().max(255).trim().optional(),
   contractContentType: z.string().max(100).trim().optional(),
   contractFileSize: z.number().int().positive().optional(),

@@ -67,6 +67,8 @@ export interface IConsultationSnapshot {
   recommendedOcularDate?: Date;
   recommendedOcularSlot?: string;
   recommendedOcularAddress?: IOcularAddressSnapshot;
+  /** When the consultation report was submitted (the report's own submittedAt then restarts for the ocular visit). */
+  submittedAt?: Date;
   capturedAt: Date;
 }
 

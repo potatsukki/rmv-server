@@ -371,6 +371,7 @@ describe('createProject', () => {
     await createProject({
       customerId,
       quantity: 1,
+      contractFileKey: input.contractFileKey,
       ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site, formattedAddress: 'Calamba, Laguna' },
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
     expect(mocks.resolveOcularVisitData).toHaveBeenCalledWith('ocular', 'Calamba, Laguna', site);
@@ -383,16 +384,17 @@ describe('createProject', () => {
     }));
   });
 
-  it.each([undefined, appointmentId])('saves an ocular draft without a signed contract (appointment: %s)', async (sourceAppointmentId) => {
+  it.each([undefined, appointmentId])('saves an ocular draft with its signed contract (appointment: %s)', async (sourceAppointmentId) => {
     mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([{ _id: 'report-1', serviceType: 'gates', save: vi.fn() }]) });
     const project = await createProject({
       customerId,
       appointmentId: sourceAppointmentId,
       quantity: 1,
+      contractFileKey: input.contractFileKey,
       ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: site },
     }, actorId, undefined, undefined, [Role.SALES_STAFF]);
-    expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING, ocularAppointmentId: 'ocular-appointment-1' });
-    expect(verifyFileExists).not.toHaveBeenCalled();
+    expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.UPLOADED, ocularAppointmentId: 'ocular-appointment-1' });
+    expect(verifyFileExists).toHaveBeenCalledWith(input.contractFileKey);
     expect(mocks.appointmentCreate).toHaveBeenCalledOnce();
     expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ customerId, date: '2026-10-08', slotCode: '09:00' }));
     // prepareProjectOcularSchedule already validated the slot and staff, so it's created confirmed.
@@ -445,11 +447,20 @@ describe('createProject', () => {
     expect(project.status).toBe(ProjectStatus.DRAFT);
   });
 
-  it('creates a For Ocular project without a contract or ocular schedule', async () => {
+  it('rejects a project without a signed contract before creating anything', async () => {
     const { contractFileKey: _contractFileKey, ...withoutContract } = input;
-    const project = await createProject(withoutContract, actorId, undefined, undefined, [Role.SALES_STAFF]);
-    expect(project).toMatchObject({ status: ProjectStatus.DRAFT, contractStatus: ContractStatus.MISSING });
+    await expect(createProject(withoutContract as typeof input, actorId, undefined, undefined, [Role.SALES_STAFF]))
+      .rejects.toThrow('Upload the signed contract to create the project');
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.appointmentCreate).not.toHaveBeenCalled();
+    expect(mocks.prepareOcularSchedule).not.toHaveBeenCalled();
+  });
+
+  it('rejects a contract upload that cannot be verified', async () => {
+    vi.mocked(verifyFileExists).mockResolvedValue(false);
+    await expect(createProject(input, actorId, undefined, undefined, [Role.SALES_STAFF]))
+      .rejects.toThrow('could not be verified');
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
   });
 
   it('keeps one project item per selected design, even for the same service', async () => {
@@ -595,6 +606,8 @@ describe('createProject', () => {
       appointmentId,
       visitType: 'consultation',
       status: 'submitted',
+      submittedAt: new Date('2026-10-01T02:00:00Z') as Date | undefined,
+      consultationSnapshot: undefined as Record<string, unknown> | undefined,
       serviceType: 'gates',
       measurementUnit: 'cm',
       lineItems: [],
@@ -628,6 +641,9 @@ describe('createProject', () => {
       status: 'draft',
       linkedProjectId: 'project-1',
     });
+    // The ocular draft has no submission yet; the consultation's time is kept in its snapshot.
+    expect(consultationReport.submittedAt).toBeUndefined();
+    expect(consultationReport.consultationSnapshot).toMatchObject({ submittedAt: new Date('2026-10-01T02:00:00Z') });
     expect(consultationReport.save).toHaveBeenCalled();
     expect(mocks.projectItemFindOneAndUpdate).toHaveBeenLastCalledWith(
       { projectId: 'project-1', serviceType: 'gates', selectedDesignTemplateId: null },

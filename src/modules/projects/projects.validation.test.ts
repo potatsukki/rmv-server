@@ -61,19 +61,37 @@ describe('createProjectSchema', () => {
     }).success).toBe(false);
   });
 
-  it.each([undefined, appointmentId])('saves Pending Ocular without final project details or a contract (appointment: %s)', (sourceAppointmentId) => {
+  it.each([undefined, appointmentId])('saves Pending Ocular without final project details, but with its contract (appointment: %s)', (sourceAppointmentId) => {
     const parsed = createProjectSchema.parse({
       customerId,
       appointmentId: sourceAppointmentId,
+      contractFileKey: details.contractFileKey,
       ocularVisit: { date: '2026-10-08', slotCode: '09:00', customerLocation: { lat: 14.6, lng: 121 } },
     });
-    expect(parsed.contractFileKey).toBeUndefined();
+    expect(parsed.contractFileKey).toBe(details.contractFileKey);
     expect(parsed.serviceType).toBeUndefined();
   });
 
-  it.each(['title', 'serviceType', 'contractFileKey'])('allows a For Ocular project without %s (filled in later)', (field) => {
+  it.each(['title', 'serviceType'])('allows a For Ocular project without %s (filled in later)', (field) => {
     const input = { ...details, customerId, [field]: undefined };
     expect(createProjectSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('rejects a project without a signed contract, with or without an ocular visit', () => {
+    const { contractFileKey: _contractFileKey, ...withoutContract } = details;
+    const ocularVisit = { date: '2026-10-08', slotCode: '09:00', customerLocation: { lat: 14.6, lng: 121 } };
+    for (const input of [{ ...withoutContract, customerId }, { customerId, ocularVisit }, { ...details, customerId, contractFileKey: '' }]) {
+      const result = createProjectSchema.safeParse(input);
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues.some((issue) => issue.path[0] === 'contractFileKey')).toBe(true);
+    }
+  });
+
+  it('accepts only a PDF, JPG, JPEG, or PNG signed contract', () => {
+    for (const key of ['contracts/signed.pdf', 'contracts/signed.JPG', 'contracts/signed.jpeg', 'contracts/signed.png']) {
+      expect(createProjectSchema.safeParse({ ...details, customerId, contractFileKey: key }).success).toBe(true);
+    }
+    expect(createProjectSchema.safeParse({ ...details, customerId, contractFileKey: 'contracts/signed.docx' }).success).toBe(false);
   });
 
   it('preserves every moved project field through validation and model serialization', () => {
