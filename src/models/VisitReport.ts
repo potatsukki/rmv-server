@@ -139,6 +139,9 @@ export interface IVisitReport extends Document {
   // Return handling
   returnReason?: string;
 
+  /** When the report was last submitted (shown in the Visit Reports list). */
+  submittedAt?: Date;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -247,6 +250,7 @@ const visitReportSchema = new Schema<IVisitReport>(
     projectItemId: { type: Schema.Types.ObjectId, ref: 'ProjectItem' },
 
     returnReason: { type: String },
+    submittedAt: { type: Date },
   },
   { timestamps: true },
 );

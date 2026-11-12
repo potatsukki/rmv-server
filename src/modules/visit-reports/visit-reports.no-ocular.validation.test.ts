@@ -76,6 +76,8 @@ describe('appointment report submission without project creation', () => {
     const { report, appointment } = setupReport({});
     await submitReport('report-1', 'sales-1');
     expect(report.status).toBe('submitted');
+    // The Visit Reports list shows when it was submitted.
+    expect((report as { submittedAt?: unknown }).submittedAt).toEqual(expect.any(Date));
     expect(appointment.status).toBe('completed');
     // Submitting the report is what finishes the consultation attendance.
     expect(appointment).toMatchObject({ attendanceStatus: 'completed', consultationCompletedAt: expect.any(Date) });

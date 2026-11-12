@@ -1188,6 +1188,7 @@ async function submitSiblingConsultationReports(
 
     visitReportStateMachine.assertTransition(sibling.status, VisitReportStatus.SUBMITTED);
     sibling.status = VisitReportStatus.SUBMITTED;
+    sibling.submittedAt = new Date();
     await sibling.save();
 
     await AuditLog.create({
@@ -1503,7 +1504,7 @@ export async function getByAppointment(appointmentId: string) {
   const reports = await VisitReport.find({ appointmentId })
     .populate('customerId', 'firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName email')
-    .populate('appointmentId', 'date slotCode type customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
+    .populate('appointmentId', 'date slotCode type status customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
     .sort({ createdAt: 1 });
   return reports;
 }
@@ -1522,7 +1523,7 @@ export async function listForSalesStaff(salesStaffId: string, query: {
   const [reports, total] = await Promise.all([
     VisitReport.find(filter)
       .populate('customerId', 'firstName lastName email')
-      .populate('appointmentId', 'date slotCode type customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
+      .populate('appointmentId', 'date slotCode type status customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
       .sort({ updatedAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -1583,7 +1584,7 @@ export async function listSubmitted(query: {
     VisitReport.find(filter)
       .populate('customerId', 'firstName lastName email')
       .populate('salesStaffId', 'firstName lastName')
-      .populate('appointmentId', 'date slotCode type customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
+      .populate('appointmentId', 'date slotCode type status customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
       .sort({ updatedAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -1611,7 +1612,7 @@ export async function listAll(query: {
     VisitReport.find(filter)
       .populate('customerId', 'firstName lastName email')
       .populate('salesStaffId', 'firstName lastName')
-      .populate('appointmentId', 'date slotCode type customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
+      .populate('appointmentId', 'date slotCode type status customerAddress attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt')
       .sort({ updatedAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -1900,6 +1901,7 @@ async function submitReportLocked(
     visitReportStateMachine.assertTransition(report.status, VisitReportStatus.SUBMITTED);
 
     report.status = VisitReportStatus.SUBMITTED;
+    report.submittedAt = new Date();
     await report.save();
 
     await AuditLog.create({

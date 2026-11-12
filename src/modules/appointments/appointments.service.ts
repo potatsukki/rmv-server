@@ -3844,6 +3844,8 @@ export async function listAppointments(query: {
   withoutProject?: string;
   /** 'true' leaves out ocular visits a project scheduled (they are shown under Projects). */
   excludeProjectOculars?: string;
+  /** 'true' also lists unpaid ocular visits to admins and agents (the Ocular tab: they still hold a staff slot). */
+  includeFeePending?: string;
 }, actorId: string, actorRoles: Role[]) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
@@ -3864,6 +3866,7 @@ export async function listAppointments(query: {
     filter.salesStaffId = actorId;
   } else if (
     actorRoles.some(r => [Role.ADMIN, Role.APPOINTMENT_AGENT].includes(r))
+    && query.includeFeePending !== 'true'
   ) {
     // Hide ocular appointments whose fee hasn't been paid yet, but always show office appointments
     filter.$or = [
@@ -3958,7 +3961,7 @@ export async function listAppointments(query: {
     ]);
 
     return {
-      items: appointments,
+      items: query.type === AppointmentType.OCULAR ? await withOcularProjects(appointments) : appointments,
       total,
       hasMore: page * limit < total,
     };
@@ -3973,23 +3976,27 @@ export async function listAppointments(query: {
   const relatedProjects = appointmentIds.length
     ? await Project.find({
       status: { $ne: ProjectStatus.CANCELLED },
-      appointmentId: { $in: appointmentIds },
+      $or: [
+        { appointmentId: { $in: appointmentIds } },
+        { ocularAppointmentId: { $in: appointmentIds } },
+      ],
     })
-      .select('_id appointmentId customerId projectNumber title serviceType createdAt')
+      .select('_id appointmentId ocularAppointmentId customerId projectNumber title serviceType createdAt')
       .sort({ createdAt: -1 })
       .lean()
     : [];
 
   const projectsByAppointmentId = new Map<string, any[]>();
   for (const project of relatedProjects as any[]) {
-    const appointmentId = project.appointmentId ? String(project.appointmentId) : undefined;
-
-    if (appointmentId) {
+    // A project is found by its consultation and by the ocular visit it scheduled.
+    const linkedIds = new Set(
+      [project.appointmentId, project.ocularAppointmentId].filter(Boolean).map(String),
+    );
+    for (const appointmentId of linkedIds) {
       const appointmentProjects = projectsByAppointmentId.get(appointmentId) || [];
       appointmentProjects.push(project);
       projectsByAppointmentId.set(appointmentId, appointmentProjects);
     }
-
   }
 
   const filteredAppointments = appointments.filter((appointment: any) => {
@@ -4026,13 +4033,33 @@ export async function listAppointments(query: {
   });
 
   const total = filteredAppointments.length;
-  const items = filteredAppointments.slice((page - 1) * limit, page * limit);
+  const pageItems = filteredAppointments.slice((page - 1) * limit, page * limit);
 
   return {
-    items,
+    items: query.type === AppointmentType.OCULAR ? await withOcularProjects(pageItems) : pageItems,
     total,
     hasMore: page * limit < total,
   };
+}
+
+/** Adds the project that scheduled each ocular visit (Ocular tab), so the list can show its project number. */
+async function withOcularProjects<T extends { _id: Types.ObjectId; toObject?: () => object }>(appointments: T[]) {
+  if (!appointments.length) return [];
+  const projects = await Project.find({
+    status: { $ne: ProjectStatus.CANCELLED },
+    ocularAppointmentId: { $in: appointments.map((appointment) => appointment._id) },
+  })
+    .select('_id projectNumber ocularAppointmentId')
+    .lean();
+  const projectByAppointmentId = new Map(projects.map((project) => [String(project.ocularAppointmentId), project]));
+
+  return appointments.map((appointment) => {
+    const project = projectByAppointmentId.get(String(appointment._id));
+    return {
+      ...(typeof appointment.toObject === 'function' ? appointment.toObject() : appointment),
+      ocularProject: project ? { _id: String(project._id), projectNumber: project.projectNumber } : undefined,
+    };
+  });
 }
 
 

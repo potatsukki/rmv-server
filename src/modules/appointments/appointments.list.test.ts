@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   appointmentFind: vi.fn(),
   appointmentCountDocuments: vi.fn(),
   projectDistinct: vi.fn(),
+  projectFind: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -18,7 +19,7 @@ vi.mock('../../models/index.js', () => ({
   BlockedSlot: {},
   VisitReport: {},
   VisitReportStatus: {},
-  Project: { distinct: mocks.projectDistinct },
+  Project: { distinct: mocks.projectDistinct, find: mocks.projectFind },
   AppointmentQueueCounter: {},
 }));
 vi.mock('../notifications/socket.service.js', () => ({
@@ -124,5 +125,53 @@ describe('listAppointments status groups', () => {
 
     expect(mocks.projectDistinct).not.toHaveBeenCalled();
     expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({ customerId: 'customer-1', type: 'ocular' });
+  });
+});
+
+describe('listAppointments for the Ocular tab', () => {
+  function mockAppointments(items: unknown[]) {
+    const chain = { populate: vi.fn(), sort: vi.fn(), skip: vi.fn(), limit: vi.fn().mockResolvedValue(items) };
+    chain.populate.mockReturnValue(chain);
+    chain.sort.mockReturnValue(chain);
+    chain.skip.mockReturnValue(chain);
+    mocks.appointmentFind.mockReturnValue(chain);
+    mocks.appointmentCountDocuments.mockResolvedValue(items.length);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('still hides unpaid oculars from admins unless the Ocular tab asks for them', async () => {
+    mockAppointments([]);
+
+    await listAppointments({ type: 'ocular' }, 'admin-1', [Role.ADMIN]);
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toHaveProperty('$or');
+
+    await listAppointments({ type: 'ocular', includeFeePending: 'true' }, 'admin-1', [Role.ADMIN]);
+    expect(mocks.appointmentFind.mock.calls[1]![0]).toEqual({ type: 'ocular' });
+  });
+
+  it('adds the project number of each project ocular', async () => {
+    mockAppointments([
+      { _id: 'ocular-1', toObject: () => ({ _id: 'ocular-1', type: 'ocular' }) },
+      { _id: 'ocular-2', toObject: () => ({ _id: 'ocular-2', type: 'ocular' }) },
+    ]);
+    mocks.projectFind.mockReturnValue({
+      select: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue([{ _id: 'project-1', projectNumber: 'PRJ-2026-00100', ocularAppointmentId: 'ocular-1' }]),
+      }),
+    });
+
+    const result = await listAppointments({ type: 'ocular', includeFeePending: 'true' }, 'sales-1', [Role.SALES_STAFF]);
+
+    expect(mocks.projectFind).toHaveBeenCalledWith({
+      status: { $ne: 'cancelled' },
+      ocularAppointmentId: { $in: ['ocular-1', 'ocular-2'] },
+    });
+    expect(result.items).toEqual([
+      { _id: 'ocular-1', type: 'ocular', ocularProject: { _id: 'project-1', projectNumber: 'PRJ-2026-00100' } },
+      { _id: 'ocular-2', type: 'ocular', ocularProject: undefined },
+    ]);
   });
 });
