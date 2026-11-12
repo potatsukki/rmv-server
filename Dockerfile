@@ -10,6 +10,7 @@ COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
 
+ENV NODE_OPTIONS=--max-old-space-size=1024
 RUN npm run build
 
 # Production stage
