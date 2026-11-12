@@ -156,15 +156,13 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       selectedDesignTemplateImageUrl: report?.selectedDesignTemplateImageUrl || DESIGN.imageUrl,
       materialType: 'SS304',
       finishColor: 'Brushed',
-      ...overrides,
-    } as never, salesId, undefined, undefined, [Role.SALES_STAFF]);
-    const projectId = String(project._id);
-    await projects.uploadSignedContract(projectId, {
+      // The signed contract is uploaded on the Create Project form itself.
       contractFileKey: 'contracts/signed-contract.png',
       contractFileName: 'signed-contract.png',
       contractContentType: 'image/png',
-    } as never, salesId, [Role.SALES_STAFF]);
-    return projectId;
+      ...overrides,
+    } as never, salesId, undefined, undefined, [Role.SALES_STAFF]);
+    return String(project._id);
   }
 
   it('rejects an ocular on the completed consultation\'s own date, then accepts a valid one', async () => {
@@ -364,5 +362,60 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     // The engineering step can start.
     await projects.assignEngineers(projectId, { engineerIds: [engineerId] } as never, adminId);
     expect((await projects.getProjectById(projectId, engineerId, [Role.ENGINEER])).engineerIds).toHaveLength(1);
+  });
+
+  it('refuses to create a project without a signed contract', async () => {
+    const { consultationId, reportId } = await completeConsultation();
+    await expect(createProjectWithContract(consultationId, reportId, { contractFileKey: undefined }))
+      .rejects.toThrow('Upload the signed contract to create the project');
+    expect(await Project.countDocuments({})).toBe(0);
+  });
+
+  it('records when each visit report was submitted, through the ocular visit and an engineer return', async () => {
+    const consultationSubmittedAt = new Date('2026-11-10T02:00:00Z');
+    const { consultationId, reportId } = await completeConsultation();
+    expect((await VisitReport.findById(reportId).lean())?.submittedAt).toEqual(consultationSubmittedAt);
+
+    const projectId = await createProjectWithContract(consultationId, reportId);
+    // Scheduling the ocular turns the same report into a new ocular draft: no submission yet.
+    await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '09:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
+    const draft = await VisitReport.findById(reportId).lean();
+    expect(draft?.status).toBe('draft');
+    expect(draft?.submittedAt).toBeUndefined();
+    expect(draft?.consultationSnapshot?.submittedAt).toEqual(consultationSubmittedAt);
+
+    // The ocular report is submitted days later; that time is what the list shows.
+    const ocularSubmittedAt = new Date('2026-11-16T03:00:00Z');
+    vi.setSystemTime(ocularSubmittedAt);
+    const ocularId = String((await Project.findById(projectId).lean())!.ocularAppointmentId);
+    for (const status of [AppointmentStatus.ON_THE_WAY, AppointmentStatus.ARRIVED_AT_SITE] as const) {
+      await appointments.updateVisitStatus(ocularId, status, salesId);
+    }
+    await visitReports.updateReport(reportId, {
+      visitType: 'ocular',
+      measurements: { length: 430, height: 110 },
+      materials: 'SS316',
+      finishes: 'Brushed',
+      notes: 'Measured on site.',
+      actualVisitDateTime: '2026-11-16T01:30:00.000Z',
+      lineItems: [{ label: 'Balcony railing', quantity: 1, length: 430, width: 5, height: 110, thickness: 0.15, area: 4.73, notes: 'One run' }],
+      siteConditions: { environment: 'outdoor', floorType: 'Concrete', wallMaterial: 'Concrete', accessNotes: 'Stairs only', obstaclesOrConstraints: 'None' },
+      photoKeys: ['visit-reports/site-photo-1.jpg'],
+    } as never, salesId);
+    await visitReports.submitReport(reportId, salesId);
+    expect((await VisitReport.findById(reportId).lean())?.submittedAt).toEqual(ocularSubmittedAt);
+
+    // The project page receives the report's appointment status (completed visit → shows Completed).
+    const asEngineer = await projects.getProjectById(projectId, engineerId, [Role.ENGINEER]);
+    const item = asEngineer.items[0] as { ocularVisitReportId?: { appointmentId?: { status?: string } } };
+    expect(item.ocularVisitReportId?.appointmentId?.status).toBe(AppointmentStatus.COMPLETED);
+
+    // An engineer return keeps the last submission time.
+    vi.setSystemTime(new Date('2026-11-17T03:00:00Z'));
+    await visitReports.returnReport(reportId, { reason: 'Add the stair landing width.' } as never, engineerId);
+    const returned = await VisitReport.findById(reportId).lean();
+    expect(returned?.status).toBe('returned');
+    expect(returned?.submittedAt).toEqual(ocularSubmittedAt);
+    vi.setSystemTime(new Date('2026-11-10T02:00:00Z'));
   });
 });

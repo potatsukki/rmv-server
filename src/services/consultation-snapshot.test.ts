@@ -9,6 +9,7 @@ describe('snapshotConsultationReport', () => {
       visitType: 'consultation', status: 'submitted', appointmentId: 'consultation-1',
       consultationOutcome: 'no_ocular', noOcularReason: 'Decided on the project',
       actualVisitDateTime: new Date('2026-11-10T01:00:00Z'), discussionNotes: 'Balcony railing',
+      submittedAt: new Date('2026-11-10T01:30:00Z'),
     };
     snapshotConsultationReport(report, now);
     report.visitType = 'ocular';
@@ -18,7 +19,7 @@ describe('snapshotConsultationReport', () => {
     expect(report.consultationSnapshot).toEqual({
       appointmentId: 'consultation-1', status: 'submitted', consultationOutcome: 'no_ocular',
       noOcularReason: 'Decided on the project', actualVisitDateTime: new Date('2026-11-10T01:00:00Z'),
-      discussionNotes: 'Balcony railing', capturedAt: now,
+      discussionNotes: 'Balcony railing', submittedAt: new Date('2026-11-10T01:30:00Z'), capturedAt: now,
     });
   });
 

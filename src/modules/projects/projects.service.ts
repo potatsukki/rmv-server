@@ -505,11 +505,17 @@ async function ensureProjectItems(project: any) {
   }
 
   return ProjectItem.find({ projectId: project._id })
-    .populate('consultationVisitReportId')
-    .populate('ocularVisitReportId')
+    .populate({ path: 'consultationVisitReportId', populate: REPORT_APPOINTMENT_STATUS })
+    .populate({ path: 'ocularVisitReportId', populate: REPORT_APPOINTMENT_STATUS })
     .sort({ createdAt: 1 })
     .lean();
 }
+
+/**
+ * Responses carry each visit report's appointment status, so the project page shows the same
+ * report status as the Visit Reports list (a submitted report of a finished visit reads Completed).
+ */
+const REPORT_APPOINTMENT_STATUS = { path: 'appointmentId', select: 'status' } as const;
 
 async function syncProjectDesignReviewRollup(project: any) {
   const items = await ProjectItem.find({ projectId: project._id }).select('designReviewStatus initialDesignKeys initialDesignNotes').lean();
@@ -672,6 +678,8 @@ async function attachOcularAppointmentToProject({
     report.salesStaffId = salesStaffId;
     report.visitType = 'ocular';
     report.status = VisitReportStatus.DRAFT;
+    // A new draft for the ocular visit: the consultation's submission time stays in the snapshot.
+    report.submittedAt = undefined;
     report.consultationOutcome = undefined;
     report.noOcularReason = undefined;
     report.recommendedOcularDate = undefined;
@@ -738,6 +746,10 @@ async function createProjectLocked(
   ua?: string,
   actorRoles: Role[] = [],
 ) {
+  // The route validates this too; checked here so no caller can create a project without one.
+  if (!input.contractFileKey) {
+    throw AppError.badRequest('Upload the signed contract to create the project');
+  }
   const appointment = input.appointmentId ? await Appointment.findById(input.appointmentId) : null;
   let appointmentReports: any[] = [];
   if (input.appointmentId && !appointment) throw AppError.notFound('Appointment not found');
@@ -2593,7 +2605,7 @@ export async function getProjectById(
     .populate('fabricationLeadId', 'firstName lastName')
     .populate('fabricationAssistantIds', 'firstName lastName')
     .populate('deliveryCrewIds', 'firstName lastName')
-    .populate('visitReportId');
+    .populate({ path: 'visitReportId', populate: REPORT_APPOINTMENT_STATUS });
 
   if (!project) throw AppError.notFound('Project not found');
 
@@ -2615,7 +2627,7 @@ export async function getProjectById(
       project.visitReportId = fallbackReport._id;
       await project.save();
       // Re-populate since we just set it as an ObjectId
-      await project.populate('visitReportId');
+      await project.populate({ path: 'visitReportId', populate: REPORT_APPOINTMENT_STATUS });
     }
   }
 

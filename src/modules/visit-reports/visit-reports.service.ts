@@ -901,7 +901,11 @@ async function transitionConsultationReportsToOcularAppointment(
     snapshotConsultationReport(canonical);
     canonical.appointmentId = ocularAppointmentId as Types.ObjectId;
     canonical.visitType = 'ocular';
-    if (isConsultationTransition) canonical.status = VisitReportStatus.DRAFT;
+    if (isConsultationTransition) {
+      // A new draft for the ocular visit: the consultation's submission time stays in the snapshot.
+      canonical.status = VisitReportStatus.DRAFT;
+      canonical.submittedAt = undefined;
+    }
     if (linkedProjectId && !canonical.linkedProjectId) {
       canonical.linkedProjectId = linkedProjectId as Types.ObjectId;
     }

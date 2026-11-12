@@ -19,6 +19,7 @@ export function snapshotConsultationReport(report: any, now: Date = new Date()):
     recommendedOcularDate: report.recommendedOcularDate,
     recommendedOcularSlot: report.recommendedOcularSlot,
     recommendedOcularAddress: report.recommendedOcularAddress,
+    submittedAt: report.submittedAt,
     capturedAt: now,
   };
   report.consultationSnapshot = Object.fromEntries(
