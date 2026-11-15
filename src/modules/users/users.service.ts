@@ -552,7 +552,8 @@ export async function listByRole(
   const targetAppointment = assignmentContext.appointmentId
     ? await Appointment.findById(assignmentContext.appointmentId).select('type').lean()
     : null;
-  const appointmentType = targetAppointment?.type as AppointmentType | undefined;
+  // The appointment being assigned says what it is; a new ocular visit has no appointment yet.
+  const appointmentType = (targetAppointment?.type as AppointmentType | undefined) ?? assignmentContext.appointmentType;
   const salesUsers = withSummaries as Array<{
     _id: string | Types.ObjectId;
     availabilityStatus?: StaffAvailabilityStatus;

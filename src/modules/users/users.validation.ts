@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Role, SLOT_CODES, StaffAvailabilityStatus } from '../../utils/constants.js';
+import { AppointmentType, Role, SLOT_CODES, StaffAvailabilityStatus } from '../../utils/constants.js';
 
 const phoneRegex = /^\+639\d{9}$/;
 const nameRegex = /^[a-zA-Z\s'-]+$/;
@@ -124,6 +124,8 @@ export const salesStaffLookupQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   slotCode: z.enum(SLOT_CODES).optional(),
   appointmentId: z.string().min(1).optional(),
+  /** What is being scheduled when there is no appointment yet (an ocular visit takes the whole day). */
+  appointmentType: z.nativeEnum(AppointmentType).optional(),
   search: z.string().trim().optional(),
 }).superRefine((value, ctx) => {
   if ((value.date && !value.slotCode) || (!value.date && value.slotCode)) {

@@ -25,6 +25,7 @@ vi.mock('../../models/index.js', () => ({
 }));
 
 import {
+  appointmentsConflict,
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
   SALES_SLOT_FREEING_STATUSES,
@@ -261,17 +262,59 @@ describe('availability-session.service sales staff appointment conflicts per tim
   };
   const nineAm = { _id: 'appt-9am', appointmentNumber: 'APT-20261114-0001', slotCode: '09:00', status: AppointmentStatus.CONFIRMED };
 
+  it('allows two office consultations on the same date in different slots', async () => {
+    mockSameDayAppointments([{ ...nineAm, type: AppointmentType.OFFICE }]);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, session: buildSession() as never });
+
+    expect(result).toEqual({ assignmentEligible: true });
+  });
+
+  // An ocular visit takes the sales staff member's whole day (travel to the site and back).
   it.each([
-    ['an office consultation next to an office consultation', AppointmentType.OFFICE, AppointmentType.OFFICE],
-    ['an ocular visit next to an office consultation', AppointmentType.OCULAR, AppointmentType.OFFICE],
-    ['an office consultation next to an ocular visit', AppointmentType.OFFICE, AppointmentType.OCULAR],
-    ['an ocular visit next to an ocular visit', AppointmentType.OCULAR, AppointmentType.OCULAR],
-  ])('allows the same date + a different slot: %s', async (_label, appointmentType, existingType) => {
+    [
+      'a consultation on a day that already has an ocular visit',
+      AppointmentType.OFFICE, AppointmentType.OCULAR,
+      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+    ],
+    [
+      'an ocular visit on a day that already has a consultation',
+      AppointmentType.OCULAR, AppointmentType.OFFICE,
+      'Has another appointment that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+    ],
+    [
+      'a second ocular visit on the same day',
+      AppointmentType.OCULAR, AppointmentType.OCULAR,
+      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+    ],
+  ])('blocks %s, even in a different slot', async (_label, appointmentType, existingType, reason) => {
     mockSameDayAppointments([{ ...nineAm, type: existingType }]);
 
     const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, appointmentType, session: buildSession() as never });
 
-    expect(result).toEqual({ assignmentEligible: true });
+    expect(result).toEqual({ assignmentEligible: false, assignmentBlockedReason: reason });
+  });
+
+  it('names the same-time appointment first when the day also has an ocular visit', async () => {
+    mockSameDayAppointments([
+      { ...nineAm, _id: 'appt-1pm', appointmentNumber: 'APT-20261114-0002', slotCode: '13:00', type: AppointmentType.OCULAR },
+      { ...nineAm, type: AppointmentType.OFFICE },
+    ]);
+
+    const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
+
+    expect(result.assignmentBlockedReason).toBe('Already has an appointment at this time (9:00 AM, Nov 14, 2026 · APT-20261114-0001)');
+  });
+
+  it('treats any pair with an ocular visit as a clash, and consultations only when their slots overlap', () => {
+    const office = (slotCode: string) => ({ type: AppointmentType.OFFICE, slotCode });
+    const ocular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode });
+
+    expect(appointmentsConflict(office('09:00'), office('10:00'))).toBe(false);
+    expect(appointmentsConflict(office('09:00'), office('09:00'))).toBe(true);
+    expect(appointmentsConflict(office('09:00'), ocular('15:00'))).toBe(true);
+    expect(appointmentsConflict(ocular('09:00'), office('15:00'))).toBe(true);
+    expect(appointmentsConflict(ocular('09:00'), ocular('15:00'))).toBe(true);
   });
 
   it('blocks the same date + the same slot', async () => {

@@ -25,7 +25,7 @@ vi.mock('../../models/index.js', () => ({
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(), notifyRole: vi.fn(), emitRoleEvent: vi.fn(), notifyBookingAgentAppointmentSuccessful: vi.fn(),
 }));
-vi.mock('../notifications/email.service.js', () => ({ sendAppointmentConfirmedEmail: vi.fn() }));
+vi.mock('../notifications/email.service.js', () => ({ sendAppointmentConfirmedEmail: vi.fn(), sendAppointmentRequestedEmail: vi.fn() }));
 vi.mock('../visit-reports/visit-reports.service.js', () => ({ autoCreateDraft: vi.fn() }));
 vi.mock('../maps/maps.service.js', () => ({ computeOcularFee: vi.fn(), reverseGeocode: vi.fn() }));
 vi.mock('../../services/paymongo.service.js', () => ({ createCheckoutSession: vi.fn(), retrieveCheckoutSession: vi.fn() }));

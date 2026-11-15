@@ -15,7 +15,7 @@ import {
   notifyRoleExcept, notifyUsers,
 } from '../notifications/socket.service.js';
 import { describeAppointmentForNotification, formatNotificationDate } from '../../utils/notification-format.js';
-import { sendAppointmentConfirmedEmail } from '../notifications/email.service.js';
+import { sendAppointmentConfirmedEmail, sendAppointmentRequestedEmail } from '../notifications/email.service.js';
 import { autoCreateDraft as autoCreateVisitReport } from '../visit-reports/visit-reports.service.js';
 import { assertOcularLocationAccepted, computeOcularFee, reverseGeocode } from '../maps/maps.service.js';
 import { createCheckoutSession, retrieveCheckoutSession } from '../../services/paymongo.service.js';
@@ -24,13 +24,13 @@ import { formatCurrency } from '../../utils/helpers.js';
 import { matchesAppointmentSearch, normalizeAppointmentSearchTerm } from './appointments.search.js';
 import type { SortOrder } from 'mongoose';
 import {
+  appointmentsConflict,
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
   SALES_SLOT_FREEING_STATUSES,
-  slotsOverlap,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import { acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
@@ -53,7 +53,7 @@ import type {
 } from './appointments.validation.js';
 import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
 import { assertOcularAfterConsultation } from './ocular-schedule-rules.js';
-import { assertAppointmentDayReached } from './appointment-date-guards.js';
+import { assertAppointmentDayReached, assertNoShowAllowed, NO_SHOW_GRACE_MINUTES } from './appointment-date-guards.js';
 import { getActivityHistory } from '../reports/activity-history.js';
 import type { Types } from 'mongoose';
 
@@ -377,7 +377,7 @@ function getConsultationWindow(date: string, slotCode: string) {
   const start = new Date(`${date}T${slotCode}:00+08:00`);
   return {
     start,
-    graceEnd: addMinutes(start, 15),
+    graceEnd: addMinutes(start, NO_SHOW_GRACE_MINUTES),
     end: addMinutes(start, 60),
   };
 }
@@ -416,9 +416,12 @@ function assertAttendanceTransition(
       AppointmentAttendanceStatus.RESCHEDULED,
       AppointmentAttendanceStatus.CUSTOMER_DECLINED,
     ],
+    // The consultation starts automatically at its scheduled time, so a customer who never
+    // arrived is still marked a no-show from here (the caller checks there was no check-in).
     [AppointmentAttendanceStatus.IN_PROGRESS]: [
       AppointmentAttendanceStatus.COMPLETED,
       AppointmentAttendanceStatus.CUSTOMER_DECLINED,
+      AppointmentAttendanceStatus.NO_SHOW,
     ],
     [AppointmentAttendanceStatus.COMPLETED]: [],
     [AppointmentAttendanceStatus.NO_SHOW]: [
@@ -577,9 +580,25 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
   }
 }
 
+/**
+ * Staff members the unassigned requests will need. Each ocular visit needs someone for the whole
+ * day; consultations in different slots can share one person, so only the busiest slot counts.
+ */
+function staffNeededForUnassigned(unassigned: Array<{ type?: string; slotCode?: string }>): number {
+  const perSlot = new Map<string, number>();
+  let oculars = 0;
+  for (const appointment of unassigned) {
+    if (appointment.type === AppointmentType.OCULAR) oculars += 1;
+    else perSlot.set(appointment.slotCode ?? '', (perSlot.get(appointment.slotCode ?? '') ?? 0) + 1);
+  }
+  return oculars + Math.max(0, ...perSlot.values());
+}
+
 async function getSlotAvailability(
   dateStr: string,
   slotCode: string,
+  /** Office consultation or ocular visit: an ocular visit needs a staff member's whole day. */
+  type: AppointmentType | string,
   appointmentId?: string,
   /** Only count this sales staff (e.g. the project's own staff scheduling its ocular visit). */
   onlySalesStaffId?: string,
@@ -621,10 +640,12 @@ async function getSlotAvailability(
   const eligibleIds = new Set(salesStaffIds.filter((id) => !unavailableIds.has(id)));
   if (eligibleIds.size === 0) return { available: false, remaining: 0 };
 
-  // A sales staff member is taken only for slots that overlap one of their appointments on this
-  // date (office consultation or ocular visit); other slots that day stay open. Cancelled,
-  // completed and no-show appointments free their slot. Every unassigned request in an
-  // overlapping slot will need a staff member of its own, so it uses one up too.
+  // A sales staff member is taken when one of their appointments on this date clashes with the
+  // new one (appointmentsConflict): a consultation in an overlapping slot, or an ocular visit,
+  // which takes the whole day. So a consultation slot never counts someone with an ocular visit
+  // that day, and an ocular visit only counts people with nothing else that day. Cancelled,
+  // completed and no-show appointments free their time. Unassigned requests that clash will
+  // need staff of their own, so they use some up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
     status: { $nin: SALES_SLOT_FREEING_STATUSES },
@@ -632,10 +653,11 @@ async function getSlotAvailability(
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
   const sameDayAppointments = await Appointment.find(appointmentFilter)
-    .select('salesStaffId slotCode')
+    .select('salesStaffId slotCode type')
     .lean();
+  const incoming = { type, slotCode };
   const scheduledAppointments = sameDayAppointments
-    .filter((appointment) => slotsOverlap(appointment.slotCode, slotCode));
+    .filter((appointment) => appointmentsConflict(incoming, appointment));
   const assignedStaffIds = new Set(
     scheduledAppointments
       .map((appointment) => appointment.salesStaffId?.toString())
@@ -644,7 +666,7 @@ async function getSlotAvailability(
   // Unassigned requests compete for the whole pool, not for one specific staff member.
   const awaitingAssignment = onlySalesStaffId
     ? 0
-    : scheduledAppointments.filter((appointment) => !appointment.salesStaffId).length;
+    : staffNeededForUnassigned(scheduledAppointments.filter((appointment) => !appointment.salesStaffId));
   const remaining = Math.max(0, eligibleIds.size - assignedStaffIds.size - awaitingAssignment);
 
   return { available: remaining > 0, remaining, salesStaffIds: [...eligibleIds].filter((id) => !assignedStaffIds.has(id)) };
@@ -661,10 +683,12 @@ async function assertSlotAvailable(
     throw AppError.conflict('This slot has been blocked by an administrator', ErrorCode.SLOT_LOCKED);
   }
 
-  const capacity = await getSlotAvailability(dateStr, slotCode, appointmentId);
+  const capacity = await getSlotAvailability(dateStr, slotCode, type, appointmentId);
   if (!capacity.available) {
     throw AppError.conflict(
-      'No sales staff is available for this date and time. Please choose another schedule.',
+      type === AppointmentType.OCULAR
+        ? 'No sales staff is available for this date. An ocular visit takes a sales staff member\'s whole day. Please choose another date.'
+        : 'No sales staff is available for this date and time. Please choose another schedule.',
       ErrorCode.SLOT_LOCKED,
     );
   }
@@ -839,14 +863,16 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
   const { date, type, salesStaffId } = query;
   await assertDateAvailable(date);
 
-  // A sales staff member is free in every slot that doesn't overlap one of their appointments;
-  // also check admin/agent blocked slots. With salesStaffId, only that staff member counts.
+  // A sales staff member is free for a consultation in every slot that doesn't overlap one of
+  // their appointments, unless they have an ocular visit that day; an ocular visit needs their
+  // whole day free. Also check admin/agent blocked slots. With salesStaffId, only that staff
+  // member counts.
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
       const blocked = await BlockedSlot.exists({ date, slotCode, type });
       const capacity = blocked
         ? { available: false, remaining: 0 }
-        : await getSlotAvailability(date, slotCode, undefined, salesStaffId);
+        : await getSlotAvailability(date, slotCode, type, undefined, salesStaffId);
       return {
         slotCode,
         time: formatSlotTime(slotCode),
@@ -927,6 +953,16 @@ export async function requestAppointment(
     `/appointments/${appointment._id}`,
   );
 
+  // The request is forwarded to the agents; the customer is told to wait for confirmation.
+  const customer = await User.findById(customerId).select('email').lean();
+  if (customer?.email) {
+    await sendAppointmentRequestedEmail(customer.email, {
+      date: input.date,
+      time: formatSlotTime(input.slotCode),
+      type: 'Office Consultation',
+    });
+  }
+
   return appointment;
 }
 
@@ -989,10 +1025,17 @@ export async function agentCreateAppointment(
   await createAndSendNotification(
     input.customerId,
     NotificationCategory.APPOINTMENT,
-    'Appointment Created',
-    `An appointment has been booked for you on ${input.date} at ${formatSlotTime(input.slotCode)}.`,
+    'Appointment Requested',
+    `An appointment was requested for you on ${input.date} at ${formatSlotTime(input.slotCode)}. Please wait for confirmation: you will be notified once a sales staff member is assigned.`,
     `/appointments/${appointment._id}`,
   );
+  if (customer.email) {
+    await sendAppointmentRequestedEmail(customer.email, {
+      date: input.date,
+      time: formatSlotTime(input.slotCode),
+      type: 'Office Consultation',
+    });
+  }
 
   return appointment;
 }
@@ -1154,6 +1197,15 @@ async function reassignAppointmentSalesLocked(
       `Your appointment ${customerRef} has been confirmed and a sales staff member has been assigned to you.`,
       `/appointments/${appointment._id}`,
     );
+    // The confirmation the customer was told to wait for, by email too.
+    const customer = await User.findById(appointment.customerId).select('email').lean();
+    if (customer?.email) {
+      await sendAppointmentConfirmedEmail(customer.email, {
+        date: appointment.date,
+        time: formatSlotTime(appointment.slotCode),
+        type: 'Office Consultation',
+      });
+    }
   } else if (!wasRequested) {
     await createAndSendNotification(
       appointment.customerId,
@@ -2124,6 +2176,8 @@ export async function markNoShow(
   if (appointment.salesStaffId?.toString() !== actorId) {
     throw AppError.forbidden('Only the currently assigned sales staff can update this appointment');
   }
+  // Only on the appointment date, once the grace period after the scheduled time has passed.
+  assertNoShowAllowed(appointment.date, appointment.slotCode);
 
   const statusBeforeNoShow = appointment.status;
   if (appointment.type === AppointmentType.OFFICE) {
@@ -2200,6 +2254,19 @@ export async function updateConsultationAttendance(
     throw AppError.forbidden('Only the assigned sales staff or an admin can update consultation attendance');
   }
   assertAppointmentDayReached(appointment.date, 'update consultation attendance');
+  if (input.action === 'no_show') {
+    if (!input.notes?.trim()) {
+      throw AppError.badRequest('No-show attendance requires notes', ErrorCode.VALIDATION_ERROR);
+    }
+    // Only on the appointment date, once the grace period after the scheduled time has passed.
+    assertNoShowAllowed(appointment.date, appointment.slotCode);
+    if (appointment.actualArrivalAt) {
+      throw AppError.badRequest(
+        'The customer already checked in, so this is not a no-show. Use "Customer Declined" if they chose not to proceed.',
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
 
   await synchronizeConsultationAttendanceByTime(appointment);
   const currentStatus = appointment.attendanceStatus || AppointmentAttendanceStatus.SCHEDULED;
@@ -2223,14 +2290,12 @@ export async function updateConsultationAttendance(
     changes.actualArrivalAt = arrivalAt;
     changes.outsideWindow = outsideWindow;
   } else if (input.action === 'no_show') {
-    if (!input.notes?.trim()) {
-      throw AppError.badRequest('No-show attendance requires notes', ErrorCode.VALIDATION_ERROR);
-    }
+    // Notes, the date and time rule, and "no check-in" were checked above.
     nextStatus = AppointmentAttendanceStatus.NO_SHOW;
     // The appointment closes as completed; attendanceStatus keeps the no-show outcome.
     appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.COMPLETED);
     appointment.status = AppointmentStatus.COMPLETED;
-    appointment.internalNotes = input.notes.trim();
+    appointment.internalNotes = input.notes!.trim();
     appointment.consultationCompletedAt = now;
     changes.appointmentStatus = AppointmentStatus.COMPLETED;
   } else if (input.action === 'customer_declined') {

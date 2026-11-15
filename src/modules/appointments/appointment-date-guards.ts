@@ -30,3 +30,44 @@ export function assertAppointmentDayReached(
     );
   }
 }
+
+/** A customer is a no-show once this many minutes have passed since the scheduled time. */
+export const NO_SHOW_GRACE_MINUTES = 15;
+
+function formatManilaTime(date: Date): string {
+  return format(toZonedTime(date, TZ), 'h:mm a');
+}
+
+/**
+ * A no-show is recorded on the appointment date itself, once the grace period after the
+ * scheduled time has passed (Manila time): never before the customer could be late, and never
+ * on another day. Always enforced; APPOINTMENT_DAY_CHECK_BYPASSED does not apply here.
+ */
+export function assertNoShowAllowed(
+  appointmentDate: string | undefined | null,
+  slotCode: string | undefined | null,
+  now: Date = new Date(),
+): void {
+  const day = String(appointmentDate ?? '').trim().slice(0, 10);
+  const start = new Date(`${day}T${String(slotCode ?? '').trim()}:00+08:00`);
+  if (Number.isNaN(start.getTime())) {
+    throw AppError.badRequest('This appointment has no scheduled date and time.', ErrorCode.VALIDATION_ERROR);
+  }
+  const opensAt = new Date(start.getTime() + NO_SHOW_GRACE_MINUTES * 60 * 1000);
+  const todayManila = format(toZonedTime(now, TZ), 'yyyy-MM-dd');
+
+  if (todayManila !== day) {
+    throw AppError.badRequest(
+      todayManila < day
+        ? `A no-show can only be recorded on the appointment date (${day}), from ${formatManilaTime(opensAt)}.`
+        : `A no-show can only be recorded on the appointment date (${day}). That day has passed.`,
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+  if (now < opensAt) {
+    throw AppError.badRequest(
+      `A no-show can be recorded from ${formatManilaTime(opensAt)}, ${NO_SHOW_GRACE_MINUTES} minutes after the scheduled time.`,
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+}

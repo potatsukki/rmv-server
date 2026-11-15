@@ -6,6 +6,7 @@
  * Skipped unless RMV_MONGO_TEST_URI points at a local database, e.g.
  *   RMV_MONGO_TEST_URI=mongodb://127.0.0.1:27017/rmv_repro_capacity npx vitest run sales-capacity-eligibility
  * The database named in the URI is dropped before and after the run. Never point it at real data.
+ * With other real-DB test files, run them one at a time (--no-file-parallelism): they share the database.
  */
 import mongoose from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -153,6 +154,34 @@ describe.runIf(Boolean(MONGO_URI))('sales staff capacity and assignment on a rea
     await expect(appointments.reassignAppointmentSales(targetId, { salesStaffId: staff.s5 }, agentId, [Role.APPOINTMENT_AGENT]))
       .rejects.toThrow('Already has an appointment at this time');
     expect(String((await Appointment.findById(targetId).lean())!.salesStaffId)).toBe(staff.s1);
+  });
+
+  it('takes a staff member with an ocular visit out of the whole day, for customers and for the agent', async () => {
+    // S1 has an ocular visit at 3 PM the same day: it takes their whole day.
+    const ocularCustomer = await createUser('customer03@example.test', [Role.CUSTOMER]);
+    const ocular = await Appointment.create({
+      customerId: ocularCustomer, bookedBy: ocularCustomer, type: AppointmentType.OCULAR, date: DATE, slotCode: '15:00',
+      status: AppointmentStatus.CONFIRMED, salesStaffId: staff.s1,
+    });
+
+    // At 10 AM, S1 is no longer free: only S2–S4 can take the consultation.
+    expect(await customerCapacity()).toBe(3);
+    const listed = await listForTarget();
+    expect(listed.get(staff.s1)?.assignmentEligible).toBe(false);
+    expect(listed.get(staff.s1)?.assignmentBlockedReason).toContain('Has an ocular visit that day');
+    expect(listed.get(staff.s1)?.assignmentBlockedReason).toContain(ocular.appointmentNumber!);
+
+    // Scheduling a new ocular visit that day: anyone with an appointment that day is disabled with a reason.
+    const forOcular = new Map((await listByRole(Role.SALES_STAFF, undefined, {
+      date: DATE, slotCode: '13:00', appointmentType: AppointmentType.OCULAR,
+    }) as ListedStaff[]).map((member) => [String(member._id), member]));
+    expect([staff.s2, staff.s3, staff.s4].every((id) => forOcular.get(id)?.assignmentEligible)).toBe(true);
+    for (const id of [staff.s1, staff.s5, staff.s6]) {
+      expect(forOcular.get(id)?.assignmentEligible).toBe(false);
+      expect(forOcular.get(id)?.assignmentBlockedReason).toContain('whole day');
+    }
+    const { slots } = await appointments.getAvailableSlots({ date: DATE, type: AppointmentType.OCULAR });
+    expect(slots.every((slot) => slot.remaining === 3)).toBe(true);
   });
 
   it('records the assigning agent on a customer booking and keeps it through an admin transfer', async () => {
