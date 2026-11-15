@@ -29,6 +29,7 @@ const DEFAULT_SOCIAL_INSTAGRAM = 'https://instagram.com';
 const useResendApi = env.EMAIL_PROVIDER === 'resend_api';
 const useSendGridApi = env.EMAIL_PROVIDER === 'sendgrid_api';
 const notificationEmailTemplates = new Set([
+  'appointment_requested',
   'appointment_confirmed',
   'blueprint_uploaded',
   'payment_verified',
@@ -151,6 +152,16 @@ const templates: Record<string, string> = {
     ${p('We detected a login attempt on your account. Enter this code to verify your identity.')}
     ${otpBlock('{{otp}}')}
     ${p('This code expires in <strong style="color:#fff;">3 minutes</strong>. If you didn\'t attempt to log in, please change your password immediately.')}
+  `,
+  appointment_requested: `
+    ${heading('Appointment Request Received')}
+    ${p('We received your appointment request. It is not confirmed yet: our team is checking sales staff availability for your chosen schedule.')}
+    ${infoCard('#c49a62', 'rgba(196,154,98,0.06)', `
+      ${detail('Date', '{{date}}')}
+      ${detail('Time', '{{time}}')}
+      ${detail('Type', '{{type}}')}
+    `)}
+    ${p('Please wait for confirmation. We will email and notify you once a sales staff member is assigned.')}
   `,
   appointment_confirmed: `
     ${heading('Appointment Confirmed')}
@@ -550,6 +561,18 @@ export async function sendOtpEmail(to: string, otp: string): Promise<void> {
 
 export async function sendPasswordResetEmail(to: string, otp: string): Promise<void> {
   await sendEmail(to, 'Password Reset - RMV Stainless Steel', 'password_reset', { otp });
+}
+
+/** The request was received and forwarded to the team; the customer waits for confirmation. */
+export async function sendAppointmentRequestedEmail(
+  to: string,
+  data: { date: string; time: string; type: string },
+): Promise<void> {
+  await sendEmail(to, 'Appointment Request Received - RMV Stainless Steel', 'appointment_requested', {
+    ...data,
+    actionLabel: 'View Appointments',
+    actionUrl: `${APP_URL}/appointments`,
+  });
 }
 
 export async function sendAppointmentConfirmedEmail(

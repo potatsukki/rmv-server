@@ -6,6 +6,7 @@
  * Skipped unless RMV_MONGO_TEST_URI points at a local database, e.g.
  *   RMV_MONGO_TEST_URI=mongodb://127.0.0.1:27017/rmv_repro npx vitest run project-ocular-flow
  * The database named in the URI is dropped before and after the run. Never point it at real data.
+ * With other real-DB test files, run them one at a time (--no-file-parallelism): they share the database.
  * Only outside services (notifications, email, maps, file storage, payments) are stubbed.
  */
 import mongoose from 'mongoose';
@@ -178,12 +179,12 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('blocks the sales staff only in a slot that already has an active appointment that day', async () => {
+  it('blocks the ocular visit at any time on a day the sales staff has an active appointment; a completed one does not', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
     // Same sales staff on Nov 16: an active 9:00 consultation and a completed 13:00 one.
-    await Appointment.create({
+    const active = await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
@@ -192,17 +193,20 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // Same date + same slot is blocked.
-    await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '09:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
-      .rejects.toThrow(/No sales staff is available|Already has an appointment at this time/);
+    // An ocular visit takes the whole day, so the active 9:00 consultation blocks every slot.
+    for (const slotCode of ['09:00', '13:00', '16:00']) {
+      await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode, ...SITE } as never, salesId, [Role.SALES_STAFF]))
+        .rejects.toThrow(/whole day/);
+    }
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
 
-    // The completed 13:00 appointment does not block its slot.
+    // Once the 9:00 consultation is finished, only the completed appointments remain: the day is free.
+    await Appointment.updateOne({ _id: active._id }, { $set: { status: AppointmentStatus.COMPLETED } });
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('lets the sales staff take the next slot on the same date (9:00 booked → 10:00 allowed)', async () => {
+  it('refuses an ocular visit on a day the sales staff already has a consultation, and allows the next free day', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
@@ -211,8 +215,11 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
-    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR, date: '2026-11-16', slotCode: '10:00' })).toBe(1);
+    // 9:00 booked → a 10:00 ocular visit the same day is refused (travel takes the whole day).
+    await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
+      .rejects.toThrow(/whole day/);
+    await projects.scheduleProjectOcular(projectId, { date: '2026-11-17', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
+    expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR, date: '2026-11-17', slotCode: '10:00' })).toBe(1);
   });
 
   /**

@@ -73,7 +73,8 @@ async function diagnoseSalesDay(date: string): Promise<void> {
       appointment.status,
       `staff: ${appointment.salesStaffId ? (staffMember ? fullName(staffMember) : appointment.salesStaffId.toString()) : 'UNASSIGNED (uses one staff from the pool)'}`,
       `customer: ${fullName(customerById.get(appointment.customerId.toString()))}`,
-      holdsSlot ? 'HOLDS SLOT' : 'frees slot',
+      // An ocular visit takes its sales staff member's whole day; a consultation only its slot.
+      !holdsSlot ? 'frees its time' : appointment.type === AppointmentType.OCULAR ? 'HOLDS THE WHOLE DAY' : 'HOLDS ITS SLOT',
       hiddenBecause.length ? `HIDDEN on Appointments page: ${hiddenBecause.join('; ')}` : 'visible on Appointments page',
       `id: ${appointment._id}`,
     ].join(' | '));

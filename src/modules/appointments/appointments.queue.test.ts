@@ -35,7 +35,7 @@ vi.mock('../notifications/socket.service.js', () => ({
 }));
 
 vi.mock('../notifications/email.service.js', () => ({
-  sendAppointmentConfirmedEmail: vi.fn(),
+  sendAppointmentConfirmedEmail: vi.fn(), sendAppointmentRequestedEmail: vi.fn(),
 }));
 
 vi.mock('../visit-reports/visit-reports.service.js', () => ({

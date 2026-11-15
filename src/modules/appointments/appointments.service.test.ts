@@ -19,6 +19,7 @@ const {
   mockAutoCreateDraft,
   mockQueueCounterFindOneAndUpdate,
   mockProjectFindOne,
+  mockUserFindById,
 } = vi.hoisted(() => ({
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
@@ -38,6 +39,8 @@ const {
   mockAutoCreateDraft: vi.fn(),
   mockQueueCounterFindOneAndUpdate: vi.fn(),
   mockProjectFindOne: vi.fn(() => ({ select: () => ({ lean: async () => null }) })),
+  // The customer's email, for the "request received" and "confirmed" emails.
+  mockUserFindById: vi.fn(() => ({ select: () => ({ lean: async () => ({ email: 'customer@example.test' }) }) })),
 }));
 
 vi.mock('../../models/index.js', () => ({
@@ -52,6 +55,7 @@ vi.mock('../../models/index.js', () => ({
   User: {
     find: mockUserFind,
     findOne: mockUserFindOne,
+    findById: mockUserFindById,
   },
   AvailabilitySession: {
     find: mockAvailabilitySessionFind,
@@ -100,7 +104,7 @@ vi.mock('../notifications/socket.service.js', () => ({
 }));
 
 vi.mock('../notifications/email.service.js', () => ({
-  sendAppointmentConfirmedEmail: vi.fn(),
+  sendAppointmentConfirmedEmail: vi.fn(), sendAppointmentRequestedEmail: vi.fn(),
 }));
 
 vi.mock('../visit-reports/visit-reports.service.js', () => ({
@@ -149,6 +153,7 @@ import {
   StaffAvailabilityStatus,
 } from '../../utils/constants.js';
 import { evaluateSalesAssignmentEligibility } from '../users/availability-session.service.js';
+import { sendAppointmentConfirmedEmail, sendAppointmentRequestedEmail } from '../notifications/email.service.js';
 
 function createAppointment(overrides: Record<string, unknown> = {}) {
   return {
@@ -302,6 +307,10 @@ describe('reassignAppointmentSales', () => {
       salesStaffId: 'sales-1',
       appointmentId: 'appointment-1',
     }));
+    // The customer gets the confirmation they were waiting for, by email too.
+    expect(sendAppointmentConfirmedEmail).toHaveBeenCalledExactlyOnceWith('customer@example.test', {
+      date: '2026-08-15', time: '9:00 AM', type: 'Office Consultation',
+    });
   });
 
   it('confirms an older assigned appointment when it is transferred', async () => {
@@ -565,10 +574,10 @@ describe('sales staff availability per time slot', () => {
   const slotByCode = (slots: Array<{ slotCode: string; available: boolean; remaining: number }>, code: string) =>
     slots.find((slot) => slot.slotCode === code)!;
 
-  it('takes a staff member out of only the slot of their appointment, not the whole day', async () => {
+  it('takes a staff member out of only the slot of their consultation, not the whole day', async () => {
     twoAvailableStaff();
-    // sales-a has an ocular visit at 14:00 that day.
-    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '14:00' }]));
+    // sales-a has an office consultation at 14:00 that day.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '14:00', type: AppointmentType.OFFICE }]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
@@ -580,6 +589,60 @@ describe('sales staff availability per time slot', () => {
       date: '2026-09-10',
       status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW] },
     }));
+  });
+
+  it('takes a staff member with an ocular visit out of every consultation slot that day', async () => {
+    twoAvailableStaff();
+    // sales-a has an ocular visit at 14:00: travel to the site and back takes the whole day.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '14:00', type: AppointmentType.OCULAR }]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+  });
+
+  it('offers an ocular visit only with staff whose whole day is free', async () => {
+    twoAvailableStaff();
+    // sales-a has a 9:00 consultation; only sales-b is free for an ocular visit at any time.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '09:00', type: AppointmentType.OFFICE }]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR });
+
+    expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+  });
+
+  it('closes the ocular day when every staff member has something that day', async () => {
+    twoAvailableStaff();
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: 'sales-a', slotCode: '09:00', type: AppointmentType.OFFICE },
+      { salesStaffId: 'sales-b', slotCode: '16:00', type: AppointmentType.OFFICE },
+    ]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR });
+
+    expect(result.slots.every((slot) => !slot.available && slot.remaining === 0)).toBe(true);
+    // A consultation can still go into a slot neither of them holds.
+    const office = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+    expect(slotByCode(office.slots, '11:00')).toMatchObject({ available: true, remaining: 2 });
+  });
+
+  it('lets unassigned consultations in different slots share one staff member when counting an ocular day', async () => {
+    twoAvailableStaff();
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: undefined, slotCode: '09:00', type: AppointmentType.OFFICE },
+      { salesStaffId: undefined, slotCode: '10:00', type: AppointmentType.OFFICE },
+    ]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR });
+    expect(result.slots.every((slot) => slot.remaining === 1)).toBe(true);
+
+    // An unassigned ocular request needs a whole staff member of its own.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: undefined, slotCode: '09:00', type: AppointmentType.OFFICE },
+      { salesStaffId: undefined, slotCode: '13:00', type: AppointmentType.OCULAR },
+    ]));
+    const withOcularRequest = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OCULAR });
+    expect(withOcularRequest.slots.every((slot) => slot.remaining === 0)).toBe(true);
   });
 
   it('keeps the next slot open for a staff member booked 9:00–10:00 (same date, different slot)', async () => {
@@ -769,6 +832,13 @@ describe('requestAppointment', () => {
         expect.objectContaining({ id: 'gates-double-swing' }),
       ]),
     }));
+    // The request goes to the agents; the customer is told it is received and not yet confirmed.
+    expect(mockAppointmentCreate).toHaveBeenCalledWith(expect.objectContaining({ status: AppointmentStatus.REQUESTED }));
+    expect(mockNotifyRole).toHaveBeenCalledWith(Role.APPOINTMENT_AGENT, expect.anything(), 'New Appointment Request', expect.any(String), '/appointments/appointment-new');
+    expect(sendAppointmentRequestedEmail).toHaveBeenCalledExactlyOnceWith('customer@example.test', {
+      date: '2026-09-01', time: '9:00 AM', type: 'Office Consultation',
+    });
+    expect(sendAppointmentConfirmedEmail).not.toHaveBeenCalled();
   });
 });
 
@@ -997,31 +1067,61 @@ describe('updateConsultationAttendance', () => {
     vi.useRealTimers();
   });
 
-  it('records a no-show consultation as completed and keeps the no-show outcome', async () => {
+  // A 1:00 PM consultation on Sep 17, 2026 (Manila is UTC+8).
+  const noShowAppointment = (overrides: Record<string, unknown> = {}) => createAppointment({
+    type: AppointmentType.OFFICE,
+    status: AppointmentStatus.CONFIRMED,
+    date: '2026-09-17',
+    slotCode: '13:00',
+    attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
+    salesStaffId: { toString: () => 'sales-1' },
+    ...overrides,
+  });
+  const markNoShowAt = (isoTime: string, appointment: ReturnType<typeof createAppointment>) => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-17T03:30:00.000Z'));
-    const appointment = createAppointment({
-      type: AppointmentType.OFFICE,
-      status: AppointmentStatus.CONFIRMED,
-      date: '2026-09-17',
-      slotCode: '13:00',
-      attendanceStatus: AppointmentAttendanceStatus.SCHEDULED,
-      salesStaffId: { toString: () => 'sales-1' },
-    });
+    vi.setSystemTime(new Date(isoTime));
     mockAppointmentFindById.mockResolvedValueOnce(appointment);
-
-    await updateConsultationAttendance(
+    return updateConsultationAttendance(
       'appointment-1',
       { action: 'no_show', notes: 'Customer did not arrive' },
       'sales-1',
       [Role.SALES_STAFF],
-    );
+    ).finally(() => vi.useRealTimers());
+  };
+
+  it('records a no-show on the appointment date, 15 minutes after the scheduled time', async () => {
+    // 1:20 PM Manila: the consultation has already started automatically (In Progress).
+    const appointment = noShowAppointment();
+    await markNoShowAt('2026-09-17T05:20:00.000Z', appointment);
 
     expect(appointment.status).toBe(AppointmentStatus.COMPLETED);
     expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.NO_SHOW);
     expect(mockAssertTransition).toHaveBeenCalledWith(AppointmentStatus.CONFIRMED, AppointmentStatus.COMPLETED);
+  });
 
-    vi.useRealTimers();
+  it.each([
+    ['before the scheduled time', '2026-09-17T03:30:00.000Z', 'from 1:15 PM'],
+    ['inside the 15-minute grace period', '2026-09-17T05:10:00.000Z', 'from 1:15 PM'],
+    ['the day before', '2026-09-16T05:20:00.000Z', 'only be recorded on the appointment date (2026-09-17)'],
+    ['the day after', '2026-09-18T05:20:00.000Z', 'That day has passed'],
+  ])('refuses a no-show %s', async (_when, isoTime, message) => {
+    const appointment = noShowAppointment();
+    await expect(markNoShowAt(isoTime, appointment)).rejects.toThrow(message);
+
+    expect(appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.SCHEDULED);
+    expect(appointment.save).not.toHaveBeenCalled();
+  });
+
+  it('refuses a no-show for a customer who already checked in', async () => {
+    const appointment = noShowAppointment({
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      actualArrivalAt: new Date('2026-09-17T04:55:00.000Z'),
+    });
+    await expect(markNoShowAt('2026-09-17T05:20:00.000Z', appointment)).rejects.toThrow('already checked in');
+
+    expect(appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(appointment.save).not.toHaveBeenCalled();
   });
 
   it('issues a daily queue number when an office customer checks in', async () => {
