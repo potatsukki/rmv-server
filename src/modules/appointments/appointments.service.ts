@@ -33,7 +33,8 @@ import {
   SALES_SLOT_FREEING_STATUSES,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
-import { acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
+import { acquireCustomerScheduleLock, acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
+import { assertCustomerScheduleFree } from './customer-schedule-conflict.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -519,7 +520,16 @@ export async function prepareProjectOcularSchedule(input: {
   lockedBy?: string;
 }): Promise<string> {
   assertOcularAfterConsultation(input.date, input.consultationDate);
+  // The customer's schedule stays locked until the caller has saved the ocular appointment.
+  await acquireCustomerScheduleLock(input.locks, input.customerId, input.lockedBy || input.customerId);
   await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
+  await assertCustomerScheduleFree({
+    customerId: input.customerId,
+    date: input.date,
+    slotCode: input.slotCode,
+    incomingType: AppointmentType.OCULAR,
+    audience: 'staff',
+  });
   await assertDateAvailable(input.date);
   const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
   const salesStaffId = input.salesStaffId || freeSalesStaffIds[0];
@@ -547,11 +557,17 @@ export async function assertConsultationOcularSchedule(input: {
   if (!(SLOT_CODES as readonly string[]).includes(input.slotCode)) {
     throw AppError.badRequest('Choose a valid ocular visit time.', ErrorCode.VALIDATION_ERROR);
   }
-  await assertNoActiveAppointment(
-    input.customerId,
-    [input.consultationAppointmentId, input.existingOcularId].filter((id): id is string => Boolean(id)),
-    { audience: 'staff' },
-  );
+  const ownAppointmentIds = [input.consultationAppointmentId, input.existingOcularId].filter((id): id is string => Boolean(id));
+  await acquireCustomerScheduleLock(input.locks, input.customerId, input.salesStaffId);
+  await assertNoActiveAppointment(input.customerId, ownAppointmentIds, { audience: 'staff' });
+  await assertCustomerScheduleFree({
+    customerId: input.customerId,
+    date: input.date,
+    slotCode: input.slotCode,
+    incomingType: AppointmentType.OCULAR,
+    excludeAppointmentIds: ownAppointmentIds,
+    audience: 'staff',
+  });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
   await acquireSalesDayLock(input.locks, input.salesStaffId, input.date, input.salesStaffId);
@@ -895,6 +911,18 @@ export async function requestAppointment(
   ip?: string,
   ua?: string,
 ) {
+  // One booking at a time per customer: two requests sent together can't both pass the checks.
+  return withSalesDayLocks((locks) => requestAppointmentLocked(input, customerId, userRoles, locks, ip, ua));
+}
+
+async function requestAppointmentLocked(
+  input: RequestAppointmentInput,
+  customerId: string,
+  userRoles: Role[],
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   if (!userRoles.includes(Role.CUSTOMER)) {
     throw AppError.forbidden('Only customers can request appointments from this endpoint');
   }
@@ -912,7 +940,9 @@ export async function requestAppointment(
     );
   }
 
+  await acquireCustomerScheduleLock(locks, customerId, customerId);
   await assertNoActiveAppointment(customerId);
+  await assertCustomerScheduleFree({ customerId, date: input.date, slotCode: input.slotCode, incomingType: input.type });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
 
@@ -974,6 +1004,16 @@ export async function agentCreateAppointment(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => agentCreateAppointmentLocked(input, agentId, locks, ip, ua));
+}
+
+async function agentCreateAppointmentLocked(
+  input: AgentCreateAppointmentInput,
+  agentId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   if (input.type !== AppointmentType.OFFICE) {
     throw AppError.badRequest(
       'Appointment agents can only create the first office consultation for a customer. Ocular scheduling is handled by sales staff after consultation.',
@@ -991,7 +1031,15 @@ export async function agentCreateAppointment(
     throw AppError.notFound('Customer not found');
   }
 
+  await acquireCustomerScheduleLock(locks, input.customerId, agentId);
   await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
+  await assertCustomerScheduleFree({
+    customerId: input.customerId,
+    date: input.date,
+    slotCode: input.slotCode,
+    incomingType: input.type,
+    audience: 'staff',
+  });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
 
@@ -1426,6 +1474,17 @@ export async function agentCreateOcular(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => agentCreateOcularLocked(input, actorId, actorRoles, locks, ip, ua));
+}
+
+async function agentCreateOcularLocked(
+  input: AgentCreateOcularInput,
+  actorId: string,
+  actorRoles: Role[],
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   if (!actorRoles.includes(Role.SALES_STAFF)) {
     throw AppError.forbidden(
       'Only sales staff can schedule ocular visits after consultation. Appointment agents should assign consultation first.',
@@ -1443,7 +1502,15 @@ export async function agentCreateOcular(
     throw AppError.notFound('Customer not found');
   }
 
+  await acquireCustomerScheduleLock(locks, input.customerId, actorId);
   await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
+  await assertCustomerScheduleFree({
+    customerId: input.customerId,
+    date: input.date,
+    slotCode: input.slotCode,
+    incomingType: AppointmentType.OCULAR,
+    audience: 'staff',
+  });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
 
@@ -1556,12 +1623,25 @@ export async function customerSubmitOcularLocation(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => customerSubmitOcularLocationLocked(appointmentId, input, customerId, locks, ip, ua));
+}
+
+async function customerSubmitOcularLocationLocked(
+  appointmentId: string,
+  input: SubmitOcularLocationInput,
+  customerId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   let appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
   if (appointment.customerId.toString() !== customerId) {
     throw AppError.forbidden('You do not own this appointment');
   }
+  // Location submission can repair a missing ocular appointment; serialize it with bookings too.
+  await acquireCustomerScheduleLock(locks, customerId, customerId);
   // Reject sites outside mainland Luzon before any ocular appointment is created or changed.
   await assertOcularLocationAccepted(input.customerLocation);
 
@@ -1631,7 +1711,24 @@ export async function customerSubmitOcularLocation(
         ]),
       ].filter(Boolean);
       const salesStaffId = consultationReport.salesStaffId || appointment.salesStaffId;
+      // The customer must not have another appointment at the recommended time by now. Only the
+      // sales staff can change that schedule, so the customer is told to wait for a new one.
+      await assertCustomerScheduleFree({
+        customerId: appointment.customerId.toString(),
+        date: recommendedOcularDate,
+        slotCode: consultationReport.recommendedOcularSlot,
+        incomingType: AppointmentType.OCULAR,
+        excludeAppointmentIds: [appointment._id.toString()],
+      }).catch((error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== ErrorCode.CUSTOMER_SCHEDULE_CONFLICT) throw error;
+        throw AppError.conflict(
+          'You already have another appointment at the recommended ocular visit time. Please wait for your sales staff to set a new schedule.',
+          ErrorCode.CUSTOMER_SCHEDULE_CONFLICT,
+          error.details,
+        );
+      });
       if (salesStaffId) {
+        await acquireSalesDayLock(locks, salesStaffId.toString(), recommendedOcularDate, customerId);
         // One appointment per sales staff per day: the recommended day must still be free.
         try {
           await assertSalesAvailable(
@@ -1696,11 +1793,9 @@ export async function customerSubmitOcularLocation(
       syncSelectedDesign(ocularAppointment, selectedDesign);
       if (serviceTypes.length > 0) {
         ocularAppointment.serviceTypes = serviceTypes;
-        ocularAppointment.customerSiteDetails = {
-          ...(ocularAppointment.customerSiteDetails || {}),
-          serviceTypes,
-          serviceTypeCustom: consultationReport.serviceTypeCustom || appointment.serviceTypeCustom,
-        };
+        // Update only these fields; spreading a Mongoose nested document can copy invalid values.
+        ocularAppointment.set('customerSiteDetails.serviceTypes', serviceTypes);
+        ocularAppointment.set('customerSiteDetails.serviceTypeCustom', consultationReport.serviceTypeCustom || appointment.serviceTypeCustom);
       }
       await ocularAppointment.save();
     }
@@ -2467,6 +2562,18 @@ export async function requestReschedule(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => requestRescheduleLocked(appointmentId, input, actorId, actorRoles, locks, ip, ua));
+}
+
+async function requestRescheduleLocked(
+  appointmentId: string,
+  input: RescheduleRequestInput,
+  actorId: string,
+  actorRoles: Role[],
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
@@ -2492,6 +2599,16 @@ export async function requestReschedule(
   const oldSlot = appointment.slotCode;
 
   assertOcularAfterConsultation(input.newDate, await getSourceConsultationDate(appointment));
+  // The new time must not overlap the customer's other appointments; this one never blocks itself.
+  await acquireCustomerScheduleLock(locks, appointment.customerId.toString(), actorId);
+  await assertCustomerScheduleFree({
+    customerId: appointment.customerId.toString(),
+    date: input.newDate,
+    slotCode: input.newSlotCode,
+    incomingType: appointment.type,
+    excludeAppointmentIds: [appointment._id.toString()],
+    audience: 'staff',
+  });
   await assertDateAvailable(input.newDate);
   await assertSlotAvailable(input.newDate, input.newSlotCode, appointment.type, appointment._id.toString());
 
@@ -2629,6 +2746,17 @@ export async function completeReschedule(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => completeRescheduleLocked(appointmentId, input, agentId, locks, ip, ua));
+}
+
+async function completeRescheduleLocked(
+  appointmentId: string,
+  input: RescheduleCompleteInput,
+  agentId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const appointment = await Appointment.findById(appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
 
@@ -2637,6 +2765,16 @@ export async function completeReschedule(
   }
 
   assertOcularAfterConsultation(input.date, await getSourceConsultationDate(appointment));
+  // The new time must not overlap the customer's other appointments; this one never blocks itself.
+  await acquireCustomerScheduleLock(locks, appointment.customerId.toString(), agentId);
+  await assertCustomerScheduleFree({
+    customerId: appointment.customerId.toString(),
+    date: input.date,
+    slotCode: input.slotCode,
+    incomingType: appointment.type,
+    excludeAppointmentIds: [appointment._id.toString()],
+    audience: 'staff',
+  });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, appointment.type, appointment._id.toString());
 

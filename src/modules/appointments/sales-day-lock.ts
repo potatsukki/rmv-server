@@ -9,21 +9,24 @@ import { AppError, ErrorCode } from '../../utils/appError.js';
  */
 const SALES_DAY_LOCK_SLOT = 'sales-day';
 const SALES_DAY_LOCK_TTL_MS = 60_000;
+/**
+ * The same kind of lock on one customer's schedule (every date), so a consultation booking and an
+ * ocular visit for the same customer can't both pass the customer checks when they arrive together.
+ */
+const CUSTOMER_SCHEDULE_LOCK_SLOT = 'customer-schedule';
+const CUSTOMER_SCHEDULE_LOCK_DATE = 'all-dates';
 
 export interface SalesDayLocks {
-  held: Array<{ salesId: string; date: string }>;
+  /** `slotCode` is only set for locks other than a sales staff member's day. */
+  held: Array<{ salesId: string; date: string; slotCode?: string }>;
 }
 
-export async function acquireSalesDayLock(
-  locks: SalesDayLocks | undefined,
-  salesStaffId: string,
-  dateStr: string,
+async function acquireLock(
+  locks: SalesDayLocks,
+  key: { date: string; slotCode: string; salesId: string },
   lockedBy: string,
+  busyMessage: string,
 ): Promise<void> {
-  if (!locks) return;
-  if (locks.held.some((lock) => lock.salesId === salesStaffId && lock.date === dateStr)) return;
-
-  const key = { date: dateStr, slotCode: SALES_DAY_LOCK_SLOT, salesId: salesStaffId };
   // A lock left behind by a crashed request no longer counts once it has expired.
   await SlotLock.deleteOne({ ...key, expiresAt: { $lte: new Date() } });
   try {
@@ -35,24 +38,55 @@ export async function acquireSalesDayLock(
     });
   } catch (error: unknown) {
     if ((error as { code?: number }).code === 11000) {
-      throw AppError.conflict(
-        'Another booking for this sales staff on this date is being saved right now. Please try again in a moment.',
-        ErrorCode.SLOT_LOCKED,
-      );
+      throw AppError.conflict(busyMessage, ErrorCode.SLOT_LOCKED);
     }
     throw error;
   }
-  locks.held.push({ salesId: salesStaffId, date: dateStr });
+  locks.held.push(key.slotCode === SALES_DAY_LOCK_SLOT ? { salesId: key.salesId, date: key.date } : key);
 }
 
-/** Runs `fn` and always releases the day locks it took. */
+export async function acquireSalesDayLock(
+  locks: SalesDayLocks | undefined,
+  salesStaffId: string,
+  dateStr: string,
+  lockedBy: string,
+): Promise<void> {
+  if (!locks) return;
+  if (locks.held.some((lock) => !lock.slotCode && lock.salesId === salesStaffId && lock.date === dateStr)) return;
+
+  await acquireLock(
+    locks,
+    { date: dateStr, slotCode: SALES_DAY_LOCK_SLOT, salesId: salesStaffId },
+    lockedBy,
+    'Another booking for this sales staff on this date is being saved right now. Please try again in a moment.',
+  );
+}
+
+/** Holds the customer's schedule until the request ends: one booking or reschedule at a time. */
+export async function acquireCustomerScheduleLock(
+  locks: SalesDayLocks | undefined,
+  customerId: string,
+  lockedBy: string,
+): Promise<void> {
+  if (!locks) return;
+  if (locks.held.some((lock) => lock.slotCode === CUSTOMER_SCHEDULE_LOCK_SLOT && lock.salesId === customerId)) return;
+
+  await acquireLock(
+    locks,
+    { date: CUSTOMER_SCHEDULE_LOCK_DATE, slotCode: CUSTOMER_SCHEDULE_LOCK_SLOT, salesId: customerId },
+    lockedBy,
+    'Another booking for this customer is being saved right now. Please try again in a moment.',
+  );
+}
+
+/** Runs `fn` and always releases the sales-day and customer locks it took. */
 export async function withSalesDayLocks<T>(fn: (locks: SalesDayLocks) => Promise<T>): Promise<T> {
   const locks: SalesDayLocks = { held: [] };
   try {
     return await fn(locks);
   } finally {
     for (const lock of locks.held) {
-      await SlotLock.deleteOne({ date: lock.date, slotCode: SALES_DAY_LOCK_SLOT, salesId: lock.salesId })
+      await SlotLock.deleteOne({ date: lock.date, slotCode: lock.slotCode ?? SALES_DAY_LOCK_SLOT, salesId: lock.salesId })
         .catch(() => undefined);
     }
   }
