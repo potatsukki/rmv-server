@@ -20,7 +20,11 @@ const {
   mockQueueCounterFindOneAndUpdate,
   mockProjectFindOne,
   mockUserFindById,
+  mockAssertCustomerScheduleFree,
 } = vi.hoisted(() => ({
+  // The customer overlap rule has its own tests (customer-schedule-conflict*.test.ts); here it
+  // passes unless a test makes it reject.
+  mockAssertCustomerScheduleFree: vi.fn(),
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
   mockAppointmentFind: vi.fn(),
@@ -85,6 +89,10 @@ vi.mock('../../utils/stateMachine.js', () => ({
   appointmentStateMachine: {
     assertTransition: mockAssertTransition,
   },
+}));
+
+vi.mock('./customer-schedule-conflict.js', () => ({
+  assertCustomerScheduleFree: mockAssertCustomerScheduleFree,
 }));
 
 vi.mock('../users/availability-session.service.js', async (importOriginal) => ({
@@ -934,6 +942,48 @@ describe('requestReschedule', () => {
     expect(mockAuditCreate).toHaveBeenCalledWith(
       expect.objectContaining({ action: AuditAction.APPOINTMENT_RESCHEDULED, actorId: 'admin-1' }),
     );
+  });
+
+  it("checks the customer's other appointments at the new time, never the appointment being moved", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const appointment = createAppointment({ status: AppointmentStatus.REQUESTED, type: AppointmentType.OCULAR, salesStaffId: undefined });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockAvailableSlot();
+    mockAuditCreate.mockResolvedValueOnce({});
+
+    await requestReschedule(
+      'appointment-1',
+      { reason: 'Customer asked', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
+    );
+
+    expect(mockAssertCustomerScheduleFree).toHaveBeenCalledExactlyOnceWith({
+      customerId: 'customer-1',
+      date: '2026-09-01',
+      slotCode: '09:00',
+      incomingType: AppointmentType.OCULAR,
+      excludeAppointmentIds: ['appointment-1'],
+      audience: 'staff',
+    });
+  });
+
+  it('keeps the appointment where it is when the new time overlaps another appointment of the customer', async () => {
+    const appointment = createAppointment({ status: AppointmentStatus.CONFIRMED, type: AppointmentType.OFFICE, slotCode: '10:00' });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockAssertCustomerScheduleFree.mockRejectedValueOnce(new Error('This customer already has an ocular visit on Sep 1, 2026'));
+
+    await expect(requestReschedule(
+      'appointment-1',
+      { reason: 'Customer asked', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'agent-1',
+      [Role.APPOINTMENT_AGENT],
+    )).rejects.toThrow('This customer already has an ocular visit on Sep 1, 2026');
+
+    expect(appointment.date).toBe('2026-08-15');
+    expect(appointment.slotCode).toBe('10:00');
+    expect(appointment.save).not.toHaveBeenCalled();
   });
 
   it('rejects reschedule attempts from the customer or the assigned sales staff', async () => {
