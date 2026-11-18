@@ -12,6 +12,7 @@ import { sendPaymentVerifiedEmail } from '../notifications/email.service.js';
 import { getFeePolicyConfig, type OcularFeeOnProceed } from '../config/config.service.js';
 import { generateAndUploadReceipt, generateNextReceiptNumber } from '../payments/payments.service.js';
 import { OCULAR_TOLL_NOTE } from '../maps/maps.service.js';
+import { describeDeliveryFee } from '../delivery/delivery-rates.js';
 
 export const DESIGN_FEE_STAGE_PREFIX = 'design-fee-';
 export const REVISION_FEE_STAGE_PREFIX = 'revision-fee-';
@@ -602,14 +603,35 @@ export async function getProjectFeeSummary(projectId: string) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
 
-  const [{ ocularFeeOnProceed, designFeeAmount, revisionFeeAmount, freeRevisionLimit }, plans, ocular, revisedBlueprints] = await Promise.all([
+  const [{ ocularFeeOnProceed, designFeeAmount, revisionFeeAmount, freeRevisionLimit }, plans, ocular, revisedBlueprints, approvedBlueprints] = await Promise.all([
     getFeePolicyConfig(),
     PaymentPlan.find({ projectId: project._id }).lean(),
     getProjectOcularAppointment(project),
     Blueprint.find({ projectId: project._id, 'revisionFee.status': { $in: ['pending', 'verified'] } })
       .select('version revisionFee')
       .lean(),
+    Blueprint.find({ projectId: project._id, status: 'approved' })
+      .select('projectItemId version quotation.deliveryFee')
+      .lean(),
   ]);
+
+  // Delivery / mobilization from the latest approved quotation of each item. It is already part of
+  // the quotation total (project cost), so it is shown for information and never added again.
+  const latestApprovedByItem = new Map<string, any>();
+  for (const bp of (approvedBlueprints ?? []) as any[]) {
+    const key = String(bp.projectItemId ?? 'legacy');
+    const current = latestApprovedByItem.get(key);
+    if (!current || (bp.version ?? 0) > (current.version ?? 0)) latestApprovedByItem.set(key, bp);
+  }
+  const deliveryFees = [...latestApprovedByItem.values()]
+    .map((bp) => bp.quotation?.deliveryFee)
+    .filter((fee) => fee && Number(fee.amount) > 0);
+  const deliveryFee = deliveryFees.length
+    ? {
+      amount: roundMoney(deliveryFees.reduce((sum, fee) => sum + Number(fee.amount), 0)),
+      label: deliveryFees.length === 1 ? describeDeliveryFee(deliveryFees[0]) : 'Delivery / Mobilization',
+    }
+    : null;
 
   // Project cost = quotation total before credits and before the installment surcharge.
   let projectCost: number | null = null;
@@ -667,6 +689,7 @@ export async function getProjectFeeSummary(projectId: string) {
   return {
     projectId: project._id.toString(),
     projectCost,
+    deliveryFee,
     installmentSurcharge,
     designFee: {
       amount: designStatus === 'not_required' ? 0 : roundMoney(project.designFee?.amount || designFeeAmount),

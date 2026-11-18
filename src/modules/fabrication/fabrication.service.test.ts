@@ -229,7 +229,7 @@ describe('createFabricationUpdate', () => {
     expect(mockFabricationUpdateCreate).toHaveBeenCalled();
   });
 
-  function setUpOnSiteProject(currentStatus: FabricationStatus | null = null, confirmed = false) {
+  function setUpOnSiteProject(currentStatus: FabricationStatus | null = null, confirmed = false, hasCrew = true) {
     mockProjectFindById.mockResolvedValue({
       _id: 'project-1',
       customerId: 'customer-1',
@@ -238,6 +238,7 @@ describe('createFabricationUpdate', () => {
       deliveryType: DeliveryType.ON_SITE_INSTALLATION,
       fabricationLeadId: { toString: () => 'lead-1' },
       fabricationAssistantIds: [],
+      deliveryCrewIds: hasCrew ? [{ toString: () => 'crew-1' }] : [],
       engineerIds: [],
       installationConfirmedAt: confirmed ? new Date() : null,
       save: vi.fn(),
@@ -277,6 +278,39 @@ describe('createFabricationUpdate', () => {
     const notification = vi.mocked(createAndSendNotification).mock.calls[0];
     expect(notification[2]).toBe('Fabrication Update');
     expect(notification[3]).not.toMatch(/deliver/i);
+  });
+
+  it('requires a delivery / installation crew before Installation, but not for workshop stages', async () => {
+    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, false, false);
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_CREW_REQUIRED });
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+
+    setUpOnSiteProject(FabricationStatus.FABRICATION, false, false);
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.WELDING_ASSEMBLY, notes: 'Welding.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+    expect(mockFabricationUpdateCreate).toHaveBeenCalled();
+  });
+
+  it('requires a crew before Ready for Delivery on shop work', async () => {
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1', customerId: 'customer-1', title: 'Deliverable Project', status: ProjectStatus.FABRICATION,
+      deliveryType: DeliveryType.SHOP_FABRICATED, fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [], deliveryCrewIds: [], engineerIds: [], save: vi.fn(),
+    });
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.QUALITY_CHECK }) });
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.READY_FOR_DELIVERY, notes: 'Ready.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_CREW_REQUIRED });
   });
 
   it('lets the fabricator start a fully paid item without schedule confirmation', async () => {
@@ -407,6 +441,7 @@ describe('createFabricationUpdate', () => {
     expect(result.allowedTransitions).toEqual([FabricationStatus.FABRICATION]);
     expect(result.paymentGate.allPaid).toBe(true);
     expect(result.paymentGate.stageGates[FabricationStatus.FABRICATION].blocked).toBe(false);
+    expect(result.crewGate).toEqual({ hasCrew: false, gatedStatuses: ['installation', 'fabrication_installation', 'ready_for_delivery'] });
   });
 
   it.each([
