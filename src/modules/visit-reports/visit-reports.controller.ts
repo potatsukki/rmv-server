@@ -12,6 +12,8 @@ export const listVisitReports = asyncHandler(async (req: Request, res: Response)
     result = await visitReportsService.listAll(req.query as any);
   } else if (roles.includes(Role.ENGINEER)) {
     result = await visitReportsService.listSubmitted(req.query as any);
+  } else if (!roles.includes(Role.SALES_STAFF) && roles.includes(Role.FABRICATION_STAFF)) {
+    result = await visitReportsService.listForFabricationStaff(req.userId!, req.query as any);
   } else {
     // Sales staff — their own reports
     result = await visitReportsService.listForSalesStaff(req.userId!, req.query as any);
@@ -33,7 +35,10 @@ export const createVisitReport = asyncHandler(async (req: Request, res: Response
 
 // ── Get Visit Report ──
 export const getVisitReport = asyncHandler(async (req: Request, res: Response) => {
-  const report = await visitReportsService.getVisitReport(req.params.id as string);
+  const roles = req.userRoles!;
+  const fabricationOnly = roles.includes(Role.FABRICATION_STAFF)
+    && ![Role.ADMIN, Role.ENGINEER, Role.SALES_STAFF].some((role) => roles.includes(role));
+  const report = await visitReportsService.getVisitReport(req.params.id as string, fabricationOnly ? req.userId! : undefined);
   res.json({ success: true, data: report });
 });
 

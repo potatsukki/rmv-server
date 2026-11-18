@@ -22,6 +22,38 @@ const LEGACY_ON_SITE_STATUSES: Partial<Record<FabricationStatus, FabricationStat
   [FabricationStatus.TURNOVER]: FabricationStatus.DONE,
 };
 
+export const SHOP_FABRICATION_STAGES = [
+  FabricationStatus.MATERIAL_PREP,
+  FabricationStatus.CUTTING,
+  FabricationStatus.WELDING,
+  FabricationStatus.ASSEMBLY,
+  FabricationStatus.FINISHING,
+  FabricationStatus.QUALITY_CHECK,
+  FabricationStatus.READY_FOR_DELIVERY,
+  FabricationStatus.DONE,
+];
+
+export function fabricationStageOrder(deliveryType?: string) {
+  return deliveryType === DeliveryType.ON_SITE_INSTALLATION ? ON_SITE_FABRICATION_STAGES : SHOP_FABRICATION_STAGES;
+}
+
+/**
+ * How far a project's fabrication is: the number of stages reached (0 before the first update)
+ * out of the stage count, with the latest stored status normalized for legacy on-site history.
+ */
+export function fabricationProgress(latestStatus: string | undefined, deliveryType?: string) {
+  const order = fabricationStageOrder(deliveryType);
+  const stage = latestStatus ? normalizeFabricationStatus(latestStatus as FabricationStatus, deliveryType) : null;
+  const index = stage ? order.indexOf(stage) : -1;
+  const reached = index + 1;
+  return {
+    currentStage: stage && index >= 0 ? stage : null,
+    stageIndex: reached,
+    stageCount: order.length,
+    progressPercent: Math.round((reached / order.length) * 100),
+  };
+}
+
 export function normalizeFabricationStatus(status: FabricationStatus, deliveryType?: string): FabricationStatus {
   return deliveryType === DeliveryType.ON_SITE_INSTALLATION
     ? LEGACY_ON_SITE_STATUSES[status] ?? status

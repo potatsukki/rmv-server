@@ -110,6 +110,32 @@ describe('dashboard pending payment projects', () => {
     expect(summary).toMatchObject({ unpaidProjects: 1, pendingPayments: 0 });
   });
 
+  it('counts only assigned projects and their updates on the fabricator dashboard', async () => {
+    dashboardMocks.projectFind.mockReturnValue({ select: () => mockLeanExecValue([
+      { _id: 'queued', status: 'payment_pending' },
+      { _id: 'working', status: 'fabrication' },
+      { _id: 'done', status: 'completed' },
+    ]) });
+    dashboardMocks.projectItemFind.mockReturnValue({ select: () => mockLeanExecValue([]) });
+    dashboardMocks.fabricationCount.mockReturnValue(mockExecValue(1));
+
+    const summary = await getDashboardSummary('fabricator-1', ['fabrication_staff']);
+
+    expect(summary).toMatchObject({ totalProjects: 3, activeProjects: 2, fabricationInProgress: 1, completedProjects: 1, completedToday: 1 });
+    expect(dashboardMocks.projectFind).toHaveBeenCalledExactlyOnceWith({
+      deletedAt: null,
+      $or: [
+        { fabricationLeadId: 'fabricator-1' },
+        { fabricationAssistantIds: 'fabricator-1' },
+        { deliveryCrewIds: 'fabricator-1' },
+      ],
+    });
+    expect(dashboardMocks.fabricationCount).toHaveBeenCalledWith(expect.objectContaining({
+      updatedBy: 'fabricator-1', projectId: { $in: ['queued', 'working', 'done'] },
+    }));
+    expect(dashboardMocks.projectCount).not.toHaveBeenCalled();
+  });
+
   it('counts each project once across items and stages and keeps the verification queue separate', async () => {
     plansQuery([
       plan('railings', [pending, pending]),

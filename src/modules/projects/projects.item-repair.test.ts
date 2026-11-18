@@ -2,15 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   projectFindById: vi.fn(),
+  projectFindOne: vi.fn(),
   projectItemFind: vi.fn(),
   projectItemCreate: vi.fn(),
   projectItemUpdateMany: vi.fn(),
   visitReportFind: vi.fn(),
+  visitReportFindById: vi.fn(),
   appointmentFindById: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: { findById: mocks.projectFindById },
+  Project: { findById: mocks.projectFindById, findOne: mocks.projectFindOne },
   ProjectItem: {
     find: mocks.projectItemFind,
     create: mocks.projectItemCreate,
@@ -19,7 +21,7 @@ vi.mock('../../models/index.js', () => ({
   Appointment: { findById: mocks.appointmentFindById },
   User: {},
   AuditLog: {},
-  VisitReport: { find: mocks.visitReportFind, findOne: vi.fn() },
+  VisitReport: { find: mocks.visitReportFind, findById: mocks.visitReportFindById, findOne: vi.fn() },
 }));
 vi.mock('../../models/Payment.js', () => ({ PaymentPlan: {} }));
 vi.mock('../../models/Blueprint.js', () => ({ Blueprint: {} }));
@@ -33,7 +35,7 @@ vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() })
 vi.mock('../../utils/projectNumber.js', () => ({ generateProjectNumber: vi.fn() }));
 vi.mock('../fabrication/fabrication.service.js', () => ({ seedFabricationItems: vi.fn() }));
 
-import { getProjectById } from './projects.service.js';
+import { getContractDownloadUrl, getProjectById, getProjectByVisitReportId, getProjectHistory } from './projects.service.js';
 import { ProjectStatus, Role } from '../../utils/constants.js';
 
 function thenablePopulate<T>(result: T) {
@@ -54,6 +56,70 @@ function populatedItems<T>(result: T) {
   };
   return chain;
 }
+
+describe('fabrication project access', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('denies an unassigned fabricator before reading or repairing related project records', async () => {
+    const project = { _id: 'project-1', fabricationAssistantIds: [{ _id: 'another-user' }] };
+    mocks.projectFindById.mockReturnValue(thenablePopulate(project));
+
+    await expect(getProjectById('project-1', 'fabricator-1', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.visitReportFind).not.toHaveBeenCalled();
+    expect(mocks.projectItemFind).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { fabricationLeadId: { _id: 'fabricator-1' } },
+    { fabricationAssistantIds: [{ _id: 'fabricator-1' }] },
+    { deliveryCrewIds: ['fabricator-1'] },
+  ])('lets a fabricator open an assigned project awaiting payment (%o)', async (assignment) => {
+    const data = { _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING, ...assignment };
+    const project = { ...data, visitReportId: 'report-1', toObject: () => data };
+    const item = { _id: 'item-1', projectId: 'project-1', ocularVisitReportId: 'report-1' };
+    mocks.projectFindById.mockReturnValue(thenablePopulate(project));
+    mocks.visitReportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    mocks.projectItemFind
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue([item]) })
+      .mockReturnValueOnce(populatedItems([item]));
+
+    await expect(getProjectById('project-1', 'fabricator-1', [Role.FABRICATION_STAFF])).resolves.toMatchObject(data);
+  });
+
+  it('denies project history and signed contracts to an unassigned fabricator', async () => {
+    const project = { _id: 'project-1', fabricationLeadId: 'another-user' };
+    mocks.projectFindById
+      .mockReturnValueOnce({ select: () => ({ lean: async () => project }) })
+      .mockResolvedValueOnce(project);
+
+    await expect(getProjectHistory('project-1', 'fabricator-1', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ statusCode: 403 });
+    await expect(getContractDownloadUrl('project-1', 'original', 'fabricator-1', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.visitReportFind).not.toHaveBeenCalled();
+  });
+
+  it('keeps the assignment scope for both visit-report project lookups', async () => {
+    mocks.projectFindOne.mockReturnValue({ select: () => ({ lean: async () => null }) });
+    mocks.visitReportFindById.mockReturnValue({ select: () => ({ lean: async () => ({ linkedProjectId: 'unassigned-project' }) }) });
+
+    await expect(getProjectByVisitReportId('report-1', 'fabricator-1', [Role.FABRICATION_STAFF])).resolves.toBeNull();
+    const scope = {
+      $or: [
+        { fabricationLeadId: 'fabricator-1' },
+        { fabricationAssistantIds: 'fabricator-1' },
+        { deliveryCrewIds: 'fabricator-1' },
+      ],
+    };
+    expect(mocks.projectFindOne.mock.calls).toEqual([
+      [{ visitReportId: 'report-1', ...scope }],
+      [{ _id: 'unassigned-project', ...scope }],
+    ]);
+  });
+});
 
 describe('getProjectById project-item repair', () => {
   beforeEach(() => {
