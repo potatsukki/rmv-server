@@ -282,6 +282,25 @@ describe('project fee summary', () => {
     expect(summary).toMatchObject({ designFeeCredit: 1000, totalAmountDue: 22000, paymentsReceived: 2000, remainingBalance: 20000 });
   });
 
+  it('shows the delivery fee of the latest approved quotation without charging it twice', async () => {
+    mocks.projectFindById.mockResolvedValueOnce(project({ amount: 1000, status: 'verified' }));
+    mocks.appointmentFindById.mockResolvedValueOnce(null);
+    mocks.planFind.mockResolvedValueOnce([]);
+    mocks.blueprintFindOne.mockResolvedValueOnce({ quotation: { total: 20000 } });
+    mocks.blueprintFindRevised
+      .mockResolvedValueOnce([]) // revision fees
+      .mockResolvedValueOnce([ // approved quotations
+        { projectItemId: 'item-1', version: 1, quotation: { deliveryFee: { amount: 900, distanceKm: 5, haulingTrips: 1, ratesSnapshot: [] } } },
+        { projectItemId: 'item-1', version: 2, quotation: { deliveryFee: { amount: 2550, distanceKm: 25, haulingVehicle: 'truck', haulingTrips: 1, crewDays: 0, ratesSnapshot: [{ key: 'truck', label: 'Truck' }] } } },
+      ]);
+
+    const summary = await getProjectFeeSummary('project-1');
+
+    expect(summary.deliveryFee).toEqual({ amount: 2550, label: 'Delivery / Mobilization (25 km · Truck ×1 trip)' });
+    // 20,000 already includes delivery: + 1,000 design − 1,000 credit.
+    expect(summary).toMatchObject({ projectCost: 20000, totalAmountDue: 20000 });
+  });
+
   it('does not charge the design fee when the customer did not proceed', async () => {
     mocks.projectFindById.mockResolvedValueOnce(project({ amount: 1000, status: 'not_charged' }));
     mocks.appointmentFindById.mockResolvedValueOnce({ ocularFee: 350, ocularFeePaid: true });
