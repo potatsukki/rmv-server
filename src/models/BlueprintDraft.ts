@@ -33,6 +33,18 @@ export interface IBlueprintDraftInternalCosts {
   markupProfit: string;
 }
 
+/** Engineer's delivery / mobilization choices; the fee itself is recomputed on finalize. */
+export interface IBlueprintDraftDeliveryFee {
+  enabled: boolean;
+  haulingVehicle: string;
+  haulingTrips: string;
+  crewVehicle: string;
+  crewDays: string;
+  /** Billed amount; empty = use the computed amount. */
+  amount: string;
+  overrideReason: string;
+}
+
 export interface IBlueprintDraft extends Document {
   _id: Types.ObjectId;
   projectId: Types.ObjectId;
@@ -62,6 +74,7 @@ export interface IBlueprintDraft extends Document {
     exclusions?: string;
     lineItems?: IBlueprintDraftQuotationLineItem[];
     fees?: string;
+    deliveryFee?: IBlueprintDraftDeliveryFee;
     validityDays?: string;
     workingDays?: string;
     breakdown?: string;
@@ -120,6 +133,19 @@ const blueprintDraftInternalCostsSchema = new Schema<IBlueprintDraftInternalCost
   { _id: false },
 );
 
+const blueprintDraftDeliveryFeeSchema = new Schema<IBlueprintDraftDeliveryFee>(
+  {
+    enabled: { type: Boolean, default: true },
+    haulingVehicle: { type: String, default: '' },
+    haulingTrips: { type: String, default: '' },
+    crewVehicle: { type: String, default: '' },
+    crewDays: { type: String, default: '' },
+    amount: { type: String, default: '' },
+    overrideReason: { type: String, default: '' },
+  },
+  { _id: false },
+);
+
 const blueprintDraftSchema = new Schema<IBlueprintDraft>(
   {
     projectId: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
@@ -153,6 +179,7 @@ const blueprintDraftSchema = new Schema<IBlueprintDraft>(
       exclusions: { type: String, default: '' },
       lineItems: { type: [blueprintDraftLineItemSchema], default: undefined },
       fees: { type: String, default: '' },
+      deliveryFee: { type: blueprintDraftDeliveryFeeSchema, default: undefined },
       validityDays: { type: String, default: '30' },
       workingDays: { type: String, default: '' },
       breakdown: { type: String, default: '' },

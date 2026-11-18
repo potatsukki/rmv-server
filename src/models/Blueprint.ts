@@ -15,6 +15,33 @@ export interface IQuotationInternalCosts {
   markupProfit: number;
 }
 
+export interface IQuotationDeliveryVehicleRate {
+  key: string;
+  label: string;
+  baseFee: number;
+  baseCoveredKm: number;
+  perKmRate: number;
+}
+
+/** System-computed delivery / mobilization fee (road km × vehicle rates); `amount` is what is billed as `fees`. */
+export interface IQuotationDeliveryFee {
+  /** null when there was no site pin or route and the engineer entered the amount manually. */
+  distanceKm?: number | null;
+  haulingVehicle?: string;
+  haulingTrips: number;
+  haulingTripCost: number;
+  hauling: number;
+  crewVehicle?: string;
+  crewDays: number;
+  crewTripCost: number;
+  crew: number;
+  computedAmount?: number | null;
+  amount: number;
+  overrideReason?: string;
+  ratesSnapshot: IQuotationDeliveryVehicleRate[];
+  computedAt: Date;
+}
+
 export interface IBlueprint extends Document {
   _id: Types.ObjectId;
   projectId: Types.ObjectId;
@@ -79,6 +106,7 @@ export interface IBlueprint extends Document {
     materials?: number;
     labor?: number;
     fees?: number;
+    deliveryFee?: IQuotationDeliveryFee;
     lineItems?: {
       label: string;
       quantity: number;
@@ -101,6 +129,33 @@ const internalCostsSchema = new Schema<IQuotationInternalCosts>(
     deliveryMobilization: { type: Number, default: 0, min: 0 },
     overheadMisc: { type: Number, default: 0, min: 0 },
     markupProfit: { type: Number, default: 0, min: 0 },
+  },
+  { _id: false },
+);
+
+const deliveryFeeSchema = new Schema<IQuotationDeliveryFee>(
+  {
+    distanceKm: { type: Number, default: null },
+    haulingVehicle: String,
+    haulingTrips: { type: Number, default: 0, min: 0 },
+    haulingTripCost: { type: Number, default: 0, min: 0 },
+    hauling: { type: Number, default: 0, min: 0 },
+    crewVehicle: String,
+    crewDays: { type: Number, default: 0, min: 0 },
+    crewTripCost: { type: Number, default: 0, min: 0 },
+    crew: { type: Number, default: 0, min: 0 },
+    computedAmount: { type: Number, default: null },
+    amount: { type: Number, required: true, min: 0 },
+    overrideReason: String,
+    ratesSnapshot: [{
+      _id: false,
+      key: String,
+      label: String,
+      baseFee: Number,
+      baseCoveredKm: Number,
+      perKmRate: Number,
+    }],
+    computedAt: { type: Date, default: Date.now },
   },
   { _id: false },
 );
@@ -177,6 +232,7 @@ const blueprintSchema = new Schema<IBlueprint>(
       materials: Number,
       labor: Number,
       fees: Number,
+      deliveryFee: { type: deliveryFeeSchema, default: undefined },
       lineItems: [{
         label: { type: String, required: true },
         quantity: { type: Number, required: true, min: 1 },

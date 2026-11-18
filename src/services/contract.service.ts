@@ -53,6 +53,8 @@ export interface ContractData {
   measurementUnit?: string;
   quotationLineItems?: { label: string; quantity: number; materials: number; labor: number; amount: number }[];
   quotationFees?: number;
+  /** Row label for quotationFees; "Other Fees" when not set. */
+  quotationFeesLabel?: string;
   quotationValidityDays?: number;
   scopeOfWork?: string;
 }

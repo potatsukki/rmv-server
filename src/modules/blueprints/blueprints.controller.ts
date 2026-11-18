@@ -71,6 +71,24 @@ export const getLatestBlueprint = asyncHandler(async (req: Request, res: Respons
   res.json({ success: true, data: blueprint });
 });
 
+export const getDeliveryFeeEstimate = asyncHandler(async (req: Request, res: Response) => {
+  const query = req.query as Record<string, string | undefined>;
+  const estimate = await blueprintsService.getDeliveryFeeEstimate(
+    (req.params.projectId as string),
+    req.userId!,
+    req.userRoles!,
+    {
+      projectItemId: query.projectItemId,
+      haulingVehicle: query.haulingVehicle,
+      haulingTrips: query.haulingTrips,
+      crewVehicle: query.crewVehicle,
+      crewDays: query.crewDays,
+      workingDays: query.workingDays,
+    },
+  );
+  res.json({ success: true, data: estimate });
+});
+
 export const getBlueprintDraft = asyncHandler(async (req: Request, res: Response) => {
   const draft = await blueprintsService.getBlueprintDraft(
     (req.params.projectId as string),
