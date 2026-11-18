@@ -17,7 +17,8 @@ import { deleteFile } from '../uploads/upload.service.js';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../utils/logger.js';
 import { isDeepStrictEqual } from 'node:util';
-import type { IBlueprint } from '../../models/Blueprint.js';
+import type { IBlueprint, IQuotationDeliveryFee } from '../../models/Blueprint.js';
+import { estimateProjectDeliveryFee } from '../delivery/delivery-fee.service.js';
 import type {
   UploadBlueprintInput,
   RevisionUploadInput,
@@ -73,6 +74,15 @@ interface BlueprintDraftQuotationInput {
     labor: string;
   }>;
   fees?: string;
+  deliveryFee?: {
+    enabled?: boolean;
+    haulingVehicle?: string;
+    haulingTrips?: string;
+    crewVehicle?: string;
+    crewDays?: string;
+    amount?: string;
+    overrideReason?: string;
+  };
   validityDays?: string;
   workingDays?: string;
   breakdown?: string;
@@ -219,6 +229,15 @@ function normalizeDraftQuotation(
       labor: lineItem.labor,
     })),
     fees: quotation.fees ?? '',
+    deliveryFee: quotation.deliveryFee ? {
+      enabled: quotation.deliveryFee.enabled ?? true,
+      haulingVehicle: quotation.deliveryFee.haulingVehicle ?? '',
+      haulingTrips: quotation.deliveryFee.haulingTrips ?? '',
+      crewVehicle: quotation.deliveryFee.crewVehicle ?? '',
+      crewDays: quotation.deliveryFee.crewDays ?? '',
+      amount: quotation.deliveryFee.amount ?? '',
+      overrideReason: quotation.deliveryFee.overrideReason ?? '',
+    } : undefined,
     validityDays: quotation.validityDays ?? '30',
     workingDays: quotation.workingDays ?? '',
     breakdown: quotation.breakdown ?? '',
@@ -243,18 +262,30 @@ function getDraftFileKeys(files?: {
     .filter((value): value is string => Boolean(value));
 }
 
-function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliveryType?: string) {
+/**
+ * `delivery`: undefined = legacy draft (the typed `fees` is used); null = no delivery charge on this
+ * quotation; otherwise the server-computed delivery / mobilization fee billed as `fees`.
+ */
+export function buildQuotationFromDraft(
+  quotation?: BlueprintDraftQuotationInput,
+  deliveryType?: string,
+  delivery?: IQuotationDeliveryFee | null,
+) {
   const workingDays = parseWorkingDays(quotation?.workingDays);
   const workingDaysDuration = workingDays ? formatWorkingDays(workingDays) : undefined;
   const internalCostValues = normalizeInternalCostStrings(quotation?.internalCosts);
   const hasInternalCostValues = Boolean(internalCostValues)
     && INTERNAL_COST_KEYS.some((key) => asMoney(internalCostValues?.[key]) > 0);
+  const deliveryFields = delivery === undefined
+    ? {}
+    : { fees: delivery?.amount ?? 0, deliveryFee: delivery ?? undefined };
 
   if (hasInternalCostValues && internalCostValues) {
     const internalCosts = INTERNAL_COST_KEYS.reduce((acc, key) => {
       acc[key] = asMoney(internalCostValues[key]);
       return acc;
     }, {} as Record<typeof INTERNAL_COST_KEYS[number], number>);
+    if (delivery !== undefined) internalCosts.deliveryMobilization = delivery?.amount ?? 0;
     const subtotal = INTERNAL_COST_KEYS.reduce((sum, key) => sum + internalCosts[key], 0);
     const discount = Math.min(asMoney(quotation?.discount), subtotal);
     const total = Math.max(subtotal - discount, subtotal > 0 ? 1 : 0);
@@ -294,6 +325,7 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
       inclusions: quotation?.inclusions?.trim() || undefined,
       exclusions: quotation?.exclusions?.trim() || undefined,
       engineerNotes: quotation?.engineerNotes?.trim() || undefined,
+      ...deliveryFields,
     };
   }
 
@@ -319,7 +351,7 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
     (sum, lineItem) => sum + lineItem.labor * lineItem.quantity,
     0,
   );
-  const fees = Number(quotation?.fees) || 0;
+  const fees = delivery !== undefined ? (delivery?.amount ?? 0) : Number(quotation?.fees) || 0;
   const computedTotal = totalMaterials + totalLabor + fees;
   const total = computedTotal > 0 ? computedTotal : 1;
   const validMilestones = (quotation?.paymentMilestones || [])
@@ -333,6 +365,7 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
     materials: totalMaterials,
     labor: totalLabor,
     fees,
+    ...(delivery ? { deliveryFee: delivery } : {}),
     subtotal: computedTotal,
     discount: 0,
     total,
@@ -360,7 +393,7 @@ function buildQuotationFromDraft(quotation?: BlueprintDraftQuotationInput, deliv
 }
 
 async function assertAssignedEngineerForProject(projectId: string, actorId: string) {
-  const project = await Project.findById(projectId).select('engineerIds status deliveryType');
+  const project = await Project.findById(projectId).select('engineerIds status deliveryType ocularAppointmentId appointmentId');
   if (!project) throw AppError.notFound('Project not found');
 
   const isAssignedEngineer = project.engineerIds.some((id) => id.toString() === actorId);
@@ -958,6 +991,106 @@ export async function requestRevision(
 
 // ── Engineer: Draft Autosave ──
 
+function parseCount(value: unknown) {
+  if (value === undefined || value === null || String(value).trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Recomputes the delivery / mobilization fee from the project site and the engineer's choices, so
+ * the billed amount never depends on numbers sent by the browser. A changed amount needs a reason.
+ */
+export async function resolveDraftDeliveryFee(
+  project: Parameters<typeof estimateProjectDeliveryFee>[0],
+  quotation: BlueprintDraftQuotationInput | undefined,
+  projectItemId?: string,
+): Promise<IQuotationDeliveryFee | null | undefined> {
+  const input = quotation?.deliveryFee;
+  if (!input) return undefined;
+  if (input.enabled === false) return null;
+
+  const selection = {
+    haulingVehicle: input.haulingVehicle || undefined,
+    haulingTrips: parseCount(input.haulingTrips),
+    crewVehicle: input.crewVehicle || undefined,
+    crewDays: parseCount(input.crewDays),
+  };
+  const estimate = await estimateProjectDeliveryFee(project, {
+    ...selection,
+    projectItemId,
+    workingDays: parseWorkingDays(quotation?.workingDays),
+  });
+  if (!estimate.available && estimate.reason === 'charged_on_other_item') return null;
+
+  const typedAmount = input.amount?.trim() ? asMoney(input.amount) : undefined;
+  const reason = input.overrideReason?.trim() || undefined;
+
+  if (!estimate.available) {
+    if (typedAmount === undefined) {
+      throw AppError.badRequest(`${estimate.message} Enter 0 if there is no delivery charge.`);
+    }
+    return {
+      distanceKm: null,
+      haulingVehicle: selection.haulingVehicle,
+      haulingTrips: Math.max(0, Math.floor(selection.haulingTrips ?? 0)),
+      haulingTripCost: 0,
+      hauling: 0,
+      crewVehicle: selection.crewVehicle,
+      crewDays: Math.max(0, Math.floor(selection.crewDays ?? 0)),
+      crewTripCost: 0,
+      crew: 0,
+      computedAmount: null,
+      amount: typedAmount,
+      overrideReason: reason || 'Entered manually (road distance unavailable)',
+      ratesSnapshot: [],
+      computedAt: new Date(),
+    };
+  }
+
+  const { breakdown } = estimate;
+  const amount = typedAmount ?? breakdown.computedAmount;
+  const overridden = Math.abs(amount - breakdown.computedAmount) >= 0.01;
+  if (overridden && !reason) {
+    throw AppError.badRequest('Give a reason for changing the computed delivery / mobilization fee.');
+  }
+
+  return {
+    ...breakdown,
+    amount,
+    overrideReason: overridden ? reason : undefined,
+    computedAt: new Date(),
+  };
+}
+
+export async function getDeliveryFeeEstimate(
+  projectId: string,
+  actorId: string,
+  actorRoles: string[],
+  query: {
+    projectItemId?: string;
+    haulingVehicle?: string;
+    haulingTrips?: string;
+    crewVehicle?: string;
+    crewDays?: string;
+    workingDays?: string;
+  },
+) {
+  const project = actorRoles.includes(Role.ADMIN)
+    ? await Project.findById(projectId).select('engineerIds status deliveryType ocularAppointmentId appointmentId')
+    : await assertAssignedEngineerForProject(projectId, actorId);
+  if (!project) throw AppError.notFound('Project not found');
+
+  return estimateProjectDeliveryFee(project, {
+    projectItemId: query.projectItemId,
+    haulingVehicle: query.haulingVehicle || undefined,
+    haulingTrips: parseCount(query.haulingTrips),
+    crewVehicle: query.crewVehicle || undefined,
+    crewDays: parseCount(query.crewDays),
+    workingDays: parseWorkingDays(query.workingDays),
+  });
+}
+
 export async function getBlueprintDraft(projectId: string, actorId: string, projectItemId?: string) {
   await assertAssignedEngineerForProject(projectId, actorId);
 
@@ -1125,7 +1258,15 @@ export async function finalizeBlueprintDraft(
     throw AppError.badRequest('Blueprint and design files are required before finalizing the draft');
   }
 
-  const quotation = buildQuotationFromDraft(draft.quotation, project.deliveryType);
+  // A blueprint-only revision keeps the current costing, so the delivery fee is not recomputed.
+  const sourceRevisionComponent = draft.mode === 'revision' && draft.sourceBlueprintId
+    ? (await Blueprint.findById(draft.sourceBlueprintId))?.revisionComponent
+    : undefined;
+  const editsCosting = draft.mode === 'initial' || sourceRevisionComponent === 'costing';
+  const delivery = editsCosting
+    ? await resolveDraftDeliveryFee(project, draft.quotation, draft.projectItemId?.toString() || projectItemId)
+    : undefined;
+  const quotation = buildQuotationFromDraft(draft.quotation, project.deliveryType, delivery);
 
   if (draft.mode === 'revision' && !draft.sourceBlueprintId) {
     throw AppError.badRequest('Revision draft is missing its source blueprint reference');

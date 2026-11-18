@@ -40,6 +40,7 @@ import type { SlotCode } from '../../utils/constants.js';
 import { v4 as uuidv4 } from 'uuid';
 import { PaymentStageStatus } from '../../utils/constants.js';
 import { getInstallmentConfig } from '../config/config.service.js';
+import { describeDeliveryFee } from '../delivery/delivery-rates.js';
 import { applyFeeCreditsToNewPlans, markDesignFeeNotCharged, openDesignFee } from './design-fee.service.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { designItemKey, projectItemFilterForReport } from '../../services/project-item-identity.js';
@@ -1636,6 +1637,7 @@ function buildContractData(
       amount: lineItem.amount,
     })),
     quotationFees: blueprint.quotation?.fees || blueprint.quotation?.discount,
+    quotationFeesLabel: blueprint.quotation?.fees ? describeDeliveryFee(blueprint.quotation?.deliveryFee) : undefined,
     quotationValidityDays: blueprint.quotation?.validityDays,
     scopeOfWork: blueprint.quotation?.inclusions || blueprint.quotation?.breakdown,
   } satisfies ContractData;
@@ -2052,6 +2054,10 @@ function buildAggregateContractData(
     lineItems,
     quotationLineItems,
     quotationFees: itemBuilds.reduce((sum, entry) => sum + (entry.built.blueprint.quotation?.fees || 0), 0),
+    quotationFeesLabel: (() => {
+      const deliveryFees = itemBuilds.map((entry) => entry.built.blueprint.quotation?.deliveryFee).filter(Boolean);
+      return deliveryFees.length === 1 ? describeDeliveryFee(deliveryFees[0]) : undefined;
+    })(),
     scopeOfWork: itemBuilds
       .map(({ item, built }) => {
         const title = item?.title || project.title;

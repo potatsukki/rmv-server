@@ -3,6 +3,9 @@ import { notifyAllUsers } from '../notifications/socket.service.js';
 import { NotificationCategory } from '../../utils/constants.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import { gcashSettingsSchema } from '../payments/gcash.validation.js';
+import {
+  DEFAULT_DELIVERY_VEHICLE_RATES, DELIVERY_VEHICLE_RATES_KEY, deliveryVehicleRatesSchema,
+} from '../delivery/delivery-rates.js';
 import { AuditAction } from '../../utils/constants.js';
 import type {
   UpdateConfigInput,
@@ -172,6 +175,13 @@ export async function upsertConfig(
     const amount = Number(input.value);
     if (!Number.isFinite(amount) || amount < 0) throw AppError.badRequest('The fee must be a number of 0 or more');
     input.value = Math.round(amount * 100) / 100;
+  }
+  if (key === DELIVERY_VEHICLE_RATES_KEY) {
+    const parsed = deliveryVehicleRatesSchema.safeParse(input.value);
+    if (!parsed.success) {
+      throw AppError.badRequest(parsed.error.issues[0]?.message || 'Invalid delivery vehicle rates');
+    }
+    input.value = parsed.data;
   }
   if (key === 'free_revision_limit') {
     const limit = Number(input.value);
@@ -686,6 +696,10 @@ export async function seedDefaultConfigs(): Promise<void> {
     free_revision_limit: {
       value: DEFAULT_FREE_REVISION_LIMIT,
       description: 'Number of free blueprint revisions per project item before the revision fee applies',
+    },
+    [DELIVERY_VEHICLE_RATES_KEY]: {
+      value: DEFAULT_DELIVERY_VEHICLE_RATES,
+      description: 'Delivery / mobilization rates per vehicle: base fee, km covered by the base fee, and rate per extra km (one-way road distance from the shop)',
     },
     ocular_fee_on_proceed: {
       value: 'separate',

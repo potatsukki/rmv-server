@@ -255,7 +255,7 @@ export const ContractDocument: React.FC<ContractDocumentProps> = ({
             {/* fees row */}
             {data.quotationFees && data.quotationFees > 0 ? (
               <View style={[s.tRow, { borderTopWidth: 0.3, borderTopColor: '#ccc', paddingTop: 2 }]}>
-                <Text style={[s.td, { width: '84%' }]}>Other Fees</Text>
+                <Text style={[s.td, { width: '84%' }]}>{data.quotationFeesLabel || 'Other Fees'}</Text>
                 <Text style={[s.td, { width: '16%', textAlign: 'right' }]}>
                   {pdfCurrency(data.quotationFees)}
                 </Text>

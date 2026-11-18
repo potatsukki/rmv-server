@@ -80,6 +80,14 @@ router.get(
   ctrl.getQuotationHistory,
 );
 
+// System-computed delivery / mobilization fee for the costing (road km × vehicle rates).
+router.get(
+  '/project/:projectId/delivery-fee-estimate',
+  authenticate,
+  authorize(Role.ENGINEER, Role.ADMIN),
+  ctrl.getDeliveryFeeEstimate,
+);
+
 router.get(
   '/project/:projectId/draft',
   authenticate,
