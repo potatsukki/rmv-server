@@ -53,7 +53,7 @@ vi.mock('../../services/contract.service.js', () => ({ generateAndUploadContract
 vi.mock('../uploads/upload.service.js', () => ({
   generateDownloadUrl: vi.fn(), verifyFileExists: vi.fn(),
 }));
-vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
+vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn() } }));
 vi.mock('../config/config.service.js', () => ({ getInstallmentConfig: vi.fn() }));
 vi.mock('./design-fee.service.js', () => ({
   openDesignFee: mocks.openDesignFee,
@@ -67,6 +67,22 @@ vi.mock('../appointments/appointments.service.js', () => ({
   resolveOcularVisitData: mocks.resolveOcularVisitData,
 }));
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
+const scheduling = vi.hoisted(() => ({
+  assertFabricatorsFree: vi.fn(), assertDeliveryDateAllowed: vi.fn(), assertDeliveryCrewFree: vi.fn(),
+  resolveSite: vi.fn(), computeRoute: vi.fn(), acquireStaffLock: vi.fn(),
+}));
+vi.mock('../appointments/sales-day-lock.js', () => ({
+  withSalesDayLocks: (fn: (locks: { held: [] }) => Promise<unknown>) => fn({ held: [] }),
+  acquireStaffLock: scheduling.acquireStaffLock,
+}));
+vi.mock('./fabrication-scheduling.js', async (importActual) => ({
+  ...(await importActual<typeof import('./fabrication-scheduling.js')>()),
+  assertFabricatorsFree: scheduling.assertFabricatorsFree,
+  assertDeliveryDateAllowed: scheduling.assertDeliveryDateAllowed,
+  assertDeliveryCrewFree: scheduling.assertDeliveryCrewFree,
+}));
+vi.mock('../delivery/delivery-fee.service.js', () => ({ resolveProjectSiteLocation: scheduling.resolveSite }));
+vi.mock('../maps/maps.service.js', () => ({ computeRoute: scheduling.computeRoute }));
 
 import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
@@ -932,6 +948,9 @@ describe('createProject', () => {
 });
 
 describe('assignFabricationStaff', () => {
+  const leadId = 'eeeeeeeeeeeeeeeeeeeeeeee';
+  const assistantIds = ['ffffffffffffffffffffffff', 'dddddddddddddddddddddddd'];
+
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.projectItemFind.mockReturnValue({ select: vi.fn().mockResolvedValue([]) });
@@ -956,21 +975,39 @@ describe('assignFabricationStaff', () => {
       save,
     };
     mocks.projectFindById.mockResolvedValue(project);
+    mocks.userFindOne.mockResolvedValue({ _id: leadId });
+    mocks.userFind.mockResolvedValue(assistantIds.map((_id) => ({ _id })));
 
     const result = await assignFabricationStaff(
       'project-1',
-      { fabricationLeadId: 'fabricator-1', fabricationAssistantIds: [] },
+      { fabricationLeadId: leadId, fabricationAssistantIds: assistantIds },
       actorId,
     );
 
     expect(result).toBe(project);
     expect(project).toMatchObject({
       status: ProjectStatus.PAYMENT_PENDING,
-      fabricationLeadId: 'fabricator-1',
-      fabricationAssistantIds: [],
+      fabricationLeadId: leadId,
+      fabricationAssistantIds: assistantIds,
     });
     expect(save).toHaveBeenCalledOnce();
     expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
+    const busyMessage = 'Another team assignment for this fabricator is being saved right now. Please try again in a moment.';
+    expect(scheduling.acquireStaffLock.mock.calls).toEqual([assistantIds[1], leadId, assistantIds[0]].map((staffId) => [
+      { held: [] }, { staffId, date: 'all-dates', slot: 'fabricator-team' }, actorId, busyMessage,
+    ]));
+    expect(scheduling.acquireStaffLock.mock.invocationCallOrder[2]).toBeLessThan(scheduling.assertFabricatorsFree.mock.invocationCallOrder[0]);
+    expect(scheduling.assertFabricatorsFree).toHaveBeenCalledWith('project-1', [leadId, ...assistantIds]);
+  });
+
+  it('does not save a team whose fabricator is on another active project', async () => {
+    const save = vi.fn();
+    mocks.projectFindById.mockResolvedValue({ _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING, fabricationAssistantIds: [], save });
+    scheduling.assertFabricatorsFree.mockRejectedValueOnce(new Error('Lance Zelot is already on PRJ-2026-00051 (Lead)'));
+
+    await expect(assignFabricationStaff('project-1', { fabricationLeadId: 'fabricator-1', fabricationAssistantIds: [] }, actorId))
+      .rejects.toThrow('already on PRJ-2026-00051');
+    expect(save).not.toHaveBeenCalled();
   });
 });
 
@@ -1141,7 +1178,7 @@ describe('scheduleProjectOcular', () => {
 
 describe('assignDeliveryCrew', () => {
   let project: Record<string, any>;
-  const crewIds = ['eeeeeeeeeeeeeeeeeeeeeeee', 'ffffffffffffffffffffffff'];
+  const crewIds = ['ffffffffffffffffffffffff', 'eeeeeeeeeeeeeeeeeeeeeeee'];
   const usersFound = (count: number) => mocks.userFind.mockReturnValue({
     select: vi.fn().mockResolvedValue(crewIds.slice(0, count).map((_id) => ({ _id }))),
   });
@@ -1150,6 +1187,7 @@ describe('assignDeliveryCrew', () => {
     vi.resetAllMocks();
     project = {
       _id: 'project-1', title: 'Gate project', status: ProjectStatus.FABRICATION,
+      customerId: { toString: () => 'customer-1' },
       engineerIds: [{ toString: () => actorId }],
       fabricationLeadId: { toString: () => 'lead-1' },
       fabricationAssistantIds: [], deliveryCrewIds: [],
@@ -1157,52 +1195,90 @@ describe('assignDeliveryCrew', () => {
     };
     mocks.projectFindById.mockResolvedValue(project);
     usersFound(2);
+    scheduling.resolveSite.mockResolvedValue({ lat: 14.5, lng: 121.2, address: 'Antipolo' });
+    scheduling.computeRoute.mockResolvedValue({ distanceKm: 18.2, durationMinutes: 45 });
   });
 
-  it('saves the crew without touching the project status, and tells the crew and the lead', async () => {
-    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]);
+  it('saves the crew and the delivery date without touching the project status', async () => {
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
 
     expect(project.deliveryCrewIds).toEqual(crewIds);
+    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25', distanceKm: 18.2, travelDurationMinutes: 45 });
     expect(project.status).toBe(ProjectStatus.FABRICATION);
     expect(project.save).toHaveBeenCalledOnce();
+    expect(scheduling.assertDeliveryDateAllowed).toHaveBeenCalledWith('2026-11-25');
+    const busyMessage = 'Another crew assignment for this person on this date is being saved right now. Please try again in a moment.';
+    expect(scheduling.acquireStaffLock.mock.calls).toEqual([crewIds[1], crewIds[0]].map((staffId) => [
+      { held: [] }, { staffId, date: '2026-11-25', slot: 'delivery-day' }, actorId, busyMessage,
+    ]));
+    expect(scheduling.acquireStaffLock.mock.invocationCallOrder[1]).toBeLessThan(scheduling.assertDeliveryCrewFree.mock.invocationCallOrder[0]);
+    expect(scheduling.assertDeliveryCrewFree).toHaveBeenCalledWith('project-1', crewIds, '2026-11-25');
     expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({
       action: AuditAction.DELIVERY_CREW_ASSIGNED,
-      details: { deliveryCrewIds: crewIds, previousCrewIds: [] },
+      details: { deliveryCrewIds: crewIds, previousCrewIds: [], deliveryDate: '2026-11-25', previousDeliveryDate: null },
     }));
+    // The customer is asked to confirm the date; the new crew and the lead are told.
     const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
-    expect(notified).toEqual([...crewIds, 'lead-1']);
+    expect(notified).toEqual(['customer-1', ...crewIds, 'lead-1']);
   });
 
-  it('only notifies people newly added to the crew', async () => {
+  it('only notifies people newly added to the crew when the date stays the same', async () => {
     project.deliveryCrewIds = [{ toString: () => crewIds[0] }];
-    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]);
+    project.deliverySchedule = { date: '2026-11-25' };
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
 
     const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
     expect(notified).toEqual([crewIds[1], 'lead-1']);
+    // An unchanged (possibly past) date is not re-checked.
+    expect(scheduling.assertDeliveryDateAllowed).not.toHaveBeenCalled();
+  });
+
+  it('asks the customer to confirm again when the date changes', async () => {
+    project.deliverySchedule = { date: '2026-11-25' };
+    project.installationConfirmedAt = new Date();
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-27' }, actorId, [Role.ENGINEER]);
+
+    expect(project.installationConfirmedAt).toBeNull();
+    expect(mocks.projectItemUpdateMany).toHaveBeenCalledWith({ projectId: 'project-1' }, { $set: { installationConfirmedAt: null } });
+    expect(project.deliverySchedule.date).toBe('2026-11-27');
+  });
+
+  it('does not save when a crew member already has a delivery that day', async () => {
+    scheduling.assertDeliveryCrewFree.mockRejectedValueOnce(new Error('already has a delivery on Nov 25, 2026'));
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('already has a delivery');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('still saves when the travel time cannot be computed', async () => {
+    scheduling.computeRoute.mockRejectedValueOnce(new Error('ORS down'));
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
+    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25', distanceKm: null, travelDurationMinutes: null });
   });
 
   it('needs the fabrication team first', async () => {
     project.fabricationLeadId = undefined;
-    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]))
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
       .rejects.toThrow('Assign the fabrication team first');
     expect(project.save).not.toHaveBeenCalled();
   });
 
   it('is refused for an engineer who is not assigned to the project', async () => {
-    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, 'another-engineer', [Role.ENGINEER]))
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, 'another-engineer', [Role.ENGINEER]))
       .rejects.toThrow('Only the assigned engineer');
   });
 
   it('is refused once the project is completed', async () => {
     project.status = ProjectStatus.COMPLETED;
-    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ADMIN]))
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ADMIN]))
       .rejects.toThrow('before the project is completed');
   });
 
   it('rejects a crew member who is not active fabrication staff', async () => {
     usersFound(1);
-    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds }, actorId, [Role.ENGINEER]))
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
       .rejects.toThrow('One or more crew member IDs are invalid');
+    expect(scheduling.acquireStaffLock).not.toHaveBeenCalled();
     expect(project.save).not.toHaveBeenCalled();
   });
 });

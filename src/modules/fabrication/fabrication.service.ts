@@ -148,9 +148,12 @@ export async function createFabricationUpdate(
   }
 
   // Workshop stages can run without a crew; delivery / installation needs one assigned.
-  if (CREW_GATED_STATUSES.includes(input.status as FabricationStatus) && !(project.deliveryCrewIds || []).length) {
+  if (
+    CREW_GATED_STATUSES.includes(input.status as FabricationStatus)
+    && (!(project.deliveryCrewIds || []).length || !project.deliverySchedule?.date)
+  ) {
     throw AppError.badRequest(
-      `Assign the delivery / installation crew before moving to ${input.status.replace(/_/g, ' ')}.`,
+      `Assign the delivery / installation crew and date before moving to ${input.status.replace(/_/g, ' ')}.`,
       ErrorCode.FABRICATION_CREW_REQUIRED,
       { helpPath: '/help/projects-fabrication/fabrication-gates-and-payments#checklist' },
     );
@@ -627,8 +630,9 @@ export async function getLatestFabricationStatus(
 
   // Check payment gate — per-stage info
   const plan = await findScopedPaymentPlan(projectId, projectItemId);
-  const crewProject = await Project.findById(projectId).select('deliveryCrewIds');
+  const crewProject = await Project.findById(projectId).select('deliveryCrewIds deliverySchedule');
   const hasCrew = Boolean(crewProject?.deliveryCrewIds?.length);
+  const hasDeliveryDate = Boolean(crewProject?.deliverySchedule?.date);
   const totalStages = plan ? plan.stages.length : 0;
   const paidCount = plan ? plan.stages.filter(s => s.status === PaymentStageStatus.VERIFIED).length : 0;
   const allPaid = totalStages > 0 && paidCount === totalStages;
@@ -665,7 +669,7 @@ export async function getLatestFabricationStatus(
     currentStatus,
     latestUpdate: latest ? normalizeFabricationUpdate(latest, deliveryType) : null,
     allowedTransitions,
-    crewGate: { hasCrew, gatedStatuses: CREW_GATED_STATUSES },
+    crewGate: { hasCrew, hasDeliveryDate, gatedStatuses: CREW_GATED_STATUSES },
     paymentGate: {
       allPaid,
       unpaidCount,

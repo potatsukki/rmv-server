@@ -239,6 +239,7 @@ describe('createFabricationUpdate', () => {
       fabricationLeadId: { toString: () => 'lead-1' },
       fabricationAssistantIds: [],
       deliveryCrewIds: hasCrew ? [{ toString: () => 'crew-1' }] : [],
+      deliverySchedule: hasCrew ? { date: '2026-11-25' } : undefined,
       engineerIds: [],
       installationConfirmedAt: confirmed ? new Date() : null,
       save: vi.fn(),
@@ -311,6 +312,21 @@ describe('createFabricationUpdate', () => {
       'lead-1',
       [Role.FABRICATION_STAFF],
     )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_CREW_REQUIRED });
+  });
+
+  it('also requires the delivery date, not just the crew', async () => {
+    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY);
+    mockProjectFindById.mockResolvedValue({
+      _id: 'project-1', customerId: 'customer-1', title: 'Installation Project', status: ProjectStatus.FABRICATION,
+      deliveryType: DeliveryType.ON_SITE_INSTALLATION, fabricationLeadId: { toString: () => 'lead-1' },
+      fabricationAssistantIds: [], deliveryCrewIds: [{ toString: () => 'crew-1' }], deliverySchedule: undefined,
+      engineerIds: [], installationConfirmedAt: null, save: vi.fn(),
+    });
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toThrow('Assign the delivery / installation crew and date');
   });
 
   it('lets the fabricator start a fully paid item without schedule confirmation', async () => {
@@ -441,7 +457,7 @@ describe('createFabricationUpdate', () => {
     expect(result.allowedTransitions).toEqual([FabricationStatus.FABRICATION]);
     expect(result.paymentGate.allPaid).toBe(true);
     expect(result.paymentGate.stageGates[FabricationStatus.FABRICATION].blocked).toBe(false);
-    expect(result.crewGate).toEqual({ hasCrew: false, gatedStatuses: ['installation', 'fabrication_installation', 'ready_for_delivery'] });
+    expect(result.crewGate).toEqual({ hasCrew: false, hasDeliveryDate: false, gatedStatuses: ['installation', 'fabrication_installation', 'ready_for_delivery'] });
   });
 
   it.each([

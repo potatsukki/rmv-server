@@ -79,7 +79,21 @@ export async function acquireCustomerScheduleLock(
   );
 }
 
-/** Runs `fn` and always releases the sales-day and customer locks it took. */
+export async function acquireStaffLock(
+  locks: SalesDayLocks | undefined,
+  key: { staffId: string; date: string; slot: string },
+  lockedBy: string,
+  busyMessage: string,
+): Promise<void> {
+  if (!locks) return;
+  const { staffId, date, slot } = key;
+  if (locks.held.some((lock) => lock.salesId === staffId && lock.date === date
+    && (lock.slotCode ?? SALES_DAY_LOCK_SLOT) === slot)) return;
+
+  await acquireLock(locks, { date, slotCode: slot, salesId: staffId }, lockedBy, busyMessage);
+}
+
+/** Runs `fn` and always attempts to release the locks it took. */
 export async function withSalesDayLocks<T>(fn: (locks: SalesDayLocks) => Promise<T>): Promise<T> {
   const locks: SalesDayLocks = { held: [] };
   try {
