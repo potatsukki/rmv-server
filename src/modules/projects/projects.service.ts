@@ -46,7 +46,7 @@ import { generateProjectNumber } from '../../utils/projectNumber.js';
 import { designItemKey, projectItemFilterForReport } from '../../services/project-item-identity.js';
 import { seedFabricationItems } from '../fabrication/fabrication.service.js';
 import { prepareProjectOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
-import { withSalesDayLocks, type SalesDayLocks } from '../appointments/sales-day-lock.js';
+import { acquireStaffLock, withSalesDayLocks, type SalesDayLocks } from '../appointments/sales-day-lock.js';
 import { snapshotConsultationReport } from '../../services/consultation-snapshot.js';
 import {
   activeProjectStatusesForRoles,
@@ -61,6 +61,11 @@ import {
 } from './project-stage.js';
 import { getProjectPaymentDue, NO_PAYMENT_DUE, type ProjectPaymentDue } from '../payments/payment-due.js';
 import { applyTargetFinishDate } from './target-finish.js';
+import {
+  ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree, manilaToday, readableDay,
+} from './fabrication-scheduling.js';
+import { resolveProjectSiteLocation } from '../delivery/delivery-fee.service.js';
+import { computeRoute } from '../maps/maps.service.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
 const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
@@ -2236,6 +2241,17 @@ export async function assignFabricationStaff(
   ip?: string,
   ua?: string,
 ) {
+  return withSalesDayLocks((locks) => assignFabricationStaffLocked(projectId, input, actorId, locks, ip, ua));
+}
+
+async function assignFabricationStaffLocked(
+  projectId: string,
+  input: AssignFabricationInput,
+  actorId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
 
@@ -2273,6 +2289,18 @@ export async function assignFabricationStaff(
       throw AppError.badRequest('One or more assistant IDs are invalid');
     }
   }
+
+  // One active project at a time for each lead and assistant.
+  const fabricatorIds = [input.fabricationLeadId, ...input.fabricationAssistantIds];
+  for (const staffId of [...new Set(fabricatorIds.map((id) => id.toLowerCase()))].sort()) {
+    await acquireStaffLock(
+      locks,
+      { staffId, date: 'all-dates', slot: 'fabricator-team' },
+      actorId,
+      'Another team assignment for this fabricator is being saved right now. Please try again in a moment.',
+    );
+  }
+  await assertFabricatorsFree(projectId, fabricatorIds);
 
   project.fabricationLeadId = input.fabricationLeadId as unknown as Types.ObjectId;
   project.fabricationAssistantIds = input.fabricationAssistantIds as unknown as Types.ObjectId[];
@@ -2346,8 +2374,7 @@ export async function assignFabricationStaff(
 
 // ── Fabrication staff workload (shown while the engineer picks a team or a delivery crew) ──
 
-/** A project keeps its people occupied from team assignment until fabrication is done. */
-const FABRICATION_WORKLOAD_STATUSES = [ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION];
+const FABRICATION_WORKLOAD_STATUSES = ACTIVE_FABRICATION_STATUSES;
 
 export type FabricationWorkloadStatus = 'available' | 'busy' | 'on_leave' | 'unavailable';
 export type FabricationWorkloadRole = 'lead' | 'assistant' | 'delivery_crew';
@@ -2371,7 +2398,7 @@ export async function listFabricationStaffWorkload() {
         { deliveryCrewIds: { $in: staffIds } },
       ],
     })
-      .select('projectNumber title status fabricationLeadId fabricationAssistantIds deliveryCrewIds')
+      .select('projectNumber title status fabricationLeadId fabricationAssistantIds deliveryCrewIds deliverySchedule')
       .sort({ createdAt: 1 })
       .lean()
     : [];
@@ -2401,6 +2428,17 @@ export async function listFabricationStaffWorkload() {
         ? 'unavailable'
         : activeProjects.length > 0 ? 'busy' : 'available';
 
+    // Upcoming delivery days, so the crew picker can show who is already out on a date.
+    const today = manilaToday();
+    const deliveryDates = projects
+      .filter((project) => includesMember(project.deliveryCrewIds) && project.deliverySchedule?.date
+        && project.deliverySchedule.date >= today)
+      .map((project) => ({
+        projectId: project._id.toString(),
+        projectNumber: project.projectNumber,
+        date: project.deliverySchedule!.date,
+      }));
+
     return {
       _id: memberId,
       firstName: member.firstName,
@@ -2409,6 +2447,7 @@ export async function listFabricationStaffWorkload() {
       workloadStatus,
       activeProjectCount: activeProjects.length,
       activeProjects,
+      deliveryDates,
     };
   });
 }
@@ -2424,6 +2463,18 @@ export async function assignDeliveryCrew(
   input: AssignDeliveryCrewInput,
   actorId: string,
   actorRoles: Role[],
+  ip?: string,
+  ua?: string,
+) {
+  return withSalesDayLocks((locks) => assignDeliveryCrewLocked(projectId, input, actorId, actorRoles, locks, ip, ua));
+}
+
+async function assignDeliveryCrewLocked(
+  projectId: string,
+  input: AssignDeliveryCrewInput,
+  actorId: string,
+  actorRoles: Role[],
+  locks: SalesDayLocks,
   ip?: string,
   ua?: string,
 ) {
@@ -2451,8 +2502,48 @@ export async function assignDeliveryCrew(
     throw AppError.badRequest('One or more crew member IDs are invalid');
   }
 
+  // A delivery takes the crew's whole day. Re-saving an unchanged date skips the date rules.
+  const previousDate = project.deliverySchedule?.date;
+  const dateChanged = previousDate !== input.deliveryDate;
+  if (dateChanged) await assertDeliveryDateAllowed(input.deliveryDate);
+  for (const staffId of [...new Set(crewIds.map((id) => id.toLowerCase()))].sort()) {
+    await acquireStaffLock(
+      locks,
+      { staffId, date: input.deliveryDate, slot: 'delivery-day' },
+      actorId,
+      'Another crew assignment for this person on this date is being saved right now. Please try again in a moment.',
+    );
+  }
+  await assertDeliveryCrewFree(projectId, crewIds, input.deliveryDate);
+
+  // Travel estimate from the shop to the site pin; never blocks the assignment.
+  let distanceKm: number | null = project.deliverySchedule?.distanceKm ?? null;
+  let travelDurationMinutes: number | null = project.deliverySchedule?.travelDurationMinutes ?? null;
+  try {
+    const site = await resolveProjectSiteLocation(project);
+    if (site) {
+      const route = await computeRoute({ lat: site.lat, lng: site.lng });
+      distanceKm = route.distanceKm;
+      travelDurationMinutes = route.durationMinutes;
+    }
+  } catch (error) {
+    logger.warn(`Could not compute delivery travel time for project ${project._id}`, error);
+  }
+
   const previousCrewIds = (project.deliveryCrewIds || []).map((id) => id.toString());
   project.deliveryCrewIds = crewIds as unknown as Types.ObjectId[];
+  project.deliverySchedule = {
+    date: input.deliveryDate,
+    scheduledBy: actorId as unknown as Types.ObjectId,
+    scheduledAt: dateChanged ? new Date() : project.deliverySchedule?.scheduledAt ?? new Date(),
+    distanceKm,
+    travelDurationMinutes,
+  };
+  // A new date needs the customer's confirmation again.
+  if (dateChanged && previousDate) {
+    (project as any).installationConfirmedAt = null;
+    await ProjectItem.updateMany({ projectId: project._id }, { $set: { installationConfirmedAt: null } });
+  }
   await project.save();
 
   await AuditLog.create({
@@ -2460,20 +2551,30 @@ export async function assignDeliveryCrew(
     actorId,
     targetType: 'project',
     targetId: project._id,
-    details: { deliveryCrewIds: crewIds, previousCrewIds },
+    details: { deliveryCrewIds: crewIds, previousCrewIds, deliveryDate: input.deliveryDate, previousDeliveryDate: previousDate ?? null },
     ipAddress: ip,
     userAgent: ua,
   });
 
-  // Tell the people newly put on the crew and the fabrication lead; never the one who did it.
   const link = `/projects/${project._id}`;
+  if (dateChanged) {
+    await createAndSendNotification(
+      project.customerId.toString(),
+      NotificationCategory.FABRICATION,
+      'Delivery / Installation Scheduled',
+      `Delivery / installation for "${project.title}" is scheduled on ${readableDay(input.deliveryDate)}. Please open the project and confirm the schedule.`,
+      `${link}/fabrication`,
+    );
+  }
+
+  // Tell the people newly put on the crew and the fabrication lead; never the one who did it.
   const addedCrewIds = crewIds.filter((id) => !previousCrewIds.includes(id) && id !== actorId);
   for (const crewId of addedCrewIds) {
     await createAndSendNotification(
       crewId,
       NotificationCategory.FABRICATION,
       'Delivery / Installation Assignment',
-      `You were assigned to the delivery / installation crew for project "${project.title}".`,
+      `You were assigned to the delivery / installation crew for project "${project.title}" on ${readableDay(input.deliveryDate)}.`,
       link,
     );
   }
@@ -3465,6 +3566,10 @@ export async function confirmInstallation(
 
   if (!isAdmin && !isCustomer) {
     throw AppError.forbidden('Only the project customer or an admin can confirm installation');
+  }
+  // The customer confirms the installation day RMV set with the crew.
+  if (project.deliveryType === DeliveryType.ON_SITE_INSTALLATION && !project.deliverySchedule?.date) {
+    throw AppError.badRequest('Wait for RMV to set the installation date before confirming.');
   }
 
   const projectItems = await ProjectItem.find({ projectId: project._id }).sort({ createdAt: 1 });

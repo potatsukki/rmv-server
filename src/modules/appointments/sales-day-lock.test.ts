@@ -9,7 +9,8 @@ vi.mock('../../models/index.js', () => ({
   SlotLock: { create: mocks.create, deleteOne: mocks.deleteOne },
 }));
 
-import { acquireSalesDayLock, withSalesDayLocks } from './sales-day-lock.js';
+import { AppError, ErrorCode } from '../../utils/appError.js';
+import { acquireSalesDayLock, acquireStaffLock, withSalesDayLocks } from './sales-day-lock.js';
 
 describe('sales day lock', () => {
   beforeEach(() => {
@@ -52,5 +53,40 @@ describe('sales day lock', () => {
   it('does nothing when the caller does not hold locks', async () => {
     await acquireSalesDayLock(undefined, 'sales-1', '2026-11-13', 'sales-1');
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('staff lock', () => {
+  const key = { staffId: 'eeeeeeeeeeeeeeeeeeeeeeee', date: '2026-11-25', slot: 'delivery-day' };
+  const lockedBy = 'cccccccccccccccccccccccc';
+  const busyMessage = 'Staff assignment is being saved';
+  const slotKey = { date: key.date, slotCode: key.slot, salesId: key.staffId };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.deleteOne.mockResolvedValue(undefined);
+  });
+
+  it('reports a duplicate-key error as a slot lock conflict', async () => {
+    mocks.create.mockRejectedValueOnce(Object.assign(new Error('E11000 duplicate key'), { code: 11000 }));
+
+    const result = withSalesDayLocks((locks) => acquireStaffLock(locks, key, lockedBy, busyMessage));
+    await expect(result).rejects.toBeInstanceOf(AppError);
+    await expect(result).rejects.toMatchObject({ message: busyMessage, statusCode: 409, code: ErrorCode.SLOT_LOCKED });
+    expect(mocks.deleteOne).toHaveBeenCalledOnce();
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ ...slotKey, lockedBy }));
+  });
+
+  it('acquires the same key once and releases it when the assignment fails', async () => {
+    mocks.create.mockResolvedValue({});
+
+    await expect(withSalesDayLocks(async (locks) => {
+      await acquireStaffLock(locks, key, lockedBy, busyMessage);
+      await acquireStaffLock(locks, key, lockedBy, busyMessage);
+      throw new Error('assignment failed');
+    })).rejects.toThrow('assignment failed');
+
+    expect(mocks.create).toHaveBeenCalledOnce();
+    expect(mocks.deleteOne).toHaveBeenLastCalledWith(slotKey);
   });
 });

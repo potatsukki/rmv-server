@@ -110,6 +110,14 @@ export interface IProject extends Document {
   originalContractDownloadedAt?: Date; // one-time original download tracking
 
   installationConfirmedAt?: Date;
+  /** Delivery / installation day set with the crew; it takes the crew's whole day. */
+  deliverySchedule?: {
+    date: string; // YYYY-MM-DD Asia/Manila
+    scheduledBy?: Types.ObjectId;
+    scheduledAt?: Date;
+    distanceKm?: number | null;
+    travelDurationMinutes?: number | null;
+  };
   customerReview?: {
     rating?: number;
     comment?: string;
@@ -244,6 +252,16 @@ const projectSchema = new Schema<IProject>(
     originalContractDownloadedAt: { type: Date, default: null },
 
     installationConfirmedAt: { type: Date, default: null },
+    deliverySchedule: {
+      type: new Schema({
+        date: { type: String, required: true },
+        scheduledBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        scheduledAt: { type: Date },
+        distanceKm: { type: Number, default: null },
+        travelDurationMinutes: { type: Number, default: null },
+      }, { _id: false }),
+      default: undefined,
+    },
     customerReview: {
       rating: { type: Number, min: 1, max: 5 },
       comment: { type: String },
