@@ -14,6 +14,7 @@ const {
   mockFabricationUpdateCreate,
   mockFabricationUpdateFind,
   mockFabricationUpdateFindById,
+  mockFabricationUpdateFindByIdAndDelete,
   mockPaymentPlanFindOne,
   mockAuditLogCreate,
   mockUserFindById,
@@ -27,6 +28,7 @@ const {
   mockFabricationUpdateCreate: vi.fn(),
   mockFabricationUpdateFind: vi.fn(),
   mockFabricationUpdateFindById: vi.fn(),
+  mockFabricationUpdateFindByIdAndDelete: vi.fn(),
   mockPaymentPlanFindOne: vi.fn(),
   mockAuditLogCreate: vi.fn(),
   mockUserFindById: vi.fn(),
@@ -52,6 +54,7 @@ vi.mock('../../models/index.js', () => ({
     create: mockFabricationUpdateCreate,
     find: mockFabricationUpdateFind,
     findById: mockFabricationUpdateFindById,
+    findByIdAndDelete: mockFabricationUpdateFindByIdAndDelete,
   },
   User: {
     findById: mockUserFindById,
@@ -99,7 +102,7 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
-import { createFabricationUpdate, updateFabricationUpdate, getLatestFabricationStatus, listFabricationUpdates, getFabricationUpdateById, seedFabricationItems } from './fabrication.service.js';
+import { createFabricationUpdate, deleteFabricationUpdate, updateFabricationUpdate, getLatestFabricationStatus, listFabricationUpdates, getFabricationUpdateById, seedFabricationItems } from './fabrication.service.js';
 import { getPaymentActivationConfig } from '../config/config.service.js';
 import { createAndSendNotification } from '../notifications/socket.service.js';
 import { sendFabricationUpdateEmail, sendProjectCompletedEmail, sendReadyForDeliveryEmail } from '../notifications/email.service.js';
@@ -593,6 +596,21 @@ describe('existing on-site fabrication tracking', () => {
     await expect(listFabricationUpdates('project-1', 'customer-2', [Role.CUSTOMER])).rejects.toThrow('Access denied');
   });
 
+  it('blocks access to a fabrication update after the author is removed from the project', async () => {
+    const update = { projectId: 'project-1', updatedBy: 'previous-lead', save: vi.fn() };
+    mockFabricationUpdateFindById.mockResolvedValue(update);
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({
+      fabricationLeadId: 'new-lead', fabricationAssistantIds: [], deliveryCrewIds: [],
+    }) });
+
+    await expect(updateFabricationUpdate('update-1', { notes: 'Edited' }, 'previous-lead', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ statusCode: 403 });
+    await expect(deleteFabricationUpdate('update-1', 'previous-lead', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ statusCode: 403 });
+    expect(update.save).not.toHaveBeenCalled();
+    expect(mockFabricationUpdateFindByIdAndDelete).not.toHaveBeenCalled();
+  });
+
   it('maps an edited historical update in the response while preserving its stored status', async () => {
     const document = {
       projectId: 'project-1', updatedBy: 'lead-1', status: FabricationStatus.FABRICATION_INSTALLATION,
@@ -600,7 +618,7 @@ describe('existing on-site fabrication tracking', () => {
       toObject() { return { projectId: this.projectId, status: this.status, notes: this.notes }; },
     };
     mockFabricationUpdateFindById.mockResolvedValue(document);
-    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.ON_SITE_INSTALLATION, customerId: 'customer-1', fabricationAssistantIds: [], engineerIds: [] }) });
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.ON_SITE_INSTALLATION, customerId: 'customer-1', fabricationLeadId: 'lead-1', fabricationAssistantIds: [], engineerIds: [] }) });
     const result = await updateFabricationUpdate('update-1', { notes: 'Corrected notes' }, 'lead-1', [Role.FABRICATION_STAFF]);
     expect(result).toMatchObject({ status: 'fabrication', notes: 'Corrected notes' });
     expect(document.status).toBe(FabricationStatus.FABRICATION_INSTALLATION);

@@ -7,7 +7,7 @@ import {
   DeliveryType, FabricationStatus, PaymentStageStatus, ProjectStatus, AuditAction, NotificationCategory, Role,
 } from '../../utils/constants.js';
 import { getFabricationStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
-import { ON_SITE_FABRICATION_STAGES, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
+import { fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
 import type { IFabricationUpdate } from '../../models/FabricationUpdate.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { createAndSendNotification, getIO, notifyUsers } from '../notifications/socket.service.js';
@@ -15,25 +15,13 @@ import { sendFabricationUpdateEmail, sendPaymentHeadsUpEmail, sendPaymentDueEmai
 import { getPaymentActivationConfig } from '../config/config.service.js';
 import { formatCurrency } from '../../utils/helpers.js';
 import { logger } from '../../utils/logger.js';
+import { assertFabricatorProjectAccess, isAssignedFabricationMember, usesFabricationProjectScope } from '../projects/projects.list-policy.js';
 import type { CreateFabricationUpdateInput, UpdateFabricationUpdateInput } from './fabrication.validation.js';
 
 // ── Per-stage payment gating helpers ──
 
-const SHOP_FABRICATION_STAGE_ORDER = [
-  FabricationStatus.MATERIAL_PREP,
-  FabricationStatus.CUTTING,
-  FabricationStatus.WELDING,
-  FabricationStatus.ASSEMBLY,
-  FabricationStatus.FINISHING,
-  FabricationStatus.QUALITY_CHECK,
-  FabricationStatus.READY_FOR_DELIVERY,
-  FabricationStatus.DONE,
-];
-
 function getFabricationStageOrder(deliveryType?: string) {
-  return deliveryType === DeliveryType.ON_SITE_INSTALLATION
-    ? ON_SITE_FABRICATION_STAGES
-    : SHOP_FABRICATION_STAGE_ORDER;
+  return fabricationStageOrder(deliveryType);
 }
 
 function normalizeFabricationUpdate(update: IFabricationUpdate, deliveryType?: string) {
@@ -92,6 +80,14 @@ export async function createFabricationUpdate(
   const project = await Project.findById(input.projectId);
   if (!project) throw AppError.notFound('Project not found');
 
+  // Admins can post updates to any project. Engineers and the fabrication or delivery team must be assigned.
+  const isAdmin = actorRoles.includes(Role.ADMIN);
+  const isEngineer = actorRoles.includes(Role.ENGINEER)
+    && project.engineerIds?.some((id) => id.toString() === actorId);
+  if (!isAdmin && !isEngineer && !isAssignedFabricationMember(project, actorId)) {
+    throw AppError.forbidden('You are not assigned to this project');
+  }
+
   let projectItem: any = null;
   if (input.projectItemId) {
     projectItem = await ProjectItem.findOne({ _id: input.projectItemId, projectId: project._id });
@@ -108,17 +104,6 @@ export async function createFabricationUpdate(
       ErrorCode.FABRICATION_NOT_IN_PHASE,
       { helpPath: '/help/projects-fabrication/fabrication-gates-and-payments#overview' },
     );
-  }
-
-  // Admins can post updates to any project; staff/engineers must be assigned
-  const isAdmin = actorRoles.includes(Role.ADMIN);
-  const isLead = project.fabricationLeadId?.toString() === actorId;
-  const isAssistant = project.fabricationAssistantIds.some(id => id.toString() === actorId);
-  // The delivery / installation crew logs the delivery and on-site work.
-  const isDeliveryCrew = (project.deliveryCrewIds || []).some(id => id.toString() === actorId);
-  const isEngineer = project.engineerIds?.some((id: { toString: () => string }) => id.toString() === actorId);
-  if (!isAdmin && !isLead && !isAssistant && !isDeliveryCrew && !isEngineer) {
-    throw AppError.forbidden('You are not assigned to this project');
   }
 
   // Get current fabrication status (from latest update or queued)
@@ -440,6 +425,7 @@ export async function updateFabricationUpdate(
 
   const project = await Project.findById(update.projectId)
     .select('customerId fabricationLeadId fabricationAssistantIds deliveryCrewIds engineerIds deliveryType');
+  assertFabricatorProjectAccess(project ?? {}, actorId, actorRoles);
 
   if (input.notes !== undefined) update.notes = input.notes;
   if (input.photoKeys !== undefined) update.photoKeys = input.photoKeys;
@@ -488,6 +474,9 @@ export async function deleteFabricationUpdate(
   }
 
   const projectId = String(update.projectId);
+  if (usesFabricationProjectScope(actorRoles)) {
+    await assertFabricationProjectAccess(projectId, actorId, actorRoles);
+  }
   await FabricationUpdate.findByIdAndDelete(id);
 
   await AuditLog.create({
@@ -529,6 +518,7 @@ async function assertFabricationProjectAccess(
   const project = await Project.findById(projectId)
     .select('customerId salesStaffId engineerIds fabricationLeadId fabricationAssistantIds deliveryCrewIds status deliveryType');
   if (!project) throw AppError.notFound('Project not found');
+  assertFabricatorProjectAccess(project, actorId, actorRoles);
 
   if (actorRoles.includes(Role.ADMIN)) return project.deliveryType;
 
@@ -539,12 +529,7 @@ async function assertFabricationProjectAccess(
   // Cashiers follow the project's progress (read-only); posting updates stays fabrication/engineer/admin.
   if (actorRoles.includes(Role.CASHIER)) return project.deliveryType;
 
-  if (
-    actorRoles.includes(Role.FABRICATION_STAFF) &&
-    (project.fabricationLeadId?.toString() === actorId ||
-      project.fabricationAssistantIds.some((id) => id.toString() === actorId) ||
-      (project.deliveryCrewIds || []).some((id) => id.toString() === actorId))
-  ) return project.deliveryType;
+  if (actorRoles.includes(Role.FABRICATION_STAFF) && isAssignedFabricationMember(project, actorId)) return project.deliveryType;
 
   throw AppError.forbidden('Access denied');
 }

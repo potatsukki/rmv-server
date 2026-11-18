@@ -1,3 +1,4 @@
+import { AppError } from '../../utils/appError.js';
 import { ContractStatus, ProjectStatus, Role } from '../../utils/constants.js';
 
 /**
@@ -21,6 +22,38 @@ export function customerVisibleProjectsFilter(customerId: string) {
   };
 }
 
+export function usesFabricationProjectScope(roles: readonly string[]) {
+  return roles.includes(Role.FABRICATION_STAFF)
+    && ![Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER, Role.CASHIER].some((role) => roles.includes(role));
+}
+
+export function assignedFabricationProjectsFilter(actorId: string) {
+  return {
+    $or: [
+      { fabricationLeadId: actorId },
+      { fabricationAssistantIds: actorId },
+      { deliveryCrewIds: actorId },
+    ],
+  };
+}
+
+interface FabricationAssignment {
+  fabricationLeadId?: unknown;
+  fabricationAssistantIds?: readonly unknown[] | null;
+  deliveryCrewIds?: readonly unknown[] | null;
+}
+
+export function isAssignedFabricationMember(project: FabricationAssignment, actorId: string) {
+  return [project.fabricationLeadId, ...(project.fabricationAssistantIds ?? []), ...(project.deliveryCrewIds ?? [])]
+    .some((member) => projectUserId(member) === actorId);
+}
+
+export function assertFabricatorProjectAccess(project: FabricationAssignment, actorId: string, roles: readonly Role[]) {
+  if (usesFabricationProjectScope(roles) && !isAssignedFabricationMember(project, actorId)) {
+    throw AppError.forbidden('You are not assigned to this project');
+  }
+}
+
 export function canViewProjectTotalCost(
   actorRoles: Role[],
   customerOwnsProject = false,
@@ -32,14 +65,14 @@ export function canViewProjectTotalCost(
   return actorRoles.includes(Role.CUSTOMER) && customerOwnsProject;
 }
 
-function projectCustomerId(customerId: unknown): string | undefined {
-  if (typeof customerId === 'string') return customerId;
-  if (!customerId || typeof customerId !== 'object') return undefined;
+function projectUserId(userId: unknown): string | undefined {
+  if (typeof userId === 'string') return userId;
+  if (!userId || typeof userId !== 'object') return undefined;
 
-  const populatedId = (customerId as { _id?: unknown })._id;
+  const populatedId = (userId as { _id?: unknown })._id;
   if (populatedId !== undefined && populatedId !== null) return String(populatedId);
 
-  const value = String(customerId);
+  const value = String(userId);
   return value === '[object Object]' ? undefined : value;
 }
 
@@ -49,7 +82,7 @@ export function maskProjectTotalCostForActor<T extends Record<string, any>>(
   actorRoles: Role[],
 ): T {
   const customerOwnsProject = actorRoles.includes(Role.CUSTOMER)
-    && projectCustomerId(project.customerId) === actorId;
+    && projectUserId(project.customerId) === actorId;
 
   if (canViewProjectTotalCost(actorRoles, customerOwnsProject)) return project;
   return { ...project, totalCost: undefined };

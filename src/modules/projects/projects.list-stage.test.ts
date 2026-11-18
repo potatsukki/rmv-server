@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   projectFind: vi.fn(),
   projectCountDocuments: vi.fn(),
+  userFind: vi.fn(),
   projectItemFind: vi.fn(),
   projectItemBulkWrite: vi.fn(),
   blueprintAggregate: vi.fn(),
@@ -19,7 +20,7 @@ vi.mock('../../models/index.js', () => ({
   PaymentPlan: { find: mocks.planFind },
   Payment: { distinct: mocks.paymentDistinct },
   Blueprint: { distinct: mocks.blueprintDistinct },
-  User: {},
+  User: { find: mocks.userFind },
   AuditLog: {},
   VisitReport: {},
 }));
@@ -108,6 +109,46 @@ describe('listProjects stage and payment filters', () => {
       expect.objectContaining({ $or: expect.any(Array) }),
       { _id: { $in: ['p1', 'p4'] } },
     ]);
+  });
+
+  it('lists a fabricator’s current and past assignments by lead, assistant, or crew membership', async () => {
+    mocks.projectFind.mockReturnValue(pageQuery([]));
+    mocks.projectCountDocuments.mockResolvedValue(0);
+
+    await listProjects({}, 'fabricator-1', [Role.FABRICATION_STAFF]);
+
+    const scope = {
+      $or: [
+        { fabricationLeadId: 'fabricator-1' },
+        { fabricationAssistantIds: 'fabricator-1' },
+        { deliveryCrewIds: 'fabricator-1' },
+      ],
+    };
+    expect(mocks.projectFind).toHaveBeenCalledExactlyOnceWith(scope);
+    expect(mocks.projectCountDocuments).toHaveBeenCalledExactlyOnceWith(scope);
+  });
+
+  it('keeps the fabricator assignment filter when searching and filtering by stage and status', async () => {
+    setup([], [], []);
+    mocks.userFind.mockReturnValue(pageQuery([]));
+    mocks.projectItemFind.mockReset().mockReturnValue(pageQuery([{ projectId: 'unassigned-project' }]));
+
+    await listProjects({ stage: 'completed', status: 'completed', search: 'Gate' }, 'fabricator-1', [Role.FABRICATION_STAFF]);
+
+    const assignment = {
+      $or: [
+        { fabricationLeadId: 'fabricator-1' },
+        { fabricationAssistantIds: 'fabricator-1' },
+        { deliveryCrewIds: 'fabricator-1' },
+      ],
+    };
+    for (const [filter] of mocks.projectFind.mock.calls) {
+      expect(filter).toMatchObject({ status: 'completed' });
+      expect(filter.$and).toContainEqual(assignment);
+      expect(filter.$and).toContainEqual({ $or: expect.arrayContaining([{ _id: { $in: ['unassigned-project'] } }]) });
+    }
+    expect(pagedFilter().$and).toContainEqual({ _id: { $in: [] } });
+    expect(mocks.projectCountDocuments).toHaveBeenCalledWith(pagedFilter());
   });
 
   it('ignores an unknown stage', async () => {

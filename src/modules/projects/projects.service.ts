@@ -1,6 +1,7 @@
 import {
-  Project, ProjectItem, Appointment, User, AuditLog, VisitReport,
+  Project, ProjectItem, Appointment, User, AuditLog, VisitReport, FabricationUpdate,
 } from '../../models/index.js';
+import { fabricationProgress } from '../../utils/fabricationLifecycle.js';
 import { PaymentPlan } from '../../models/Payment.js';
 import { Blueprint } from '../../models/Blueprint.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
@@ -50,8 +51,11 @@ import { acquireStaffLock, withSalesDayLocks, type SalesDayLocks } from '../appo
 import { snapshotConsultationReport } from '../../services/consultation-snapshot.js';
 import {
   activeProjectStatusesForRoles,
+  assertFabricatorProjectAccess,
+  assignedFabricationProjectsFilter,
   customerVisibleProjectsFilter,
   maskProjectTotalCostForActor,
+  usesFabricationProjectScope,
 } from './projects.list-policy.js';
 import {
   isProjectListingStage,
@@ -2398,12 +2402,22 @@ export async function listFabricationStaffWorkload() {
         { deliveryCrewIds: { $in: staffIds } },
       ],
     })
-      .select('projectNumber title status fabricationLeadId fabricationAssistantIds deliveryCrewIds deliverySchedule')
+      .select('projectNumber title status fabricationLeadId fabricationAssistantIds deliveryCrewIds deliverySchedule estimatedCompletionDate deliveryType')
       .sort({ createdAt: 1 })
       .lean()
     : [];
 
-  return staff.map((member) => {
+  // Latest fabrication stage of each active project, to show who finishes soonest.
+  const latestStages = projects.length
+    ? await FabricationUpdate.aggregate<{ _id: unknown; status: string }>([
+      { $match: { projectId: { $in: projects.map((project) => project._id) } } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$projectId', status: { $first: '$status' } } },
+    ])
+    : [];
+  const stageByProject = new Map((latestStages || []).map((row) => [String(row._id), row.status]));
+
+  const members = staff.map((member) => {
     const memberId = member._id.toString();
     const includesMember = (ids?: unknown[]) => (ids || []).some((id) => String(id) === memberId);
     const activeProjects = projects.flatMap((project) => {
@@ -2411,16 +2425,29 @@ export async function listFabricationStaffWorkload() {
       if (project.fabricationLeadId && String(project.fabricationLeadId) === memberId) roles.push('lead');
       if (includesMember(project.fabricationAssistantIds)) roles.push('assistant');
       if (includesMember(project.deliveryCrewIds)) roles.push('delivery_crew');
-      return roles.length
-        ? [{
-          _id: project._id.toString(),
-          projectNumber: project.projectNumber,
-          title: project.title,
-          status: project.status,
-          roles,
-        }]
-        : [];
+      if (!roles.length) return [];
+      // Before fabrication starts (payment pending) nothing is done yet.
+      const progress = fabricationProgress(
+        project.status === ProjectStatus.FABRICATION ? stageByProject.get(String(project._id)) : undefined,
+        project.deliveryType,
+      );
+      return [{
+        _id: project._id.toString(),
+        projectNumber: project.projectNumber,
+        title: project.title,
+        status: project.status,
+        roles,
+        ...progress,
+        estimatedCompletionDate: project.estimatedCompletionDate ?? null,
+      }];
     });
+    // When this person is free of workshop work: their lead / assistant projects finishing.
+    const teamProjects = activeProjects.filter((project) => project.roles.some((role) => role !== 'delivery_crew'));
+    const finishDates = teamProjects.map((project) => project.estimatedCompletionDate);
+    const freeAt = teamProjects.length && finishDates.every(Boolean)
+      ? new Date(Math.max(...finishDates.map((date) => new Date(date!).getTime())))
+      : null;
+    const lowestProgress = teamProjects.length ? Math.min(...teamProjects.map((project) => project.progressPercent)) : 100;
     // Same rule as sales staff: available by default, only an admin's On Leave / Unavailable overrides.
     const workloadStatus: FabricationWorkloadStatus = member.availabilityStatus === StaffAvailabilityStatus.ON_LEAVE
       ? 'on_leave'
@@ -2448,8 +2475,28 @@ export async function listFabricationStaffWorkload() {
       activeProjectCount: activeProjects.length,
       activeProjects,
       deliveryDates,
+      freeAt,
+      lowestProgressPercent: lowestProgress,
+      hasTeamProject: teamProjects.length > 0,
     };
   });
+
+  // Free for workshop work first, then the busy ones who finish soonest (by target finish, then
+  // furthest along), and people on leave / unavailable last. Names stay in order within a group.
+  const group = (member: typeof members[number]) => (
+    member.workloadStatus === 'on_leave' || member.workloadStatus === 'unavailable' ? 2 : member.hasTeamProject ? 1 : 0
+  );
+  return members
+    .map((member, index) => ({ member, index }))
+    .sort((a, b) => {
+      const byGroup = group(a.member) - group(b.member);
+      if (byGroup || group(a.member) !== 1) return byGroup || a.index - b.index;
+      const aFree = a.member.freeAt ? a.member.freeAt.getTime() : Number.POSITIVE_INFINITY;
+      const bFree = b.member.freeAt ? b.member.freeAt.getTime() : Number.POSITIVE_INFINITY;
+      if (aFree !== bFree) return aFree - bFree;
+      return (b.member.lowestProgressPercent - a.member.lowestProgressPercent) || a.index - b.index;
+    })
+    .map(({ member }) => member);
 }
 
 // ── Assign Delivery / Installation Crew ──
@@ -2674,17 +2721,20 @@ export async function transitionProject(
  * Every recorded step of one project, its consultation and ocular appointments, their visit
  * reports, and its blueprints (who did what, and when). Staff only.
  */
-export async function getProjectHistory(projectId: string) {
-  const project = await Project.findById(projectId).select('appointmentId ocularAppointmentId').lean();
+export async function getProjectHistory(projectId: string, actorId: string, actorRoles: Role[]) {
+  const project = await Project.findById(projectId)
+    .select('appointmentId ocularAppointmentId visitReportId fabricationLeadId fabricationAssistantIds deliveryCrewIds')
+    .lean();
   if (!project) throw AppError.notFound('Project not found');
+  assertFabricatorProjectAccess(project, actorId, actorRoles);
 
   const appointmentIds = [project.appointmentId, project.ocularAppointmentId].filter(Boolean);
+  const relatedReports = usesFabricationProjectScope(actorRoles)
+    ? (project.visitReportId ? [{ _id: project.visitReportId }] : [])
+    : (appointmentIds.length ? [{ appointmentId: { $in: appointmentIds } }] : []);
   const [reports, blueprints] = await Promise.all([
     VisitReport.find({
-      $or: [
-        { linkedProjectId: project._id },
-        ...(appointmentIds.length ? [{ appointmentId: { $in: appointmentIds } }] : []),
-      ],
+      $or: [{ linkedProjectId: project._id }, ...relatedReports],
     }).select('_id').lean(),
     Blueprint.find({ projectId: project._id }).select('_id').lean(),
   ]);
@@ -2715,6 +2765,8 @@ export async function getProjectById(
     .populate({ path: 'visitReportId', populate: REPORT_APPOINTMENT_STATUS });
 
   if (!project) throw AppError.notFound('Project not found');
+
+  assertFabricatorProjectAccess(project, actorId, actorRoles);
 
   // Projects stuck in For Ocular after their visit and reports were finished move on now.
   if (project.status === ProjectStatus.DRAFT && project.ocularAppointmentId && project.contractStatus === ContractStatus.UPLOADED) {
@@ -2755,6 +2807,7 @@ export async function getProjectById(
   // Customers can only see their own
   if (
     actorRoles.includes(Role.CUSTOMER) &&
+    !usesFabricationProjectScope(actorRoles) &&
     !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r))
   ) {
     if (project.customerId._id?.toString() !== actorId) {
@@ -2779,14 +2832,15 @@ export async function getProjectById(
 
 // ── List Projects ──
 
-export async function getProjectByVisitReportId(visitReportId: string) {
+export async function getProjectByVisitReportId(visitReportId: string, actorId: string, actorRoles: Role[]) {
+  const scope = usesFabricationProjectScope(actorRoles) ? assignedFabricationProjectsFilter(actorId) : {};
   // Direct match: project was created from this visit report
-  const project = await Project.findOne({ visitReportId }).select('_id title serviceType status contractStatus').lean();
+  const project = await Project.findOne({ visitReportId, ...scope }).select('_id title serviceType status contractStatus').lean();
   if (project) return project;
   // Indirect match: ocular visit report linked to the consultation's project
   const report = await VisitReport.findById(visitReportId).select('linkedProjectId').lean();
   if (report?.linkedProjectId) {
-    return Project.findById(report.linkedProjectId).select('_id title serviceType status contractStatus').lean();
+    return Project.findOne({ _id: report.linkedProjectId, ...scope }).select('_id title serviceType status contractStatus').lean();
   }
 
   return null;
@@ -2816,7 +2870,9 @@ export async function listProjects(
   const filter: Record<string, unknown> = {};
 
   // Role-based filtering
-  if (actorRoles.includes(Role.CUSTOMER) && !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r))) {
+  if (usesFabricationProjectScope(actorRoles)) {
+    Object.assign(filter, assignedFabricationProjectsFilter(actorId));
+  } else if (actorRoles.includes(Role.CUSTOMER) && !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r))) {
     Object.assign(filter, customerVisibleProjectsFilter(actorId));
   } else if (actorRoles.includes(Role.SALES_STAFF) && !actorRoles.some(r => [Role.ADMIN].includes(r))) {
     filter.salesStaffId = actorId;
@@ -2825,9 +2881,6 @@ export async function listProjects(
       { engineerIds: actorId },
       { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } },
     ];
-  } else if (actorRoles.includes(Role.FABRICATION_STAFF) && !actorRoles.some(r => [Role.ADMIN, Role.ENGINEER].includes(r))) {
-    // Fabrication staff see all projects currently in the fabrication stage
-    filter.status = ProjectStatus.FABRICATION;
   }
 
   if (query.status === 'active') {
@@ -3408,6 +3461,7 @@ export async function getContractDownloadUrl(
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
+  assertFabricatorProjectAccess(project, actorId, actorRoles);
 
   const isInternal = actorRoles.some((role) => [
     Role.ADMIN,

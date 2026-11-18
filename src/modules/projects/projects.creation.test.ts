@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const fabUpdateAggregate = vi.hoisted(() => vi.fn());
 const mocks = vi.hoisted(() => ({
   openDesignFee: vi.fn(),
   appointmentFindById: vi.fn(),
@@ -42,6 +43,7 @@ vi.mock('../../models/index.js', () => ({
   User: { findOne: mocks.userFindOne, find: mocks.userFind },
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
+  FabricationUpdate: { aggregate: (...args: unknown[]) => fabUpdateAggregate(...args) },
 }));
 vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymentPlanFindOne, find: mocks.paymentPlanFind, insertMany: mocks.paymentPlanInsertMany } }));
 vi.mock('../../models/Blueprint.js', () => ({ Blueprint: { findOne: mocks.blueprintFindOne } }));
@@ -1312,9 +1314,34 @@ describe('listFabricationStaffWorkload', () => {
       ['leave', 'on_leave', 1],
     ]);
     expect(staff[1]!.activeProjects).toEqual([
-      { _id: 'project-1', projectNumber: 'PRJ-2026-00001', title: 'Gate', status: ProjectStatus.FABRICATION, roles: ['lead', 'delivery_crew'] },
-      { _id: 'project-2', projectNumber: 'PRJ-2026-00002', title: 'Railings', status: ProjectStatus.PAYMENT_PENDING, roles: ['assistant'] },
+      expect.objectContaining({ _id: 'project-1', projectNumber: 'PRJ-2026-00001', title: 'Gate', status: ProjectStatus.FABRICATION, roles: ['lead', 'delivery_crew'], stageIndex: 0 }),
+      expect.objectContaining({ _id: 'project-2', projectNumber: 'PRJ-2026-00002', title: 'Railings', status: ProjectStatus.PAYMENT_PENDING, roles: ['assistant'], progressPercent: 0 }),
     ]);
+  });
+
+  it('lists free fabricators first, then the busy ones who finish soonest', async () => {
+    mocks.userFind.mockReturnValue(leanChain([
+      { _id: 'ana', firstName: 'Ana', lastName: 'A' },
+      { _id: 'ben', firstName: 'Ben', lastName: 'B' },
+      { _id: 'cy', firstName: 'Cy', lastName: 'C' },
+      { _id: 'dee', firstName: 'Dee', lastName: 'D' },
+      { _id: 'eve', firstName: 'Eve', lastName: 'E' },
+    ]));
+    mocks.projectFind.mockReturnValue(leanChain([
+      { _id: 'p-late', projectNumber: 'PRJ-1', status: ProjectStatus.FABRICATION, deliveryType: DeliveryType.SHOP_FABRICATED, fabricationLeadId: 'ana', fabricationAssistantIds: [], deliveryCrewIds: [], estimatedCompletionDate: new Date('2026-12-10') },
+      { _id: 'p-soon', projectNumber: 'PRJ-2', status: ProjectStatus.FABRICATION, deliveryType: DeliveryType.SHOP_FABRICATED, fabricationLeadId: 'ben', fabricationAssistantIds: [], deliveryCrewIds: [], estimatedCompletionDate: new Date('2026-11-22') },
+      { _id: 'p-nodate', projectNumber: 'PRJ-3', status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: 'cy', fabricationAssistantIds: [], deliveryCrewIds: [] },
+      { _id: 'p-crew', projectNumber: 'PRJ-4', status: ProjectStatus.FABRICATION, fabricationLeadId: 'x', fabricationAssistantIds: [], deliveryCrewIds: ['dee'] },
+    ]));
+    fabUpdateAggregate.mockResolvedValue([{ _id: 'p-soon', status: 'quality_check' }, { _id: 'p-late', status: 'cutting' }]);
+
+    const staff = await listFabricationStaffWorkload();
+
+    // Free for workshop work (Dee is only on a delivery crew, Eve has nothing), then soonest finish, then no date.
+    expect(staff.map((member) => member._id)).toEqual(['dee', 'eve', 'ben', 'ana', 'cy']);
+    expect(staff[2]!.activeProjects[0]).toMatchObject({ currentStage: 'quality_check', stageIndex: 6, stageCount: 8, progressPercent: 75 });
+    expect(staff[2]!.freeAt).toEqual(new Date('2026-11-22'));
+    expect(staff[4]!.freeAt).toBeNull();
   });
 
   it('returns an empty list when there is no fabrication staff', async () => {

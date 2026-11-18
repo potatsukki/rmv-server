@@ -2,7 +2,8 @@ import {
   VisitReport, Appointment, Project, ProjectItem, User, AuditLog, SlotLock,
 } from '../../models/index.js';
 import { logger } from '../../utils/logger.js';
-import { VisitReportStatus } from '../../models/VisitReport.js';
+import { VisitReportStatus, type IVisitReport } from '../../models/VisitReport.js';
+import { assignedFabricationProjectsFilter } from '../projects/projects.list-policy.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, ContractStatus, ProjectStatus, Role, AuditAction, NotificationCategory,
@@ -1405,7 +1406,18 @@ async function resolveVisitReportFromAuditLog(reportId: string) {
   return appointmentId ? findFirstVisitReportForAppointment(String(appointmentId)) : null;
 }
 
-export async function getVisitReport(reportId: string) {
+async function canFabricatorReadVisitReport(report: Pick<IVisitReport, '_id' | 'linkedProjectId'>, fabricatorId: string) {
+  const itemProjectIds = await ProjectItem.distinct('projectId', {
+    $or: [{ consultationVisitReportId: report._id }, { ocularVisitReportId: report._id }],
+  });
+  const projectIds = report.linkedProjectId ? [report.linkedProjectId, ...itemProjectIds] : itemProjectIds;
+  return Boolean(await Project.exists({
+    ...assignedFabricationProjectsFilter(fabricatorId),
+    $and: [{ $or: [{ visitReportId: report._id }, { _id: { $in: projectIds } }] }],
+  }));
+}
+
+export async function getVisitReport(reportId: string, fabricatorId?: string) {
   let report: any = await populateVisitReportDetail(VisitReport.findById(reportId));
 
   if (!report) {
@@ -1414,6 +1426,9 @@ export async function getVisitReport(reportId: string) {
   }
 
   if (!report) throw AppError.notFound('Visit report not found');
+  if (fabricatorId && !await canFabricatorReadVisitReport(report, fabricatorId)) {
+    throw AppError.forbidden('You are not assigned to this project');
+  }
 
   const appointment = report.appointmentId as any;
   if (appointment?._id && appointment?.salesStaffId) {
@@ -1440,7 +1455,7 @@ export async function getVisitReport(reportId: string) {
         .populate('salesStaffId', 'firstName lastName email')
         .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
 
-      if (canonicalReport) {
+      if (canonicalReport && (!fabricatorId || await canFabricatorReadVisitReport(canonicalReport, fabricatorId))) {
         report = canonicalReport;
       }
     }
@@ -1464,7 +1479,10 @@ export async function getVisitReport(reportId: string) {
 
   // Fetch sample projects for the customer
   const customerId = report.customerId instanceof Object ? (report.customerId as any)._id : report.customerId;
-  const customerProjects = await Project.find({ customerId })
+  const customerProjects = await Project.find({
+    customerId,
+    ...(fabricatorId ? assignedFabricationProjectsFilter(fabricatorId) : {}),
+  })
     .select('title serviceType status')
     .sort({ createdAt: -1 })
     .limit(2);
@@ -1515,14 +1533,40 @@ export async function getByAppointment(appointmentId: string) {
 
 // ── List for Sales Staff ──
 
-export async function listForSalesStaff(salesStaffId: string, query: {
+interface VisitReportListQuery {
   status?: string;
   page?: string;
   limit?: string;
-}) {
+}
+
+export async function listForSalesStaff(salesStaffId: string, query: VisitReportListQuery) {
+  const filter = await buildSalesStaffReportFilter(salesStaffId, query.status);
+  return listVisitReportsMatching(filter, query);
+}
+
+export async function listForFabricationStaff(fabricatorId: string, query: VisitReportListQuery) {
+  const projects = await Project.find(assignedFabricationProjectsFilter(fabricatorId))
+    .select('_id visitReportId').lean();
+  if (!projects.length) return { items: [], total: 0, hasMore: false };
+
+  const projectIds = projects.map((project) => project._id);
+  const items = await ProjectItem.find({ projectId: { $in: projectIds } })
+    .select('consultationVisitReportId ocularVisitReportId').lean();
+  const reportIds = [
+    ...projects.map((project) => project.visitReportId),
+    ...items.flatMap((item) => [item.consultationVisitReportId, item.ocularVisitReportId]),
+  ].filter(Boolean);
+  const status = visitReportStatusCondition(query.status);
+
+  return listVisitReportsMatching({
+    $or: [{ linkedProjectId: { $in: projectIds } }, { _id: { $in: reportIds } }],
+    ...(status ? { status } : {}),
+  }, query);
+}
+
+async function listVisitReportsMatching(filter: Record<string, unknown>, query: VisitReportListQuery) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
-  const filter = await buildSalesStaffReportFilter(salesStaffId, query.status);
 
   const [reports, total] = await Promise.all([
     VisitReport.find(filter)

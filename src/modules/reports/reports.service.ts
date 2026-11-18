@@ -7,8 +7,10 @@ import {
   AppointmentStatus, AppointmentAttendanceStatus, AppointmentType, Role, AuditAction,
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
-import { activeProjectStatusesForRoles, customerVisibleProjectsFilter } from '../projects/projects.list-policy.js';
-import { resolveProjectStages } from '../projects/project-stage.js';
+import {
+  activeProjectStatusesForRoles, assignedFabricationProjectsFilter, customerVisibleProjectsFilter, usesFabricationProjectScope,
+} from '../projects/projects.list-policy.js';
+import { matchesListingStage, resolveProjectStages } from '../projects/project-stage.js';
 import { getProjectPaymentDue } from '../payments/payment-due.js';
 import { buildAppointmentStatusGroupFilter } from '../appointments/appointment-status-groups.js';
 import { countPendingReportGroupsForSalesStaff } from '../visit-reports/visit-reports.service.js';
@@ -776,12 +778,64 @@ async function getCustomerDashboardCounts(customerId: string) {
   };
 }
 
+const EMPTY_DASHBOARD_SUMMARY = {
+  totalProjects: 0,
+  activeProjects: 0,
+  completedProjects: 0,
+  pendingPayments: 0,
+  unpaidProjects: 0,
+  revenueThisMonth: 0,
+  totalRevenue: 0,
+  pendingAppointments: 0,
+  totalAppointmentsToday: 0,
+  todayAppointments: 0,
+  fabricationInProgress: 0,
+  conversionRate: 0,
+  pendingVisitReports: 0,
+  pendingCashPayments: 0,
+  totalUsers: 0,
+  pendingBlueprints: 0,
+  completedToday: 0,
+  pendingInstallationConfirmations: [] as { _id: string; title: string }[],
+};
+
+async function getFabricatorDashboardSummary(userId: string, startOfToday: Date) {
+  const projects = await Project.find({ ...assignedFabricationProjectsFilter(userId), deletedAt: null })
+    .select('_id status').lean().exec();
+  if (!projects.length) return { ...EMPTY_DASHBOARD_SUMMARY };
+
+  const [stages, completedToday] = await Promise.all([
+    resolveProjectStages(projects),
+    FabricationUpdate.countDocuments({
+      projectId: { $in: projects.map((project) => project._id) },
+      updatedBy: userId,
+      createdAt: { $gte: startOfToday },
+    }).exec(),
+  ]);
+  const projectStages = [...stages.values()];
+  const completedProjects = projectStages.filter((stage) => stage === 'completed').length;
+
+  return {
+    ...EMPTY_DASHBOARD_SUMMARY,
+    totalProjects: projects.length,
+    activeProjects: projectStages.filter((stage) => matchesListingStage(stage, 'active')).length,
+    fabricationInProgress: projectStages.filter((stage) => stage === 'fabrication').length,
+    completedProjects,
+    completedToday,
+    conversionRate: completedProjects / projects.length,
+  };
+}
+
 export async function getDashboardSummary(userId?: string, userRoles?: string[]) {
   try {
     const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (usesFabricationProjectScope(userRoles ?? [])) {
+      return userId ? await getFabricatorDashboardSummary(userId, startOfToday) : { ...EMPTY_DASHBOARD_SUMMARY };
+    }
+
     const todayStr = now.toISOString().split('T')[0];
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
     // Determine if the caller is a pure customer (no staff/admin roles)
     const isCustomerOnly = userRoles?.includes(Role.CUSTOMER)
@@ -819,13 +873,11 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
           : { $nin: [ProjectStatus.COMPLETED, ProjectStatus.CANCELLED] },
         ...(userRoles?.includes(Role.ENGINEER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r as Role))
           ? { $or: [{ engineerIds: userId }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } }] }
-          : userRoles?.includes(Role.FABRICATION_STAFF) && !userRoles?.some(r => [Role.ADMIN, Role.ENGINEER].includes(r as Role))
-            ? { status: ProjectStatus.FABRICATION }
-            : userRoles?.includes(Role.SALES_STAFF) && !userRoles?.includes(Role.ADMIN)
-              ? { salesStaffId: userId }
-              : userRoles?.includes(Role.CUSTOMER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r as Role))
-                ? { customerId: userId }
-                : {}),
+          : userRoles?.includes(Role.SALES_STAFF) && !userRoles?.includes(Role.ADMIN)
+            ? { salesStaffId: userId }
+            : userRoles?.includes(Role.CUSTOMER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r as Role))
+              ? { customerId: userId }
+              : {}),
       }).exec(),
       customerCounts
         ? Promise.resolve(customerCounts.completedProjects)
@@ -931,25 +983,6 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
   } catch (error) {
     console.error('getDashboardSummary error:', error);
     // Return safe defaults so the dashboard doesn't crash
-    return {
-      totalProjects: 0,
-      activeProjects: 0,
-      completedProjects: 0,
-      pendingPayments: 0,
-      unpaidProjects: 0,
-      revenueThisMonth: 0,
-      totalRevenue: 0,
-      pendingAppointments: 0,
-      totalAppointmentsToday: 0,
-      todayAppointments: 0,
-      fabricationInProgress: 0,
-      conversionRate: 0,
-      pendingVisitReports: 0,
-      pendingCashPayments: 0,
-      totalUsers: 0,
-      pendingBlueprints: 0,
-      completedToday: 0,
-      pendingInstallationConfirmations: [],
-    };
+    return { ...EMPTY_DASHBOARD_SUMMARY };
   }
 }

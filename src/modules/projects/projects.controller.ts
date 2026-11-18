@@ -93,12 +93,12 @@ export const transitionProject = asyncHandler(async (req: Request, res: Response
 });
 
 export const getProjectByVisitReportId = asyncHandler(async (req: Request, res: Response) => {
-  const project = await projectsService.getProjectByVisitReportId(req.params.visitReportId as string);
+  const project = await projectsService.getProjectByVisitReportId(req.params.visitReportId as string, req.userId!, req.userRoles!);
   res.json({ success: true, data: project });
 });
 
 export const getProjectHistory = asyncHandler(async (req: Request, res: Response) => {
-  const items = await projectsService.getProjectHistory(req.params.id as string);
+  const items = await projectsService.getProjectHistory(req.params.id as string, req.userId!, req.userRoles!);
   res.set('Cache-Control', 'no-store');
   res.json({ success: true, data: items });
 });
