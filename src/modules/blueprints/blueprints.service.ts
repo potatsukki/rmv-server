@@ -18,7 +18,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../utils/logger.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { IBlueprint, IQuotationDeliveryFee } from '../../models/Blueprint.js';
-import { estimateProjectDeliveryFee } from '../delivery/delivery-fee.service.js';
+import { getDeliveryChargeInfo } from '../delivery/delivery-fee.service.js';
 import type {
   UploadBlueprintInput,
   RevisionUploadInput,
@@ -991,18 +991,12 @@ export async function requestRevision(
 
 // ── Engineer: Draft Autosave ──
 
-function parseCount(value: unknown) {
-  if (value === undefined || value === null || String(value).trim() === '') return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 /**
- * Recomputes the delivery / mobilization fee from the project site and the engineer's choices, so
- * the billed amount never depends on numbers sent by the browser. A changed amount needs a reason.
+ * The third-party delivery fee (e.g. Lalamove, booked by RMV outside the system) is the engineer's
+ * estimate, typed in by hand and billed as-is; nothing is computed from distance or vehicles.
  */
 export async function resolveDraftDeliveryFee(
-  project: Parameters<typeof estimateProjectDeliveryFee>[0],
+  project: { _id: unknown },
   quotation: BlueprintDraftQuotationInput | undefined,
   projectItemId?: string,
 ): Promise<IQuotationDeliveryFee | null | undefined> {
@@ -1010,85 +1004,41 @@ export async function resolveDraftDeliveryFee(
   if (!input) return undefined;
   if (input.enabled === false) return null;
 
-  const selection = {
-    haulingVehicle: input.haulingVehicle || undefined,
-    haulingTrips: parseCount(input.haulingTrips),
-    crewVehicle: input.crewVehicle || undefined,
-    crewDays: parseCount(input.crewDays),
-  };
-  const estimate = await estimateProjectDeliveryFee(project, {
-    ...selection,
-    projectItemId,
-    workingDays: parseWorkingDays(quotation?.workingDays),
-  });
-  if (!estimate.available && estimate.reason === 'charged_on_other_item') return null;
+  const chargeInfo = await getDeliveryChargeInfo(project._id, projectItemId);
+  if (!chargeInfo.chargedHere) return null;
 
-  const typedAmount = input.amount?.trim() ? asMoney(input.amount) : undefined;
-  const reason = input.overrideReason?.trim() || undefined;
-
-  if (!estimate.available) {
-    if (typedAmount === undefined) {
-      throw AppError.badRequest(`${estimate.message} Enter 0 if there is no delivery charge.`);
-    }
-    return {
-      distanceKm: null,
-      haulingVehicle: selection.haulingVehicle,
-      haulingTrips: Math.max(0, Math.floor(selection.haulingTrips ?? 0)),
-      haulingTripCost: 0,
-      hauling: 0,
-      crewVehicle: selection.crewVehicle,
-      crewDays: Math.max(0, Math.floor(selection.crewDays ?? 0)),
-      crewTripCost: 0,
-      crew: 0,
-      computedAmount: null,
-      amount: typedAmount,
-      overrideReason: reason || 'Entered manually (road distance unavailable)',
-      ratesSnapshot: [],
-      computedAt: new Date(),
-    };
-  }
-
-  const { breakdown } = estimate;
-  const amount = typedAmount ?? breakdown.computedAmount;
-  const overridden = Math.abs(amount - breakdown.computedAmount) >= 0.01;
-  if (overridden && !reason) {
-    throw AppError.badRequest('Give a reason for changing the computed delivery / mobilization fee.');
+  if (!input.amount?.trim()) {
+    throw AppError.badRequest('Enter the third-party delivery fee (0 if there is no delivery charge).');
   }
 
   return {
-    ...breakdown,
-    amount,
-    overrideReason: overridden ? reason : undefined,
+    distanceKm: null,
+    haulingTrips: 0,
+    haulingTripCost: 0,
+    hauling: 0,
+    crewDays: 0,
+    crewTripCost: 0,
+    crew: 0,
+    computedAmount: null,
+    amount: asMoney(input.amount),
+    ratesSnapshot: [],
     computedAt: new Date(),
   };
 }
 
+/** Whether this item carries the project's delivery fee (it is charged once, on the first item). */
 export async function getDeliveryFeeEstimate(
   projectId: string,
   actorId: string,
   actorRoles: string[],
-  query: {
-    projectItemId?: string;
-    haulingVehicle?: string;
-    haulingTrips?: string;
-    crewVehicle?: string;
-    crewDays?: string;
-    workingDays?: string;
-  },
+  query: { projectItemId?: string },
 ) {
   const project = actorRoles.includes(Role.ADMIN)
-    ? await Project.findById(projectId).select('engineerIds status deliveryType ocularAppointmentId appointmentId')
+    ? await Project.findById(projectId).select('engineerIds status')
     : await assertAssignedEngineerForProject(projectId, actorId);
   if (!project) throw AppError.notFound('Project not found');
 
-  return estimateProjectDeliveryFee(project, {
-    projectItemId: query.projectItemId,
-    haulingVehicle: query.haulingVehicle || undefined,
-    haulingTrips: parseCount(query.haulingTrips),
-    crewVehicle: query.crewVehicle || undefined,
-    crewDays: parseCount(query.crewDays),
-    workingDays: parseWorkingDays(query.workingDays),
-  });
+  return getDeliveryChargeInfo(project._id, query.projectItemId);
 }
 
 export async function getBlueprintDraft(projectId: string, actorId: string, projectItemId?: string) {

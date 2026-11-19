@@ -130,7 +130,8 @@ export const assignFabricationSchema = z.object({
 });
 
 export const assignDeliveryCrewSchema = z.object({
-  deliveryCrewIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).min(1, 'Select at least one crew member').max(20),
+  /** Installation crew; required for on-site installation only (delivery uses a third-party courier). */
+  deliveryCrewIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).max(20).default([]),
   /** Delivery / installation day (YYYY-MM-DD, Asia/Manila). */
   deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Choose the delivery / installation date'),
 });

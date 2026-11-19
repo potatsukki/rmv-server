@@ -302,19 +302,29 @@ describe('createFabricationUpdate', () => {
     expect(mockFabricationUpdateCreate).toHaveBeenCalled();
   });
 
-  it('requires a crew before Ready for Delivery on shop work', async () => {
-    mockProjectFindById.mockResolvedValue({
+  it('requires the delivery date (not a crew) before Ready for Delivery on shop work', async () => {
+    const shopProject = (deliverySchedule?: { date: string }) => ({
       _id: 'project-1', customerId: 'customer-1', title: 'Deliverable Project', status: ProjectStatus.FABRICATION,
       deliveryType: DeliveryType.SHOP_FABRICATED, fabricationLeadId: { toString: () => 'lead-1' },
-      fabricationAssistantIds: [], deliveryCrewIds: [], engineerIds: [], save: vi.fn(),
+      fabricationAssistantIds: [], deliveryCrewIds: [], deliverySchedule, engineerIds: [], save: vi.fn(),
     });
+    mockProjectFindById.mockResolvedValue(shopProject());
     mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.QUALITY_CHECK }) });
 
     await expect(createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.READY_FOR_DELIVERY, notes: 'Ready.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
-    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_CREW_REQUIRED });
+    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_CREW_REQUIRED, message: expect.stringContaining('Set the delivery date') });
+
+    // A third-party courier delivers, so no crew is needed once the date is set.
+    mockProjectFindById.mockResolvedValue(shopProject({ date: '2026-11-25' }));
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.READY_FOR_DELIVERY, notes: 'Ready.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+    expect(mockFabricationUpdateCreate).toHaveBeenCalled();
   });
 
   it('also requires the delivery date, not just the crew', async () => {
@@ -329,7 +339,7 @@ describe('createFabricationUpdate', () => {
       { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
-    )).rejects.toThrow('Assign the delivery / installation crew and date');
+    )).rejects.toThrow('Assign the installation crew and date');
   });
 
   it('lets the fabricator start a fully paid item without schedule confirmation', async () => {
@@ -460,7 +470,9 @@ describe('createFabricationUpdate', () => {
     expect(result.allowedTransitions).toEqual([FabricationStatus.FABRICATION]);
     expect(result.paymentGate.allPaid).toBe(true);
     expect(result.paymentGate.stageGates[FabricationStatus.FABRICATION].blocked).toBe(false);
-    expect(result.crewGate).toEqual({ hasCrew: false, hasDeliveryDate: false, gatedStatuses: ['installation', 'fabrication_installation', 'ready_for_delivery'] });
+    expect(result.crewGate).toEqual({
+      hasCrew: false, hasDeliveryDate: false, gatedStatuses: ['installation', 'fabrication_installation', 'ready_for_delivery'], crewRequired: true,
+    });
   });
 
   it.each([

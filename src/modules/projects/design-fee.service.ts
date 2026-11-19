@@ -12,7 +12,7 @@ import { sendPaymentVerifiedEmail } from '../notifications/email.service.js';
 import { getFeePolicyConfig, type OcularFeeOnProceed } from '../config/config.service.js';
 import { generateAndUploadReceipt, generateNextReceiptNumber } from '../payments/payments.service.js';
 import { OCULAR_TOLL_NOTE } from '../maps/maps.service.js';
-import { describeDeliveryFee } from '../delivery/delivery-rates.js';
+import { describeDeliveryFee, THIRD_PARTY_DELIVERY_LABEL } from '../delivery/delivery-rates.js';
 
 export const DESIGN_FEE_STAGE_PREFIX = 'design-fee-';
 export const REVISION_FEE_STAGE_PREFIX = 'revision-fee-';
@@ -629,7 +629,7 @@ export async function getProjectFeeSummary(projectId: string) {
   const deliveryFee = deliveryFees.length
     ? {
       amount: roundMoney(deliveryFees.reduce((sum, fee) => sum + Number(fee.amount), 0)),
-      label: deliveryFees.length === 1 ? describeDeliveryFee(deliveryFees[0]) : 'Delivery / Mobilization',
+      label: deliveryFees.length === 1 ? describeDeliveryFee(deliveryFees[0]) : THIRD_PARTY_DELIVERY_LABEL,
     }
     : null;
 

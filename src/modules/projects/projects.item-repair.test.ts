@@ -19,6 +19,7 @@ vi.mock('../../models/index.js', () => ({
     updateMany: mocks.projectItemUpdateMany,
   },
   Appointment: { findById: mocks.appointmentFindById },
+  FabricationUpdate: { aggregate: async () => [] },
   User: {},
   AuditLog: {},
   VisitReport: { find: mocks.visitReportFind, findById: mocks.visitReportFindById, findOne: vi.fn() },
