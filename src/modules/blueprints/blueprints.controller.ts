@@ -77,14 +77,7 @@ export const getDeliveryFeeEstimate = asyncHandler(async (req: Request, res: Res
     (req.params.projectId as string),
     req.userId!,
     req.userRoles!,
-    {
-      projectItemId: query.projectItemId,
-      haulingVehicle: query.haulingVehicle,
-      haulingTrips: query.haulingTrips,
-      crewVehicle: query.crewVehicle,
-      crewDays: query.crewDays,
-      workingDays: query.workingDays,
-    },
+    { projectItemId: query.projectItemId },
   );
   res.json({ success: true, data: estimate });
 });

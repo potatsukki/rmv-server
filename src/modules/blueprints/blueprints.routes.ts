@@ -80,7 +80,7 @@ router.get(
   ctrl.getQuotationHistory,
 );
 
-// System-computed delivery / mobilization fee for the costing (road km × vehicle rates).
+// Whether this item carries the project's third-party delivery fee (charged once per project).
 router.get(
   '/project/:projectId/delivery-fee-estimate',
   authenticate,

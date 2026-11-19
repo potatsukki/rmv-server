@@ -66,10 +66,9 @@ import {
 import { getProjectPaymentDue, NO_PAYMENT_DUE, type ProjectPaymentDue } from '../payments/payment-due.js';
 import { applyTargetFinishDate } from './target-finish.js';
 import {
-  ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree, manilaToday, readableDay,
+  ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree,
+  deliveryDateUnlockStage, isDeliveryDateUnlocked, manilaToday, readableDay,
 } from './fabrication-scheduling.js';
-import { resolveProjectSiteLocation } from '../delivery/delivery-fee.service.js';
-import { computeRoute } from '../maps/maps.service.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
 const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
@@ -2539,8 +2538,13 @@ async function assignDeliveryCrewLocked(
     throw AppError.badRequest('The delivery / installation crew can only be assigned before the project is completed');
   }
 
-  const crewIds = [...new Set(input.deliveryCrewIds)];
-  const crew = await User.find({
+  // Delivery is done by a third-party courier, so only on-site installation needs RMV's own crew.
+  const needsCrew = project.deliveryType === DeliveryType.ON_SITE_INSTALLATION;
+  const crewIds = needsCrew ? [...new Set(input.deliveryCrewIds)] : [];
+  if (needsCrew && crewIds.length === 0) {
+    throw AppError.badRequest('Select at least one installation crew member');
+  }
+  const crew = crewIds.length === 0 ? [] : await User.find({
     _id: { $in: crewIds },
     roles: Role.FABRICATION_STAFF,
     isActive: true,
@@ -2552,7 +2556,13 @@ async function assignDeliveryCrewLocked(
   // A delivery takes the crew's whole day. Re-saving an unchanged date skips the date rules.
   const previousDate = project.deliverySchedule?.date;
   const dateChanged = previousDate !== input.deliveryDate;
-  if (dateChanged) await assertDeliveryDateAllowed(input.deliveryDate);
+  if (dateChanged) {
+    if (!(await isDeliveryDateUnlocked(project))) {
+      const { label } = deliveryDateUnlockStage(project.deliveryType);
+      throw AppError.badRequest(`The delivery / installation date opens once fabrication reaches ${label}.`);
+    }
+    await assertDeliveryDateAllowed(input.deliveryDate);
+  }
   for (const staffId of [...new Set(crewIds.map((id) => id.toLowerCase()))].sort()) {
     await acquireStaffLock(
       locks,
@@ -2563,28 +2573,14 @@ async function assignDeliveryCrewLocked(
   }
   await assertDeliveryCrewFree(projectId, crewIds, input.deliveryDate);
 
-  // Travel estimate from the shop to the site pin; never blocks the assignment.
-  let distanceKm: number | null = project.deliverySchedule?.distanceKm ?? null;
-  let travelDurationMinutes: number | null = project.deliverySchedule?.travelDurationMinutes ?? null;
-  try {
-    const site = await resolveProjectSiteLocation(project);
-    if (site) {
-      const route = await computeRoute({ lat: site.lat, lng: site.lng });
-      distanceKm = route.distanceKm;
-      travelDurationMinutes = route.durationMinutes;
-    }
-  } catch (error) {
-    logger.warn(`Could not compute delivery travel time for project ${project._id}`, error);
-  }
-
   const previousCrewIds = (project.deliveryCrewIds || []).map((id) => id.toString());
   project.deliveryCrewIds = crewIds as unknown as Types.ObjectId[];
   project.deliverySchedule = {
     date: input.deliveryDate,
     scheduledBy: actorId as unknown as Types.ObjectId,
     scheduledAt: dateChanged ? new Date() : project.deliverySchedule?.scheduledAt ?? new Date(),
-    distanceKm,
-    travelDurationMinutes,
+    distanceKm: null,
+    travelDurationMinutes: null,
   };
   // A new date needs the customer's confirmation again.
   if (dateChanged && previousDate) {
@@ -2620,8 +2616,8 @@ async function assignDeliveryCrewLocked(
     await createAndSendNotification(
       crewId,
       NotificationCategory.FABRICATION,
-      'Delivery / Installation Assignment',
-      `You were assigned to the delivery / installation crew for project "${project.title}" on ${readableDay(input.deliveryDate)}.`,
+      'Installation Assignment',
+      `You were assigned to the installation crew for project "${project.title}" on ${readableDay(input.deliveryDate)}.`,
       link,
     );
   }
@@ -2630,8 +2626,10 @@ async function assignDeliveryCrewLocked(
     await createAndSendNotification(
       leadId,
       NotificationCategory.FABRICATION,
-      'Delivery / Installation Crew Assigned',
-      `The delivery / installation crew for project "${project.title}" was assigned.`,
+      needsCrew ? 'Installation Crew Assigned' : 'Delivery Date Set',
+      needsCrew
+        ? `The installation crew for project "${project.title}" was assigned for ${readableDay(input.deliveryDate)}.`
+        : `Delivery for project "${project.title}" is set on ${readableDay(input.deliveryDate)}.`,
       link,
     );
   }
@@ -2827,6 +2825,10 @@ export async function getProjectById(
   if (ocularVisitStatus) projectWithItems.ocularVisitStatus = ocularVisitStatus;
   if (consultation?.appointmentNumber) projectWithItems.appointmentNumber = consultation.appointmentNumber;
   if (ocularAppointmentNumber) projectWithItems.ocularAppointmentNumber = ocularAppointmentNumber;
+  if (ACTIVE_FABRICATION_STATUSES.includes(project.status as ProjectStatus)) {
+    projectWithItems.deliveryDateUnlocked = await isDeliveryDateUnlocked(project);
+    projectWithItems.deliveryDateUnlockStage = deliveryDateUnlockStage(project.deliveryType).label;
+  }
   return maskProjectTotalCostForActor(projectWithItems, actorId, actorRoles);
 }
 

@@ -56,6 +56,11 @@ export const CREW_GATED_STATUSES: FabricationStatus[] = [
   FabricationStatus.READY_FOR_DELIVERY,
 ];
 
+/** Only installation stages need RMV's own crew; Ready for Delivery goes out with a third-party courier. */
+export function deliveryCrewRequired(status: string) {
+  return status === FabricationStatus.INSTALLATION || status === FabricationStatus.FABRICATION_INSTALLATION;
+}
+
 function itemScopedQuery(projectId: string, projectItemId?: string) {
   return projectItemId
     ? { projectId, projectItemId }
@@ -132,13 +137,17 @@ export async function createFabricationUpdate(
     }
   }
 
-  // Workshop stages can run without a crew; delivery / installation needs one assigned.
+  // Workshop stages run without a schedule. Installation needs RMV's crew and the date; a delivery
+  // (third-party courier) needs the date only.
+  const crewRequired = deliveryCrewRequired(input.status);
   if (
     CREW_GATED_STATUSES.includes(input.status as FabricationStatus)
-    && (!(project.deliveryCrewIds || []).length || !project.deliverySchedule?.date)
+    && ((crewRequired && !(project.deliveryCrewIds || []).length) || !project.deliverySchedule?.date)
   ) {
     throw AppError.badRequest(
-      `Assign the delivery / installation crew and date before moving to ${input.status.replace(/_/g, ' ')}.`,
+      crewRequired
+        ? `Assign the installation crew and date before moving to ${input.status.replace(/_/g, ' ')}.`
+        : `Set the delivery date before moving to ${input.status.replace(/_/g, ' ')}.`,
       ErrorCode.FABRICATION_CREW_REQUIRED,
       { helpPath: '/help/projects-fabrication/fabrication-gates-and-payments#checklist' },
     );
@@ -654,7 +663,12 @@ export async function getLatestFabricationStatus(
     currentStatus,
     latestUpdate: latest ? normalizeFabricationUpdate(latest, deliveryType) : null,
     allowedTransitions,
-    crewGate: { hasCrew, hasDeliveryDate, gatedStatuses: CREW_GATED_STATUSES },
+    crewGate: {
+      hasCrew,
+      hasDeliveryDate,
+      gatedStatuses: CREW_GATED_STATUSES,
+      crewRequired: deliveryType === DeliveryType.ON_SITE_INSTALLATION,
+    },
     paymentGate: {
       allPaid,
       unpaidCount,

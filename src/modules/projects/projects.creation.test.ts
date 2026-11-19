@@ -71,7 +71,7 @@ vi.mock('../appointments/appointments.service.js', () => ({
 vi.mock('../../services/sales-notes.service.js', () => ({ syncAppointmentSalesNotes: mocks.syncSalesNotes }));
 const scheduling = vi.hoisted(() => ({
   assertFabricatorsFree: vi.fn(), assertDeliveryDateAllowed: vi.fn(), assertDeliveryCrewFree: vi.fn(),
-  resolveSite: vi.fn(), computeRoute: vi.fn(), acquireStaffLock: vi.fn(),
+  computeRoute: vi.fn(), acquireStaffLock: vi.fn(), isDeliveryDateUnlocked: vi.fn(),
 }));
 vi.mock('../appointments/sales-day-lock.js', () => ({
   withSalesDayLocks: (fn: (locks: { held: [] }) => Promise<unknown>) => fn({ held: [] }),
@@ -82,8 +82,8 @@ vi.mock('./fabrication-scheduling.js', async (importActual) => ({
   assertFabricatorsFree: scheduling.assertFabricatorsFree,
   assertDeliveryDateAllowed: scheduling.assertDeliveryDateAllowed,
   assertDeliveryCrewFree: scheduling.assertDeliveryCrewFree,
+  isDeliveryDateUnlocked: scheduling.isDeliveryDateUnlocked,
 }));
-vi.mock('../delivery/delivery-fee.service.js', () => ({ resolveProjectSiteLocation: scheduling.resolveSite }));
 vi.mock('../maps/maps.service.js', () => ({ computeRoute: scheduling.computeRoute }));
 
 import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
@@ -1193,19 +1193,21 @@ describe('assignDeliveryCrew', () => {
       engineerIds: [{ toString: () => actorId }],
       fabricationLeadId: { toString: () => 'lead-1' },
       fabricationAssistantIds: [], deliveryCrewIds: [],
+      deliveryType: DeliveryType.ON_SITE_INSTALLATION,
       save: vi.fn(),
     };
     mocks.projectFindById.mockResolvedValue(project);
     usersFound(2);
-    scheduling.resolveSite.mockResolvedValue({ lat: 14.5, lng: 121.2, address: 'Antipolo' });
-    scheduling.computeRoute.mockResolvedValue({ distanceKm: 18.2, durationMinutes: 45 });
+    scheduling.isDeliveryDateUnlocked.mockResolvedValue(true);
   });
 
   it('saves the crew and the delivery date without touching the project status', async () => {
     await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
 
     expect(project.deliveryCrewIds).toEqual(crewIds);
-    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25', distanceKm: 18.2, travelDurationMinutes: 45 });
+    // No drive time / distance is computed any more.
+    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25', distanceKm: null, travelDurationMinutes: null });
+    expect(scheduling.computeRoute).not.toHaveBeenCalled();
     expect(project.status).toBe(ProjectStatus.FABRICATION);
     expect(project.save).toHaveBeenCalledOnce();
     expect(scheduling.assertDeliveryDateAllowed).toHaveBeenCalledWith('2026-11-25');
@@ -1252,10 +1254,40 @@ describe('assignDeliveryCrew', () => {
     expect(project.save).not.toHaveBeenCalled();
   });
 
-  it('still saves when the travel time cannot be computed', async () => {
-    scheduling.computeRoute.mockRejectedValueOnce(new Error('ORS down'));
+  it('keeps the date locked until fabrication reaches the unlock stage', async () => {
+    scheduling.isDeliveryDateUnlocked.mockResolvedValue(false);
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('opens once fabrication reaches Welding / Assembly');
+    expect(project.save).not.toHaveBeenCalled();
+
+    project.deliveryType = DeliveryType.SHOP_FABRICATED;
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: [], deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('opens once fabrication reaches Quality Check');
+  });
+
+  it('lets an already-set date be re-saved (e.g. a crew change) while locked', async () => {
+    scheduling.isDeliveryDateUnlocked.mockResolvedValue(false);
+    project.deliverySchedule = { date: '2026-11-25' };
     await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
-    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25', distanceKm: null, travelDurationMinutes: null });
+    expect(project.save).toHaveBeenCalledOnce();
+  });
+
+  it('needs an installation crew for on-site installation', async () => {
+    await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: [], deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
+      .rejects.toThrow('Select at least one installation crew member');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('saves only the delivery date for shop work (third-party courier, no crew)', async () => {
+    project.deliveryType = DeliveryType.SHOP_FABRICATED;
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
+
+    expect(project.deliveryCrewIds).toEqual([]);
+    expect(project.deliverySchedule).toMatchObject({ date: '2026-11-25' });
+    expect(mocks.userFind).not.toHaveBeenCalled();
+    expect(scheduling.acquireStaffLock).not.toHaveBeenCalled();
+    const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
+    expect(notified).toEqual(['customer-1', 'lead-1']);
   });
 
   it('needs the fabrication team first', async () => {

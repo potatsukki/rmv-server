@@ -1,8 +1,9 @@
 import { format, parse } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
-import { Holiday, Project, User } from '../../models/index.js';
+import { FabricationUpdate, Holiday, Project, User } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { ProjectStatus } from '../../utils/constants.js';
+import { DeliveryType, FabricationStatus, ProjectStatus } from '../../utils/constants.js';
+import { fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
 
 const TZ = 'Asia/Manila';
 
@@ -93,4 +94,42 @@ export async function assertDeliveryCrewFree(projectId: string, crewIds: string[
     `${conflicts.join('; ')}. A delivery takes the crew's whole day; choose other crew or another date.`,
     ErrorCode.DELIVERY_CREW_CONFLICT,
   );
+}
+
+const STAGE_LABELS: Partial<Record<FabricationStatus, string>> = {
+  [FabricationStatus.WELDING_ASSEMBLY]: 'Welding / Assembly',
+  [FabricationStatus.QUALITY_CHECK]: 'Quality Check',
+};
+
+/**
+ * The stage that opens the delivery / installation date: the last workshop stage before the work
+ * leaves the shop (on-site: Welding / Assembly before Installation; shop: Quality Check before
+ * Ready for Delivery).
+ */
+export function deliveryDateUnlockStage(deliveryType?: string) {
+  const stage = deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? FabricationStatus.WELDING_ASSEMBLY
+    : FabricationStatus.QUALITY_CHECK;
+  return { stage, label: STAGE_LABELS[stage] ?? stage };
+}
+
+/** True when the latest stage reached is at or past the unlock stage. */
+export function stageReachesDeliveryUnlock(status: string | undefined, deliveryType?: string) {
+  if (!status) return false;
+  const order = fabricationStageOrder(deliveryType);
+  const reached = order.indexOf(normalizeFabricationStatus(status as FabricationStatus, deliveryType));
+  return reached >= 0 && reached >= order.indexOf(deliveryDateUnlockStage(deliveryType).stage);
+}
+
+/**
+ * The delivery / installation date can be set once any item (or the project-level track) has
+ * reached the unlock stage, so a project can't be scheduled while fabrication has barely started.
+ */
+export async function isDeliveryDateUnlocked(project: { _id: unknown; deliveryType?: string }) {
+  const latest = await FabricationUpdate.aggregate<{ _id: unknown; status: string }>([
+    { $match: { projectId: project._id } },
+    { $sort: { createdAt: -1 } },
+    { $group: { _id: { $ifNull: ['$projectItemId', null] }, status: { $first: '$status' } } },
+  ]);
+  return latest.some((entry) => stageReachesDeliveryUnlock(entry.status, project.deliveryType));
 }

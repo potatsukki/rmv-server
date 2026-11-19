@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** Config key for the per-vehicle delivery / mobilization rates (editable by admin). */
+/** Config key for the per-vehicle delivery rates; no longer used by quotations (kept for old data and settings). */
 export const DELIVERY_VEHICLE_RATES_KEY = 'delivery_vehicle_rates';
 
 export const deliveryVehicleRateSchema = z.object({
@@ -27,9 +27,17 @@ interface DeliveryFeeSummaryInput {
   ratesSnapshot?: Array<{ key?: string; label?: string }>;
 }
 
-/** e.g. "Delivery / Mobilization (18.4 km · Truck ×1 trip + crew 3 days)" for the contract and customer view. */
+/** Label of the engineer's manual courier fee (e.g. Lalamove booked by RMV outside the system). */
+export const THIRD_PARTY_DELIVERY_LABEL = 'Transport / Delivery (third party)';
+
+/**
+ * Contract and customer label. Manual third-party fees read THIRD_PARTY_DELIVERY_LABEL; older
+ * auto-computed fees keep "Delivery / Mobilization (18.4 km · Truck ×1 trip + crew 3 days)".
+ */
 export function describeDeliveryFee(fee?: DeliveryFeeSummaryInput | null) {
   if (!fee) return 'Other Fees';
+  const isLegacyComputed = typeof fee.distanceKm === 'number' || Boolean(fee.haulingTrips) || Boolean(fee.crewDays);
+  if (!isLegacyComputed) return THIRD_PARTY_DELIVERY_LABEL;
   const label = (key?: string) => fee.ratesSnapshot?.find((rate) => rate.key === key)?.label || key || '';
   const parts: string[] = [];
   if (fee.haulingTrips) parts.push(`${label(fee.haulingVehicle)} ×${fee.haulingTrips} trip${fee.haulingTrips === 1 ? '' : 's'}`.trim());
