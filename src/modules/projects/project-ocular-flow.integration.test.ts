@@ -294,6 +294,17 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     await expect(appointments.getAppointmentById(ocularId, unrelatedSalesId, [Role.SALES_STAFF]))
       .rejects.toThrow('no longer assigned');
 
+    // The visit page shows the project's measurements to the staff taking the visit (QA 11/20).
+    const asOcularStaff = await appointments.getAppointmentById(ocularId, otherSalesId, [Role.SALES_STAFF]);
+    expect(asOcularStaff.linkedProject.items).toHaveLength(1);
+    expect(asOcularStaff.linkedProject.items[0].lineItems[0]).toMatchObject({ label: 'Balcony railing' });
+
+    // The activity history opens for the project's own staff too (it showed "Unable to load"), not for others.
+    await expect(appointments.getAppointmentHistory(ocularId, salesId, [Role.SALES_STAFF])).resolves.toBeInstanceOf(Array);
+    await expect(appointments.getAppointmentHistory(ocularId, otherSalesId, [Role.SALES_STAFF])).resolves.toBeInstanceOf(Array);
+    await expect(appointments.getAppointmentHistory(ocularId, unrelatedSalesId, [Role.SALES_STAFF]))
+      .rejects.toThrow('no longer assigned');
+
     // It is listed on the ocular staff's Appointments page and stays off the project owner's.
     const listedIds = async (staffId: string) => (
       await appointments.listAppointments({ excludeProjectOculars: 'true' }, staffId, [Role.SALES_STAFF])

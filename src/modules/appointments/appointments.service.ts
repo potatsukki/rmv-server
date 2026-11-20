@@ -2,7 +2,7 @@ import { format, parse, isAfter, isBefore, startOfDay, addMinutes, addDays } fro
 import { toZonedTime } from 'date-fns-tz';
 import {
   Appointment, SlotLock, User, AuditLog, Holiday, SalesAvailability, Config, BlockedSlot,
-  VisitReport, VisitReportStatus, Project, AppointmentQueueCounter,
+  VisitReport, VisitReportStatus, Project, ProjectItem, AppointmentQueueCounter,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
@@ -3491,15 +3491,9 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
     actorRoles.includes(Role.SALES_STAFF)
     && !isPrivilegedStaff
     && appointment.salesStaffId?._id?.toString() !== actorId
+    && !(await salesStaffOwnsOcularProject(appointment, actorId))
   ) {
-    // The project's own sales staff can still view an ocular visit another staff member takes.
-    const ownsOcularProject = appointment.type === AppointmentType.OCULAR
-      && await Project.exists({
-        ocularAppointmentId: appointment._id,
-        salesStaffId: actorId,
-        status: { $ne: ProjectStatus.CANCELLED },
-      });
-    if (!ownsOcularProject) throw AppError.forbidden('This appointment is no longer assigned to you');
+    throw AppError.forbidden('This appointment is no longer assigned to you');
   }
 
   // Customers can only view their own
@@ -3531,13 +3525,14 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
       ocularAppointmentId: appointment._id,
       status: { $ne: ProjectStatus.CANCELLED },
     })
-      .select('_id projectNumber title')
+      .select('_id projectNumber title measurementUnit lineItems')
       .lean();
     if (linkedProject) {
       appointmentObject.linkedProject = {
         _id: String(linkedProject._id),
         projectNumber: linkedProject.projectNumber,
         title: linkedProject.title,
+        items: await getLinkedProjectMeasurements(linkedProject),
       };
     }
   }
@@ -3545,15 +3540,70 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
   return appointmentObject;
 }
 
+/** The project's own sales staff can still view an ocular visit another staff member takes. */
+async function salesStaffOwnsOcularProject(
+  appointment: { _id: Types.ObjectId; type?: AppointmentType | string },
+  actorId: string,
+) {
+  if (appointment.type !== AppointmentType.OCULAR) return false;
+  return Boolean(await Project.exists({
+    ocularAppointmentId: appointment._id,
+    salesStaffId: actorId,
+    status: { $ne: ProjectStatus.CANCELLED },
+  }));
+}
+
+/**
+ * Measurements already recorded on the project (Create Project "Component Measurements"),
+ * so the staff taking the ocular visit can verify them on site. Items without any are left out.
+ */
+async function getLinkedProjectMeasurements(project: {
+  _id: Types.ObjectId;
+  title?: string;
+  measurementUnit?: string;
+  lineItems?: unknown[];
+}) {
+  // Deleted items are left out by the model's own find hook (deletedAt: null).
+  const items = await ProjectItem.find({ projectId: project._id })
+    .select('_id title serviceType serviceTypeCustom measurementUnit lineItems')
+    .sort({ createdAt: 1 })
+    .lean();
+  if (items.length > 0) {
+    return items
+      .filter((item) => (item.lineItems?.length ?? 0) > 0)
+      .map((item) => ({
+        _id: String(item._id),
+        title: item.title,
+        serviceType: item.serviceType,
+        serviceTypeCustom: item.serviceTypeCustom,
+        measurementUnit: item.measurementUnit,
+        lineItems: item.lineItems,
+      }));
+  }
+  // Older single-item projects keep the measurements on the project itself.
+  if (!project.lineItems?.length) return [];
+  return [{
+    _id: String(project._id),
+    title: project.title,
+    measurementUnit: project.measurementUnit,
+    lineItems: project.lineItems,
+  }];
+}
+
 /**
  * Every recorded step of one appointment and its visit reports (who did what, and when).
- * Staff only; a sales staff member sees only appointments assigned to them.
+ * Staff only; a sales staff member sees the appointments assigned to them, plus an ocular
+ * visit of their own project that another staff member takes.
  */
 export async function getAppointmentHistory(appointmentId: string, actorId: string, actorRoles: Role[]) {
-  const appointment = await Appointment.findById(appointmentId).select('salesStaffId').lean();
+  const appointment = await Appointment.findById(appointmentId).select('salesStaffId type').lean();
   if (!appointment) throw AppError.notFound('Appointment not found');
   const isPrivilegedStaff = actorRoles.some((role) => [Role.ADMIN, Role.APPOINTMENT_AGENT, Role.CASHIER].includes(role));
-  if (!isPrivilegedStaff && appointment.salesStaffId?.toString() !== actorId) {
+  if (
+    !isPrivilegedStaff
+    && appointment.salesStaffId?.toString() !== actorId
+    && !(await salesStaffOwnsOcularProject(appointment, actorId))
+  ) {
     throw AppError.forbidden('This appointment is no longer assigned to you');
   }
 
