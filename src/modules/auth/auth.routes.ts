@@ -2,8 +2,9 @@ import { Router } from 'express';
 import * as authController from './auth.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { authenticate } from '../../middleware/auth.js';
-import { authLimiter, otpLimiter } from '../../middleware/rateLimiter.js';
+import { authLimiter, emailCheckLimiter, otpLimiter } from '../../middleware/rateLimiter.js';
 import {
+  emailAvailabilitySchema,
   registerSchema,
   verifyEmailSchema,
   loginSchema,
@@ -21,6 +22,7 @@ import {
 const router = Router();
 
 // Public routes
+router.get('/email-available', emailCheckLimiter, validate(emailAvailabilitySchema, 'query'), authController.emailAvailability);
 router.post('/register', authLimiter, validate(registerSchema), authController.register);
 router.post('/verify-email', otpLimiter, validate(verifyEmailSchema), authController.verifyEmail);
 router.post('/login', authLimiter, validate(loginSchema), authController.login);

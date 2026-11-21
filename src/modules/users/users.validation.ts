@@ -124,8 +124,11 @@ export const salesStaffLookupQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   slotCode: z.enum(SLOT_CODES).optional(),
   appointmentId: z.string().min(1).optional(),
-  /** What is being scheduled when there is no appointment yet (an ocular visit takes the whole day). */
+  /** What is being scheduled when there is no appointment yet. */
   appointmentType: z.nativeEnum(AppointmentType).optional(),
+  /** A new ocular visit's pinned site: one-way drive (minutes) and route km. Without them it takes the whole day. */
+  travelMinutes: z.coerce.number().int().min(0).max(600).optional(),
+  distanceKm: z.coerce.number().min(0).max(1000).optional(),
   search: z.string().trim().optional(),
 }).superRefine((value, ctx) => {
   if ((value.date && !value.slotCode) || (!value.date && value.slotCode)) {

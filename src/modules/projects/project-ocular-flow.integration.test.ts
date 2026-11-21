@@ -179,7 +179,7 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('blocks the ocular visit at any time on a day the sales staff has an active appointment; a completed one does not', async () => {
+  it('blocks the ocular visit only while its travel time and site visit overlap an active appointment; a completed one does not', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
@@ -193,20 +193,20 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // An ocular visit takes the whole day, so the active 9:00 consultation blocks every slot.
-    for (const slotCode of ['09:00', '13:00', '16:00']) {
+    // The site is 5 km / 18 min away: the staff is away from 18 + 45 min (traffic) before the visit
+    // until 1.5 hr + 63 min after it starts. So the active 9:00 consultation blocks 9:00 and 10:00.
+    for (const slotCode of ['09:00', '10:00']) {
       await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode, ...SITE } as never, salesId, [Role.SALES_STAFF]))
-        .rejects.toThrow(/whole day/);
+        .rejects.toThrow(/at this time|keeps (them away|the staff busy)/);
     }
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
 
-    // Once the 9:00 consultation is finished, only the completed appointments remain: the day is free.
-    await Appointment.updateOne({ _id: active._id }, { $set: { status: AppointmentStatus.COMPLETED } });
+    // 13:00 (away 11:57 AM–3:33 PM) fits around it, and the completed 13:00 consultation frees its time.
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('refuses an ocular visit on a day the sales staff already has a consultation, and allows the next free day', async () => {
+  it('refuses an ocular visit whose travel time runs into a consultation, and allows the next free day', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
@@ -215,9 +215,9 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // 9:00 booked → a 10:00 ocular visit the same day is refused (travel takes the whole day).
+    // 9:00 booked → a 10:00 ocular visit the same day is refused: the staff would leave at 8:57.
     await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
-      .rejects.toThrow(/whole day/);
+      .rejects.toThrow(/keeps (them away|the staff busy)/);
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-17', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR, date: '2026-11-17', slotCode: '10:00' })).toBe(1);
   });

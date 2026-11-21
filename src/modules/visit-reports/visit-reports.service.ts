@@ -14,7 +14,7 @@ import { createAndSendNotification, notifyBookingAgentAppointmentSuccessful, not
 import { sendOcularAddressNeededEmail, sendOcularFeeDueEmail, sendOcularVisitScheduledEmail } from '../notifications/email.service.js';
 import type { CreateVisitReportInput, UpdateVisitReportInput, ReturnVisitReportInput, ReopenVisitReportInput } from './visit-reports.validation.js';
 import type { Types } from 'mongoose';
-import { assertConsultationOcularSchedule, resolveOcularVisitData } from '../appointments/appointments.service.js';
+import { assertConsultationOcularSchedule, assertOcularWindowFree, resolveOcularVisitData } from '../appointments/appointments.service.js';
 import { withSalesDayLocks, type SalesDayLocks } from '../appointments/sales-day-lock.js';
 import { snapshotConsultationReport } from '../../services/consultation-snapshot.js';
 import { assertOcularAfterConsultation } from '../appointments/ocular-schedule-rules.js';
@@ -132,6 +132,11 @@ async function applyRecommendedOcularAddress(appointment: any, addressInput: Use
     { lat: address.lat!, lng: address.lng! },
   );
   if (!ocularVisitData) throw AppError.badRequest('Could not compute ocular visit data');
+  // A farther site keeps the sales staff away longer; it must still fit their day.
+  await assertOcularWindowFree(appointment, {
+    travelDurationMinutes: ocularVisitData.travelDurationMinutes,
+    distanceKm: ocularVisitData.distanceKm,
+  });
 
   appointment.latitude = ocularVisitData.latitude;
   appointment.longitude = ocularVisitData.longitude;
@@ -1864,6 +1869,12 @@ async function submitReportLocked(
         sourceConsultationAppointmentId: appt._id,
         status: { $nin: [AppointmentStatus.COMPLETED, AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
       }).select('_id').lean();
+      // With a pinned site only the visit's busy time (travel + 1.5 hr on site) must be free; without
+      // one (the customer sends the address later) it still needs the staff's whole day.
+      const pin = hasRecommendedOcularAddress ? report.recommendedOcularAddress as { lat: number; lng: number; formattedAddress?: string } : null;
+      const pinnedSite = pin
+        ? await resolveOcularVisitData(AppointmentType.OCULAR, pin.formattedAddress, { lat: pin.lat, lng: pin.lng })
+        : null;
       await assertConsultationOcularSchedule({
         customerId: String(report.customerId),
         salesStaffId: String(report.salesStaffId),
@@ -1872,6 +1883,7 @@ async function submitReportLocked(
         consultationAppointmentId: String(appt._id),
         existingOcularId: existingOcular?._id ? String(existingOcular._id) : undefined,
         locks,
+        route: pinnedSite ? { travelDurationMinutes: pinnedSite.travelDurationMinutes, distanceKm: pinnedSite.distanceKm } : undefined,
       });
     }
     // Reject sites outside mainland Luzon before the report or ocular appointment is saved.

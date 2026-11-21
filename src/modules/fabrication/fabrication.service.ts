@@ -57,6 +57,17 @@ export const CREW_GATED_STATUSES: FabricationStatus[] = [
 ];
 
 /** Only installation stages need RMV's own crew; Ready for Delivery goes out with a third-party courier. */
+/**
+ * The stage that waits for the customer's confirmation: Installation for on-site work (they confirm
+ * the installation schedule), Done for a delivery (they confirm the order was received) and for
+ * legacy projects without a delivery type.
+ */
+export function customerConfirmationGateStatus(deliveryType?: string): FabricationStatus {
+  return deliveryType === DeliveryType.ON_SITE_INSTALLATION
+    ? FabricationStatus.INSTALLATION
+    : FabricationStatus.DONE;
+}
+
 export function deliveryCrewRequired(status: string) {
   return status === FabricationStatus.INSTALLATION || status === FabricationStatus.FABRICATION_INSTALLATION;
 }
@@ -153,24 +164,24 @@ export async function createFabricationUpdate(
     );
   }
 
-  // Schedule confirmation gates completion, allowing paid on-site work to progress first.
-  // Legacy projects without a delivery type retain the previous confirmation gate at Done.
-  const requiresInstallationConfirmation = (
-    deliveryType === DeliveryType.ON_SITE_INSTALLATION && input.status === FabricationStatus.DONE
-  ) || (
-    !deliveryType && input.status === FabricationStatus.DONE
-  );
-  if (requiresInstallationConfirmation) {
+  // Customer confirmation gate: on-site work waits for the customer to confirm the installation
+  // schedule before Installation; a delivery waits for the customer to confirm the order was
+  // received before Done. Legacy projects without a delivery type keep the gate at Done.
+  if (input.status === customerConfirmationGateStatus(deliveryType)) {
     const projectItem = input.projectItemId
       ? await ProjectItem.findOne({ _id: input.projectItemId, projectId: input.projectId })
       : null;
-    const installationConfirmed = projectItem
+    const customerConfirmed = projectItem
       ? Boolean((projectItem as any).installationConfirmedAt)
       : Boolean((project as any).installationConfirmedAt);
 
-    if (!installationConfirmed) {
+    if (!customerConfirmed) {
       throw AppError.badRequest(
-        'Customer must confirm the installation schedule before marking the project as Done',
+        deliveryType === DeliveryType.ON_SITE_INSTALLATION
+          ? 'Customer must confirm the installation schedule before moving to Installation'
+          : deliveryType === DeliveryType.SHOP_FABRICATED
+            ? 'Customer must confirm they received the order before marking it as Done'
+            : 'Customer must confirm the installation schedule before marking the project as Done',
         ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED,
         { helpPath: '/help/projects-fabrication/fabrication-lifecycle#checklist' },
       );
@@ -231,7 +242,22 @@ export async function createFabricationUpdate(
       [FabricationStatus.DONE]: 'Done',
     };
 
-    if (input.status === FabricationStatus.READY_FOR_DELIVERY && !deliveryType) {
+    if (input.status === FabricationStatus.READY_FOR_DELIVERY && deliveryType === DeliveryType.SHOP_FABRICATED) {
+      // The customer confirms receipt in the project before the order can be marked Done.
+      await createAndSendNotification(
+        project.customerId,
+        NotificationCategory.FABRICATION,
+        'Your Order Is On Its Way',
+        `"${project.title}" is ready for delivery. Please confirm in the project once you receive your order.`,
+        `/projects/${project._id}/fabrication`,
+      );
+      await sendFabricationUpdateEmail(customer.email, {
+        projectTitle: project.title,
+        status: statusLabels[input.status] || input.status,
+        notes: input.notes,
+        projectId: project._id.toString(),
+      });
+    } else if (input.status === FabricationStatus.READY_FOR_DELIVERY && !deliveryType) {
       // Dedicated high-priority notification + email with CTA
       await createAndSendNotification(
         project.customerId,
@@ -655,11 +681,7 @@ export async function getLatestFabricationStatus(
     deliveryType: deliveryType || DeliveryType.SHOP_FABRICATED,
     lifecycleStatuses: getFabricationStageOrder(deliveryType),
     requiresInstallationConfirmation: deliveryType !== DeliveryType.SHOP_FABRICATED,
-    confirmationGateStatus: deliveryType === DeliveryType.ON_SITE_INSTALLATION
-      ? FabricationStatus.DONE
-      : !deliveryType
-        ? FabricationStatus.DONE
-        : null,
+    confirmationGateStatus: customerConfirmationGateStatus(deliveryType),
     currentStatus,
     latestUpdate: latest ? normalizeFabricationUpdate(latest, deliveryType) : null,
     allowedTransitions,

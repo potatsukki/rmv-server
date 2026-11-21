@@ -56,6 +56,11 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json({ success: true, data: result });
 });
 
+export const emailAvailability = asyncHandler(async (req: Request, res: Response) => {
+  const result = await authService.isEmailAvailable(String(req.query.email ?? ''));
+  res.json({ success: true, data: result });
+});
+
 /** Helper: extract client hints from request headers */
 function getHints(req: Request) {
   return extractClientHints(req.headers as Record<string, string | string[] | undefined>);

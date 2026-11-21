@@ -4,6 +4,7 @@ const {
   mockAppointmentFindById,
   mockAppointmentFindOne,
   mockAppointmentFind,
+  mockAppointmentFindOneAndUpdate,
   mockAppointmentCreate,
   mockAppointmentCountDocuments,
   mockAuditCreate,
@@ -28,6 +29,7 @@ const {
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
   mockAppointmentFind: vi.fn(),
+  mockAppointmentFindOneAndUpdate: vi.fn(),
   mockAppointmentCreate: vi.fn(),
   mockAppointmentCountDocuments: vi.fn(),
   mockAuditCreate: vi.fn(),
@@ -52,6 +54,7 @@ vi.mock('../../models/index.js', () => ({
     findById: mockAppointmentFindById,
     findOne: mockAppointmentFindOne,
     find: mockAppointmentFind,
+    findOneAndUpdate: mockAppointmentFindOneAndUpdate,
     create: mockAppointmentCreate,
     countDocuments: mockAppointmentCountDocuments,
   },
@@ -140,7 +143,9 @@ import {
   assertConsultationOcularSchedule,
   completeAppointment,
   prepareProjectOcularSchedule,
+  assertOcularWindowFree,
   getAvailableSlots,
+  ocularArrivalEstimate,
   reassignAppointmentSales,
   reviewAssignedAppointment,
   requestAppointment,
@@ -150,7 +155,10 @@ import {
   getCustomerQueueStatus,
   handlePaymongoPayment,
   listPendingOcularFees,
+  processAutomaticConsultationNoShows,
+  AUTO_NO_SHOW_NOTE,
 } from './appointments.service.js';
+import { notifyUsers } from '../notifications/socket.service.js';
 import {
   AppointmentAttendanceStatus,
   AppointmentStatus,
@@ -560,6 +568,58 @@ describe('getAvailableSlots', () => {
   });
 });
 
+describe('ocularArrivalEstimate (On The Way notification)', () => {
+  // 8:20 AM in Manila.
+  const now = new Date('2026-09-10T00:20:00.000Z');
+
+  it('gives the drive time up to the drive plus 45 min of traffic for a far site', () => {
+    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }, now))
+      .toBe(' Estimated arrival: around 9:05–9:50 AM.');
+    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }, new Date('2026-09-10T03:00:00.000Z')))
+      .toBe(' Estimated arrival: around 11:45 AM–12:30 PM.');
+  });
+
+  it('gives a single time for a site near the shop, and nothing without a route or for a consultation', () => {
+    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 10, distanceKm: 3 }, now))
+      .toBe(' Estimated arrival: around 8:30 AM.');
+    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR }, now)).toBe('');
+    expect(ocularArrivalEstimate({ type: AppointmentType.OFFICE, travelDurationMinutes: 10, distanceKm: 3 }, now)).toBe('');
+  });
+});
+
+describe('assertOcularWindowFree (a new site pin on a scheduled ocular visit)', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  const ocular = { _id: 'ocular-1', type: AppointmentType.OCULAR, salesStaffId: 'sales-a', date: '2026-09-10', slotCode: '13:00' };
+
+  it('rejects a farther site that would run into the staff member’s next appointment', async () => {
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { appointmentNumber: 'APT-1', slotCode: '15:00', type: AppointmentType.OFFICE, status: AppointmentStatus.CONFIRMED },
+    ]));
+
+    await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 45, distanceKm: 18 }))
+      .rejects.toThrow('the visit would keep the sales staff away 11:30 AM–4:00 PM, which runs into their 3:00 PM appointment (APT-1)');
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
+      salesStaffId: 'sales-a', date: '2026-09-10', _id: { $ne: 'ocular-1' },
+    }));
+  });
+
+  it('accepts a site near the shop that still fits before the next appointment', async () => {
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { appointmentNumber: 'APT-1', slotCode: '15:00', type: AppointmentType.OFFICE, status: AppointmentStatus.CONFIRMED },
+    ]));
+
+    // 10 min, 3 km: away 12:50–2:40 PM.
+    await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 10, distanceKm: 3 })).resolves.toBeUndefined();
+  });
+
+  it('skips an ocular visit with no sales staff yet', async () => {
+    await expect(assertOcularWindowFree({ ...ocular, salesStaffId: undefined }, { travelDurationMinutes: 45, distanceKm: 18 }))
+      .resolves.toBeUndefined();
+    expect(mockAppointmentFind).not.toHaveBeenCalled();
+  });
+});
+
 describe('sales staff availability per time slot', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -607,6 +667,34 @@ describe('sales staff availability per time slot', () => {
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
     expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
+  });
+
+  it('with a pinned site, takes a staff member out only while away for the ocular visit', async () => {
+    twoAvailableStaff();
+    // sales-a has a 1 PM ocular visit, 45 min drive, 18 km: away 11:30 AM–4:00 PM (45 min traffic each way).
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: 'sales-a', slotCode: '13:00', type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 },
+    ]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+
+    for (const code of ['11:00', '13:00', '14:00', '15:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
+    for (const code of ['09:00', '10:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
+  });
+
+  it('offers a pinned ocular visit wherever its travel time and site visit fit around a consultation', async () => {
+    twoAvailableStaff();
+    // sales-a has a 9:00 consultation. A new 45 min / 18 km ocular visit needs 1.5 hr + 45 min traffic each way.
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '09:00', type: AppointmentType.OFFICE }]));
+
+    // Query strings, as the route sends them.
+    const result = await getAvailableSlots({
+      date: '2026-09-10', type: AppointmentType.OCULAR, travelMinutes: '45', distanceKm: '18',
+    } as never);
+
+    // Leaving at 9:30 for an 11:00 visit still clashes with the 9:00–10:00 consultation.
+    for (const code of ['09:00', '10:00', '11:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
+    for (const code of ['13:00', '14:00', '15:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
   });
 
   it('offers an ocular visit only with staff whose whole day is free', async () => {
@@ -1209,6 +1297,123 @@ describe('updateConsultationAttendance', () => {
     vi.useRealTimers();
   });
 
+  it('checks in a customer who arrives after the consultation started automatically', async () => {
+    vi.useFakeTimers();
+    // 1:05 PM Manila for a 1:00 PM consultation: the scheduled time already started it.
+    vi.setSystemTime(new Date('2026-09-17T05:05:00.000Z'));
+    const appointment = noShowAppointment();
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockQueueCounterFindOneAndUpdate.mockResolvedValueOnce({ lastSeq: 3 });
+
+    await updateConsultationAttendance('appointment-1', { action: 'check_in' }, 'sales-1', [Role.SALES_STAFF]);
+
+    expect(appointment.attendanceStatus).toBe(AppointmentAttendanceStatus.IN_PROGRESS);
+    expect(appointment.actualArrivalAt).toEqual(new Date('2026-09-17T05:05:00.000Z'));
+    expect(appointment.queueNumber).toBe('Q-003');
+    expect(appointment.status).toBe(AppointmentStatus.CONFIRMED);
+
+    vi.useRealTimers();
+  });
+
+  it('refuses a second check-in once the customer has arrived', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T05:10:00.000Z'));
+    const appointment = noShowAppointment({
+      attendanceStatus: AppointmentAttendanceStatus.IN_PROGRESS,
+      actualArrivalAt: new Date('2026-09-17T05:02:00.000Z'),
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+
+    await expect(updateConsultationAttendance('appointment-1', { action: 'check_in' }, 'sales-1', [Role.SALES_STAFF]))
+      .rejects.toThrow('already checked in');
+
+    vi.useRealTimers();
+  });
+
+});
+
+describe('processAutomaticConsultationNoShows', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // A 1:00 PM consultation on Sep 17, 2026 (Manila is UTC+8).
+  const candidate = { _id: 'appointment-1', date: '2026-09-17', slotCode: '13:00' };
+  const mockCandidates = (items: unknown[]) => {
+    mockAppointmentFind.mockReturnValueOnce({ select: vi.fn().mockResolvedValue(items) });
+  };
+
+  it('closes a confirmed office consultation without check-in 15 minutes after its time', async () => {
+    mockCandidates([candidate]);
+    mockAppointmentFindOneAndUpdate.mockResolvedValueOnce({
+      ...candidate,
+      customerId: 'customer-1',
+      salesStaffId: 'sales-1',
+      appointmentNumber: 'APT-1',
+    });
+
+    const closed = await processAutomaticConsultationNoShows(new Date('2026-09-17T05:16:00.000Z'));
+
+    expect(closed).toBe(1);
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
+      type: AppointmentType.OFFICE,
+      status: AppointmentStatus.CONFIRMED,
+      actualArrivalAt: null,
+      date: '2026-09-17',
+    }));
+    expect(mockAppointmentFindOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: 'appointment-1', status: AppointmentStatus.CONFIRMED, actualArrivalAt: null }),
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: AppointmentStatus.COMPLETED,
+          attendanceStatus: AppointmentAttendanceStatus.NO_SHOW,
+          attendanceNotes: AUTO_NO_SHOW_NOTE,
+        }),
+      }),
+      { new: true },
+    );
+    expect(mockAuditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+      details: expect.objectContaining({ automatic: true, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW }),
+    }));
+    expect(mockAuditCreate.mock.calls[0]![0]).not.toHaveProperty('actorId');
+    expect(notifyUsers).toHaveBeenCalledWith(
+      ['customer-1'],
+      expect.anything(),
+      'Consultation Marked as No-Show',
+      expect.stringContaining('no check-in within 15 minutes'),
+      '/appointments/appointment-1',
+    );
+  });
+
+  it('waits until the 15-minute grace period has passed', async () => {
+    mockCandidates([candidate]);
+
+    const closed = await processAutomaticConsultationNoShows(new Date('2026-09-17T05:10:00.000Z'));
+
+    expect(closed).toBe(0);
+    expect(mockAppointmentFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('leaves the appointment open when a check-in landed first', async () => {
+    mockCandidates([candidate]);
+    mockAppointmentFindOneAndUpdate.mockResolvedValueOnce(null);
+
+    const closed = await processAutomaticConsultationNoShows(new Date('2026-09-17T05:16:00.000Z'));
+
+    expect(closed).toBe(0);
+    expect(mockAuditCreate).not.toHaveBeenCalled();
+    expect(notifyUsers).not.toHaveBeenCalled();
+  });
+
+  it('only looks at the current Manila date', async () => {
+    mockCandidates([]);
+
+    // 11:30 PM UTC on Sep 17 is already Sep 18 in Manila.
+    await processAutomaticConsultationNoShows(new Date('2026-09-17T23:30:00.000Z'));
+
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-09-18' }));
+  });
 });
 
 describe('ocular fee paid through PayMongo QR Ph', () => {

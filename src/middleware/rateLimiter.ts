@@ -22,6 +22,21 @@ export const authLimiter = rateLimit({
   },
 });
 
+/** Register page "email already registered" check: enough for typing, too low for bulk lookups. */
+export const emailCheckLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      code: 'RATE_LIMITED',
+      message: 'Too many email checks. Please wait 1 minute.',
+    },
+  },
+});
+
 export const otpLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,

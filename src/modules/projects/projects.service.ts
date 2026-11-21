@@ -6,7 +6,7 @@ import { PaymentPlan } from '../../models/Payment.js';
 import { Blueprint } from '../../models/Blueprint.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
-  ContractStatus, DeliveryType, ProjectStatus, AppointmentStatus, AppointmentAttendanceStatus, AppointmentType, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
+  ContractStatus, DeliveryType, FabricationStatus, ProjectStatus, AppointmentStatus, AppointmentAttendanceStatus, AppointmentType, Role, AuditAction, NotificationCategory, StaffAvailabilityStatus, ServiceType,
 } from '../../utils/constants.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
@@ -798,6 +798,11 @@ async function createProjectLocked(
     }
   }
 
+  // Resolve the site and fee before creating anything so a routing failure leaves no partial project.
+  // The route also sets how long the visit keeps its sales staff away (travel + 1.5 hr on site).
+  const ocularSite = input.ocularVisit
+    ? await resolveOcularVisitData(AppointmentType.OCULAR, input.ocularVisit.formattedAddress, input.ocularVisit.customerLocation)
+    : null;
   const salesStaffId = input.ocularVisit
     ? await prepareProjectOcularSchedule({
       customerId,
@@ -807,12 +812,9 @@ async function createProjectLocked(
       consultationDate: appointment?.type === AppointmentType.OFFICE ? appointment.date : undefined,
       locks,
       lockedBy: actorId,
+      route: ocularSite ? { travelDurationMinutes: ocularSite.travelDurationMinutes, distanceKm: ocularSite.distanceKm } : undefined,
     })
     : appointment?.salesStaffId || actorId;
-  // Resolve the site and fee before creating anything so a routing failure leaves no partial project.
-  const ocularSite = input.ocularVisit
-    ? await resolveOcularVisitData(AppointmentType.OCULAR, input.ocularVisit.formattedAddress, input.ocularVisit.customerLocation)
-    : null;
   const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);
 
   const projectNumber = await generateProjectNumber();
@@ -1132,7 +1134,9 @@ async function scheduleProjectOcularLocked(
   const customerId = project.customerId.toString();
   const projectSalesStaffId = project.salesStaffId.toString();
   // Another sales staff member may take the visit; the project itself stays with its own staff.
-  // prepareProjectOcularSchedule checks the chosen person is an active, free sales staff member.
+  // prepareProjectOcularSchedule checks the chosen person is an active sales staff member who is
+  // free for the visit's busy time: from leaving the shop until back, from the site's route.
+  const ocularSite = await resolveOcularVisitData(AppointmentType.OCULAR, input.formattedAddress, input.customerLocation);
   const salesStaffId = await prepareProjectOcularSchedule({
     customerId,
     date: input.date,
@@ -1141,9 +1145,9 @@ async function scheduleProjectOcularLocked(
     consultationDate: sourceAppointment?.date,
     locks,
     lockedBy: actorId,
+    route: ocularSite ? { travelDurationMinutes: ocularSite.travelDurationMinutes, distanceKm: ocularSite.distanceKm } : undefined,
   });
   const ocularDelegated = salesStaffId !== projectSalesStaffId;
-  const ocularSite = await resolveOcularVisitData(AppointmentType.OCULAR, input.formattedAddress, input.customerLocation);
   const ocularFeePending = Boolean(ocularSite && !ocularSite.ocularFeeBreakdown.isWithinNCR && ocularSite.ocularFee > 0);
   if (ocularSite?.formattedAddress) project.siteAddress = ocularSite.formattedAddress;
 
@@ -2601,11 +2605,15 @@ async function assignDeliveryCrewLocked(
 
   const link = `/projects/${project._id}`;
   if (dateChanged) {
+    // On-site: the customer confirms this schedule before Installation. Delivery: they confirm
+    // once the order is received (before Done).
     await createAndSendNotification(
       project.customerId.toString(),
       NotificationCategory.FABRICATION,
-      'Delivery / Installation Scheduled',
-      `Delivery / installation for "${project.title}" is scheduled on ${readableDay(input.deliveryDate)}. Please open the project and confirm the schedule.`,
+      needsCrew ? 'Installation Scheduled' : 'Delivery Scheduled',
+      needsCrew
+        ? `Installation for "${project.title}" is scheduled on ${readableDay(input.deliveryDate)}. Please open the project and confirm the schedule.`
+        : `Delivery for "${project.title}" is scheduled on ${readableDay(input.deliveryDate)}. Please confirm in the project once you receive your order.`,
       `${link}/fabrication`,
     );
   }
@@ -3642,6 +3650,24 @@ export async function confirmInstallation(
     throw AppError.notFound('Project item not found');
   }
 
+  // A delivery is confirmed when the customer has received the order, so only once it has left
+  // the shop as Ready for Delivery (the courier hands it over before the team marks it Done).
+  const isDelivery = project.deliveryType === DeliveryType.SHOP_FABRICATED;
+  const alreadyConfirmed = selectedItem
+    ? Boolean((selectedItem as any).installationConfirmedAt)
+    : Boolean((project as any).installationConfirmedAt);
+  if (isDelivery && !alreadyConfirmed) {
+    const latest = await FabricationUpdate.findOne({
+      projectId: project._id,
+      $or: projectItemId
+        ? [{ projectItemId }]
+        : [{ projectItemId: { $exists: false } }, ...(selectedItem ? [{ projectItemId: selectedItem._id }] : [])],
+    }).sort({ createdAt: -1 }).select('status').lean();
+    if (latest?.status !== FabricationStatus.READY_FOR_DELIVERY) {
+      throw AppError.badRequest('You can confirm once your order is out for delivery.');
+    }
+  }
+
   if (selectedItem) {
     if ((selectedItem as any).installationConfirmedAt) {
       return attachProjectItems(project);
@@ -3680,14 +3706,24 @@ export async function confirmInstallation(
   // Notify fabrication lead and all admin
   const customerRef = project.customerId as any;
   const customerName = `${customerRef.firstName} ${customerRef.lastName}`;
+  const confirmedTitle = selectedItem?.title || project.title;
+  const isOnSite = project.deliveryType === DeliveryType.ON_SITE_INSTALLATION;
+  const confirmationTitle = isDelivery ? 'Order Received' : 'Installation Confirmed';
+  const confirmationSummary = isDelivery
+    ? `Customer ${customerName} confirmed receiving the order "${confirmedTitle}".`
+    : `Customer ${customerName} confirmed installation for "${confirmedTitle}".`;
 
   if (project.fabricationLeadId) {
     const leadId = (project.fabricationLeadId as any)._id ?? project.fabricationLeadId;
     await createAndSendNotification(
       leadId,
       NotificationCategory.PROJECT,
-      'Installation Confirmed',
-      `Customer ${customerName} has confirmed the installation schedule for "${selectedItem?.title || project.title}". You may now proceed to mark it as Done.`,
+      confirmationTitle,
+      isDelivery
+        ? `Customer ${customerName} has confirmed receiving the order "${confirmedTitle}". You may now mark it as Done.`
+        : isOnSite
+          ? `Customer ${customerName} has confirmed the installation schedule for "${confirmedTitle}". You may now proceed to Installation.`
+          : `Customer ${customerName} has confirmed the installation schedule for "${confirmedTitle}". You may now proceed to mark it as Done.`,
       buildProjectItemLink(project._id.toString(), 'fabrication', selectedItem?._id?.toString()),
     );
   }
@@ -3695,16 +3731,16 @@ export async function confirmInstallation(
   await notifyRole(
     Role.ADMIN,
     NotificationCategory.PROJECT,
-    'Installation Confirmed',
-    `Customer ${customerName} confirmed installation for "${selectedItem?.title || project.title}".`,
+    confirmationTitle,
+    confirmationSummary,
     buildProjectItemLink(project._id.toString(), 'fabrication', selectedItem?._id?.toString()),
   );
   if (project.salesStaffId) {
     await createAndSendNotification(
       (project.salesStaffId as any)._id ?? project.salesStaffId,
       NotificationCategory.PROJECT,
-      'Installation Confirmed',
-      `Customer ${customerName} confirmed installation for "${selectedItem?.title || project.title}".`,
+      confirmationTitle,
+      confirmationSummary,
       buildProjectItemLink(project._id.toString(), 'fabrication', selectedItem?._id?.toString()),
     );
   }

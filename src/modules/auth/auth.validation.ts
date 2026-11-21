@@ -48,6 +48,11 @@ export const forgotPasswordSchema = z.object({
   email: z.string().email().toLowerCase().trim(),
 });
 
+/** Register page: live "email already registered" check (query string). */
+export const emailAvailabilitySchema = z.object({
+  email: z.string().trim().email('Invalid email address'),
+});
+
 export const resetPasswordSchema = z.object({
   email: z.string().email().toLowerCase().trim(),
   otp: z.string().length(6),
