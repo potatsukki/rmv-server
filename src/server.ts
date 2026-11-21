@@ -8,6 +8,7 @@ import { processPaymentReminders } from './jobs/paymentReminders.js';
 import { processContractExpiries } from './jobs/contractExpiry.js';
 import { processAvailabilityShiftReminders } from './jobs/availabilityShiftReminders.js';
 import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
+import { processAutomaticConsultationNoShows } from './modules/appointments/appointments.service.js';
 import { seedDefaultConfigs } from './modules/config/config.service.js';
 import { backfillPublicIdentifiers } from './services/publicIdentifierBackfill.js';
 import { backfillInstallmentStageTexts } from './services/paymentStageBackfill.js';
@@ -95,6 +96,12 @@ async function startServer(): Promise<void> {
       } catch (error) {
         logger.error('Consultation attendance automation error:', error);
       }
+      try {
+        // 15 minutes after the scheduled time without a check-in → No Show.
+        await processAutomaticConsultationNoShows(new Date());
+      } catch (error) {
+        logger.error('Automatic no-show processor error:', error);
+      }
     }, 60 * 1000); // every minute
 
     // Run contract check once on startup
@@ -109,6 +116,9 @@ async function startServer(): Promise<void> {
       (message, error) => logger.error(message, error),
     ).catch(err =>
       logger.error('Initial consultation attendance automation failed:', err)
+    );
+    processAutomaticConsultationNoShows(new Date()).catch(err =>
+      logger.error('Initial automatic no-show check failed:', err)
     );
 
     // Start HTTP server

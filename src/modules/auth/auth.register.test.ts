@@ -29,7 +29,7 @@ vi.mock('../notifications/email.service.js', () => ({
 vi.mock('../../config/firebase.js', () => ({ verifyFirebaseIdToken: mocks.verifyFirebaseIdToken }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
-import { googleAuth, googleComplete, register } from './auth.service.js';
+import { googleAuth, googleComplete, isEmailAvailable, register } from './auth.service.js';
 import { ErrorCode } from '../../utils/appError.js';
 
 function makeUser(overrides: Record<string, unknown> = {}) {
@@ -103,6 +103,32 @@ describe('register', () => {
     mocks.userFindOne.mockResolvedValue(makeUser({ isEmailVerified: true }));
 
     await expect(register(registerInput as never)).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_ENTRY });
+  });
+});
+
+describe('isEmailAvailable', () => {
+  function mockLookup(user: Record<string, unknown> | null) {
+    const lean = vi.fn().mockResolvedValue(user);
+    mocks.userFindOne.mockReturnValue({ select: vi.fn().mockReturnValue({ lean }) });
+  }
+
+  it('reports a verified account as taken and normalizes the email', async () => {
+    mockLookup({ isEmailVerified: true });
+
+    await expect(isEmailAvailable('  Tester@Example.com ')).resolves.toEqual({ available: false });
+    expect(mocks.userFindOne).toHaveBeenCalledWith({ email: 'tester@example.com' });
+  });
+
+  it('lets an unverified signup be registered again', async () => {
+    mockLookup({ isEmailVerified: false });
+
+    await expect(isEmailAvailable('tester@example.com')).resolves.toEqual({ available: true });
+  });
+
+  it('reports an unknown email as available', async () => {
+    mockLookup(null);
+
+    await expect(isEmailAvailable('new@example.com')).resolves.toEqual({ available: true });
   });
 });
 

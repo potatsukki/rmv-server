@@ -27,10 +27,15 @@ import {
   appointmentsConflict,
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
+  findActiveSalesAssignment,
+  formatOcularBusyWindow,
+  legMinutes,
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
   SALES_SLOT_FREEING_STATUSES,
+  ocularRouteFromQuery,
+  type OcularRoute,
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import { acquireCustomerScheduleLock, acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
@@ -67,8 +72,8 @@ export async function assertBookingReadyForGcashApproval(appointment: import('..
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
   if (!appointment.salesStaffId) throw AppError.badRequest('Booking has no assigned sales staff');
   if (appointment.date < format(toZonedTime(new Date(), TZ), 'yyyy-MM-dd')) throw AppError.badRequest('Booking date has passed. Resolve the schedule before approval.');
-  await assertSlotAvailable(appointment.date, appointment.slotCode, appointment.type, appointment._id.toString());
-  await assertSalesAvailable(appointment.salesStaffId.toString(), appointment.date, appointment.slotCode, appointment.type, appointment._id.toString());
+  await assertSlotAvailable(appointment.date, appointment.slotCode, appointment.type, appointment._id.toString(), ocularRouteOf(appointment));
+  await assertSalesAvailable(appointment.salesStaffId.toString(), appointment.date, appointment.slotCode, appointment.type, appointment._id.toString(), ocularRouteOf(appointment));
 }
 
 function formatQueueNumber(sequence: number) {
@@ -518,6 +523,8 @@ export async function prepareProjectOcularSchedule(input: {
   /** Holds the staff member's day until the caller has saved the ocular appointment. */
   locks?: SalesDayLocks;
   lockedBy?: string;
+  /** The pinned site's route, so the staff is only busy from leaving the shop until back. */
+  route?: OcularRoute;
 }): Promise<string> {
   assertOcularAfterConsultation(input.date, input.consultationDate);
   // The customer's schedule stays locked until the caller has saved the ocular appointment.
@@ -531,17 +538,17 @@ export async function prepareProjectOcularSchedule(input: {
     audience: 'staff',
   });
   await assertDateAvailable(input.date);
-  const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR);
+  const freeSalesStaffIds = await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, undefined, input.route);
   const salesStaffId = input.salesStaffId || freeSalesStaffIds[0];
   if (!salesStaffId) throw AppError.badRequest('No sales staff available for this ocular visit');
   await acquireSalesDayLock(input.locks, salesStaffId, input.date, input.lockedBy || salesStaffId);
-  await assertSalesAvailable(salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR);
+  await assertSalesAvailable(salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR, undefined, input.route);
   return salesStaffId;
 }
 
 /**
  * The same checks for an ocular visit that a consultation report schedules (or moves): a real
- * slot on an open date, and a sales staff member with no other appointment at that time. The source
+ * slot on an open date, and a sales staff member free for the visit's busy time. The source
  * consultation and the ocular visit being moved never block themselves.
  */
 export async function assertConsultationOcularSchedule(input: {
@@ -553,6 +560,8 @@ export async function assertConsultationOcularSchedule(input: {
   existingOcularId?: string;
   /** Holds the staff member's day until the caller has saved the ocular appointment. */
   locks?: SalesDayLocks;
+  /** The pinned site's route, so the staff is only busy from leaving the shop until back. */
+  route?: OcularRoute;
 }): Promise<void> {
   if (!(SLOT_CODES as readonly string[]).includes(input.slotCode)) {
     throw AppError.badRequest('Choose a valid ocular visit time.', ErrorCode.VALIDATION_ERROR);
@@ -569,9 +578,36 @@ export async function assertConsultationOcularSchedule(input: {
     audience: 'staff',
   });
   await assertDateAvailable(input.date);
-  await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
+  await assertSlotAvailable(input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId, input.route);
   await acquireSalesDayLock(input.locks, input.salesStaffId, input.date, input.salesStaffId);
-  await assertSalesAvailable(input.salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId);
+  await assertSalesAvailable(input.salesStaffId, input.date, input.slotCode, AppointmentType.OCULAR, input.existingOcularId, input.route);
+}
+
+/**
+ * A new site pin on a scheduled ocular visit must still fit its sales staff's day: a farther site
+ * keeps them away longer (travel there and back), so it must not run into their other appointments.
+ * The first pin always fits, because a visit without one held the staff's whole day.
+ */
+export async function assertOcularWindowFree(
+  appointment: { _id: unknown; type?: string; salesStaffId?: unknown; date: string; slotCode: string },
+  route: OcularRoute,
+): Promise<void> {
+  if (appointment.type !== AppointmentType.OCULAR || !appointment.salesStaffId) return;
+  const clash = await findActiveSalesAssignment(
+    String(appointment.salesStaffId),
+    String(appointment._id),
+    appointment.date,
+    appointment.slotCode,
+    AppointmentType.OCULAR,
+    route,
+  );
+  if (!clash) return;
+  const away = formatOcularBusyWindow({ type: AppointmentType.OCULAR, slotCode: appointment.slotCode, ...route });
+  const other = `${formatSlotTime(clash.slotCode)} appointment${clash.appointmentNumber ? ` (${clash.appointmentNumber})` : ''}`;
+  throw AppError.conflict(
+    `This site is farther from the shop: the visit would keep the sales staff away ${away ?? 'longer'}, which runs into their ${other}. Please ask your sales staff to reschedule the ocular visit first.`,
+    ErrorCode.SLOT_LOCKED,
+  );
 }
 
 async function assertDateAvailable(dateStr: string): Promise<void> {
@@ -596,9 +632,15 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
   }
 }
 
+/** The route an ocular appointment was saved with, so a move or assignment checks its real busy time. */
+function ocularRouteOf(appointment: { type?: string; travelDurationMinutes?: number | null; distanceKm?: number | null }): OcularRoute | undefined {
+  if (appointment.type !== AppointmentType.OCULAR) return undefined;
+  return { travelDurationMinutes: appointment.travelDurationMinutes, distanceKm: appointment.distanceKm };
+}
+
 /**
- * Staff members the unassigned requests will need. Each ocular visit needs someone for the whole
- * day; consultations in different slots can share one person, so only the busiest slot counts.
+ * Staff members the unassigned requests will need. Each ocular visit needs someone of its own;
+ * consultations in different slots can share one person, so only the busiest slot counts.
  */
 function staffNeededForUnassigned(unassigned: Array<{ type?: string; slotCode?: string }>): number {
   const perSlot = new Map<string, number>();
@@ -613,11 +655,13 @@ function staffNeededForUnassigned(unassigned: Array<{ type?: string; slotCode?: 
 async function getSlotAvailability(
   dateStr: string,
   slotCode: string,
-  /** Office consultation or ocular visit: an ocular visit needs a staff member's whole day. */
+  /** Office consultation or ocular visit: an ocular visit keeps its staff away for travel + 1.5 hr. */
   type: AppointmentType | string,
   appointmentId?: string,
   /** Only count this sales staff (e.g. the project's own staff scheduling its ocular visit). */
   onlySalesStaffId?: string,
+  /** Ocular only: the site's route. Without one the ocular visit needs a staff member's whole day. */
+  route?: OcularRoute,
 ) {
   // Sales staff are available by default unless an admin marked them Unavailable or On Leave.
   const salesStaff = await User.find({
@@ -657,11 +701,10 @@ async function getSlotAvailability(
   if (eligibleIds.size === 0) return { available: false, remaining: 0 };
 
   // A sales staff member is taken when one of their appointments on this date clashes with the
-  // new one (appointmentsConflict): a consultation in an overlapping slot, or an ocular visit,
-  // which takes the whole day. So a consultation slot never counts someone with an ocular visit
-  // that day, and an ocular visit only counts people with nothing else that day. Cancelled,
-  // completed and no-show appointments free their time. Unassigned requests that clash will
-  // need staff of their own, so they use some up too.
+  // new one (appointmentsConflict): their busy times overlap. An ocular visit keeps its staff away
+  // from leaving the shop until getting back (travel + traffic allowance + 1.5 hr on site), or the
+  // whole day when it has no route yet. Cancelled, completed and no-show appointments free their
+  // time. Unassigned requests that clash will need staff of their own, so they use some up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
     status: { $nin: SALES_SLOT_FREEING_STATUSES },
@@ -669,9 +712,9 @@ async function getSlotAvailability(
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
   const sameDayAppointments = await Appointment.find(appointmentFilter)
-    .select('salesStaffId slotCode type')
+    .select('salesStaffId slotCode type travelDurationMinutes distanceKm')
     .lean();
-  const incoming = { type, slotCode };
+  const incoming = { type, slotCode, ...route };
   const scheduledAppointments = sameDayAppointments
     .filter((appointment) => appointmentsConflict(incoming, appointment));
   const assignedStaffIds = new Set(
@@ -693,17 +736,19 @@ async function assertSlotAvailable(
   slotCode: string,
   type: string,
   appointmentId?: string,
+  /** Ocular only: the site's route (see getSlotAvailability). */
+  route?: OcularRoute,
 ): Promise<string[]> {
   const blocked = await BlockedSlot.exists({ date: dateStr, slotCode, type });
   if (blocked) {
     throw AppError.conflict('This slot has been blocked by an administrator', ErrorCode.SLOT_LOCKED);
   }
 
-  const capacity = await getSlotAvailability(dateStr, slotCode, type, appointmentId);
+  const capacity = await getSlotAvailability(dateStr, slotCode, type, appointmentId, undefined, route);
   if (!capacity.available) {
     throw AppError.conflict(
       type === AppointmentType.OCULAR
-        ? 'No sales staff is available for this date. An ocular visit takes a sales staff member\'s whole day. Please choose another date.'
+        ? 'No sales staff is free for this ocular visit time. An ocular visit keeps the staff busy from leaving the shop until they get back (travel, traffic allowance and 1.5 hr on site). Please choose another time or date.'
         : 'No sales staff is available for this date and time. Please choose another schedule.',
       ErrorCode.SLOT_LOCKED,
     );
@@ -718,6 +763,8 @@ async function assertSalesAvailable(
   appointmentType: AppointmentType,
   /** The appointment being assigned or moved, so it never blocks itself. */
   appointmentId?: string,
+  /** Ocular only: the site's route, so only the visit's busy time counts (none: the whole day). */
+  route?: OcularRoute,
 ): Promise<void> {
   const salesUser = await User.findOne({
     _id: salesId,
@@ -737,6 +784,7 @@ async function assertSalesAvailable(
     slotCode,
     appointmentType,
     appointmentId,
+    route,
   });
 
   if (!eligibility.assignmentEligible) {
@@ -878,17 +926,21 @@ async function releaseSlotLock(
 export async function getAvailableSlots(query: AvailableSlotsQuery) {
   const { date, type, salesStaffId } = query;
   await assertDateAvailable(date);
+  // A new ocular visit with a pinned site only needs its busy time free (travel there and back,
+  // traffic allowance, 1.5 hr on site); without a route it needs the whole day.
+  const route = type === AppointmentType.OCULAR
+    ? ocularRouteFromQuery(query.travelMinutes, query.distanceKm)
+    : undefined;
 
-  // A sales staff member is free for a consultation in every slot that doesn't overlap one of
-  // their appointments, unless they have an ocular visit that day; an ocular visit needs their
-  // whole day free. Also check admin/agent blocked slots. With salesStaffId, only that staff
-  // member counts.
+  // A sales staff member is free in every slot whose busy time doesn't overlap one of their
+  // appointments (an ocular visit keeps them away from leaving the shop until back). Also check
+  // admin/agent blocked slots. With salesStaffId, only that staff member counts.
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
       const blocked = await BlockedSlot.exists({ date, slotCode, type });
       const capacity = blocked
         ? { available: false, remaining: 0 }
-        : await getSlotAvailability(date, slotCode, type, undefined, salesStaffId);
+        : await getSlotAvailability(date, slotCode, type, undefined, salesStaffId, route);
       return {
         slotCode,
         time: formatSlotTime(slotCode),
@@ -1163,6 +1215,7 @@ async function reassignAppointmentSalesLocked(
     appointment.slotCode as SlotCode,
     appointment.type,
     appointment._id.toString(),
+    ocularRouteOf(appointment),
   );
 
   if (appointment.type === AppointmentType.OCULAR && appointment.status !== AppointmentStatus.REQUESTED) {
@@ -1326,6 +1379,7 @@ export async function reviewAssignedAppointment(
     appointment.slotCode as SlotCode,
     appointment.type,
     appointment._id.toString(),
+    ocularRouteOf(appointment),
   );
   appointmentStateMachine.assertTransition(appointment.status, AppointmentStatus.CONFIRMED);
 
@@ -1846,6 +1900,11 @@ async function customerSubmitOcularLocationLocked(
   if (!ocularVisitData) {
     throw AppError.badRequest('Could not compute ocular visit data');
   }
+  // A farther site keeps the sales staff away longer; it must still fit their day.
+  await assertOcularWindowFree(appointment, {
+    travelDurationMinutes: ocularVisitData.travelDurationMinutes,
+    distanceKm: ocularVisitData.distanceKm,
+  });
 
   appointment.latitude = ocularVisitData.latitude;
   appointment.longitude = ocularVisitData.longitude;
@@ -1967,6 +2026,7 @@ export async function agentFinalizeOcular(
     appointment.slotCode as SlotCode,
     appointment.type,
     appointment._id.toString(),
+    ocularRouteOf(appointment),
   );
 
   // Lock slot for ocular
@@ -2240,11 +2300,32 @@ export async function updateVisitStatus(
     appointment.customerId,
     NotificationCategory.APPOINTMENT,
     meta.title,
-    `Your sales staff is ${meta.statusLabel} for your ${appointment.type} appointment on ${appointment.date}.`,
+    `Your sales staff is ${meta.statusLabel} for your ${appointment.type} appointment on ${appointment.date}.${
+      newStatus === AppointmentStatus.ON_THE_WAY ? ocularArrivalEstimate(appointment) : ''
+    }`,
     `/appointments/${appointment._id}`,
   );
 
   return appointment;
+}
+
+/**
+ * " Estimated arrival: around 9:05–9:50 AM." for an ocular visit whose staff just left: the drive
+ * time, up to the drive plus the traffic allowance (a site near the shop gets a single time).
+ */
+export function ocularArrivalEstimate(
+  appointment: { type?: string; travelDurationMinutes?: number | null; distanceKm?: number | null },
+  now = new Date(),
+): string {
+  const travel = appointment.travelDurationMinutes;
+  if (appointment.type !== AppointmentType.OCULAR || typeof travel !== 'number' || !Number.isFinite(travel) || travel < 0) return '';
+  const at = (minutes: number) => format(toZonedTime(addMinutes(now, minutes), TZ), 'h:mm a');
+  const earliest = at(Math.ceil(travel));
+  const latest = at(legMinutes(travel, appointment.distanceKm));
+  if (earliest === latest) return ` Estimated arrival: around ${earliest}.`;
+  // "9:05–9:50 AM" within the same half of the day, else "11:30 AM–12:15 PM".
+  const sameHalf = earliest.slice(-2) === latest.slice(-2);
+  return ` Estimated arrival: around ${sameHalf ? earliest.slice(0, -3) : earliest}–${latest}.`;
 }
 
 // ── Customer: acknowledge the ocular fee is non-refundable (required before paying online) ──
@@ -2372,14 +2453,24 @@ export async function updateConsultationAttendance(
     previousAttendanceStatus: currentStatus,
   };
   let outsideWindow = false;
+  // The consultation starts automatically at its scheduled time. A customer who arrives after
+  // that (within the grace period, before the automatic no-show) is still checked in, and the
+  // consultation simply stays in progress.
+  const checkInAfterAutoStart = input.action === 'check_in'
+    && currentStatus === AppointmentAttendanceStatus.IN_PROGRESS
+    && !appointment.actualArrivalAt;
 
   if (input.action === 'check_in') {
+    if (currentStatus === AppointmentAttendanceStatus.IN_PROGRESS && appointment.actualArrivalAt) {
+      throw AppError.badRequest('The customer is already checked in.', ErrorCode.VALIDATION_ERROR);
+    }
     const arrivalAt = input.actualArrivalAt ? new Date(input.actualArrivalAt) : now;
     if (Number.isNaN(arrivalAt.getTime())) {
       throw AppError.badRequest('Invalid arrival time', ErrorCode.VALIDATION_ERROR);
     }
     const classification = classifyArrival(appointment, arrivalAt);
-    nextStatus = classification.attendanceStatus;
+    nextStatus = checkInAfterAutoStart ? AppointmentAttendanceStatus.IN_PROGRESS : classification.attendanceStatus;
+    changes.arrivalClassification = classification.attendanceStatus;
     outsideWindow = classification.outsideWindow;
     appointment.actualArrivalAt = arrivalAt;
     changes.actualArrivalAt = arrivalAt;
@@ -2425,7 +2516,9 @@ export async function updateConsultationAttendance(
     throw AppError.badRequest('Attendance override reason is required', ErrorCode.VALIDATION_ERROR);
   }
 
-  assertAttendanceTransition(currentStatus, nextStatus, isOverride);
+  if (!checkInAfterAutoStart) {
+    assertAttendanceTransition(currentStatus, nextStatus, isOverride);
+  }
 
   if (input.action === 'check_in') {
     await issueQueueNumber(appointment, appointment.actualArrivalAt || now);
@@ -2500,6 +2593,102 @@ export async function updateConsultationAttendance(
   }
 
   return appointment;
+}
+
+// ── Automatic No Show (office consultations) ──
+
+export const AUTO_NO_SHOW_NOTE =
+  `Automatically marked as No Show: the customer did not check in within ${NO_SHOW_GRACE_MINUTES} minutes of the scheduled time.`;
+
+/**
+ * Closes today's confirmed office consultations as No Show once the grace period after the
+ * scheduled time has passed without a check-in: the same outcome as the manual "Mark as No Show"
+ * button, which stays available. Only the current Manila date is touched, so older records are
+ * never back-filled; ocular visits are excluded. Runs every minute from server.ts.
+ */
+export async function processAutomaticConsultationNoShows(now: Date = new Date()): Promise<number> {
+  const today = format(toZonedTime(now, TZ), 'yyyy-MM-dd');
+  const stillPending = {
+    type: AppointmentType.OFFICE,
+    status: AppointmentStatus.CONFIRMED,
+    salesStaffId: { $ne: null },
+    actualArrivalAt: null,
+    attendanceStatus: {
+      $in: [AppointmentAttendanceStatus.SCHEDULED, AppointmentAttendanceStatus.IN_PROGRESS, null],
+    },
+    date: today,
+  };
+
+  const candidates = await Appointment.find(stillPending).select('_id date slotCode');
+  let closedCount = 0;
+  for (const candidate of candidates) {
+    const start = new Date(`${candidate.date}T${candidate.slotCode}:00+08:00`);
+    if (Number.isNaN(start.getTime()) || now < addMinutes(start, NO_SHOW_GRACE_MINUTES)) continue;
+
+    try {
+      // Same filter again, atomically: a check-in that lands first keeps the appointment open.
+      const appointment = await Appointment.findOneAndUpdate(
+        { _id: candidate._id, ...stillPending },
+        {
+          $set: {
+            status: AppointmentStatus.COMPLETED,
+            attendanceStatus: AppointmentAttendanceStatus.NO_SHOW,
+            attendanceNotes: AUTO_NO_SHOW_NOTE,
+            attendanceUpdatedAt: now,
+            consultationCompletedAt: now,
+          },
+          $unset: { attendanceUpdatedBy: 1 },
+        },
+        { new: true },
+      );
+      if (!appointment) continue;
+      closedCount += 1;
+
+      // No human actor: the audit entry is recorded as System.
+      await AuditLog.create({
+        action: AuditAction.APPOINTMENT_ATTENDANCE_UPDATED,
+        targetType: 'appointment',
+        targetId: appointment._id,
+        details: {
+          action: 'no_show',
+          automatic: true,
+          reason: 'no_check_in_within_grace_period',
+          appointmentStatus: AppointmentStatus.COMPLETED,
+          attendanceStatus: AppointmentAttendanceStatus.NO_SHOW,
+          notes: AUTO_NO_SHOW_NOTE,
+        },
+      });
+
+      const reference = await describeAppointmentForNotification(appointment);
+      const link = `/appointments/${appointment._id}`;
+      await notifyUsers(
+        [appointment.customerId],
+        NotificationCategory.APPOINTMENT,
+        'Consultation Marked as No-Show',
+        `Your consultation ${appointment.appointmentNumber ? `${appointment.appointmentNumber} ` : ''}on ${formatNotificationDate(appointment.date, appointment.slotCode)} was marked as a no-show because there was no check-in within ${NO_SHOW_GRACE_MINUTES} minutes of the scheduled time. Book a new consultation when you are ready.`,
+        link,
+      );
+      await notifyBookingAgents(
+        appointment,
+        NotificationCategory.APPOINTMENT,
+        'Consultation No-Show',
+        `${reference} was marked as a no-show automatically (no check-in within ${NO_SHOW_GRACE_MINUTES} minutes).`,
+        link,
+      );
+      if (appointment.salesStaffId) {
+        await createAndSendNotification(
+          appointment.salesStaffId,
+          NotificationCategory.APPOINTMENT,
+          'Consultation No-Show',
+          `${reference} was closed as a no-show automatically: the customer did not check in within ${NO_SHOW_GRACE_MINUTES} minutes.`,
+          link,
+        );
+      }
+    } catch (error) {
+      logger.error(`Failed to mark appointment ${String(candidate._id)} as an automatic no-show:`, error);
+    }
+  }
+  return closedCount;
 }
 
 export async function getCustomerQueueStatus(customerId: string) {
@@ -2610,7 +2799,7 @@ async function requestRescheduleLocked(
     audience: 'staff',
   });
   await assertDateAvailable(input.newDate);
-  await assertSlotAvailable(input.newDate, input.newSlotCode, appointment.type, appointment._id.toString());
+  await assertSlotAvailable(input.newDate, input.newSlotCode, appointment.type, appointment._id.toString(), ocularRouteOf(appointment));
 
   // Reschedules the same assigned sales staff into the new slot — rescheduling is a
   // date/time change only, it doesn't need a fresh sales assignment or agent review.
@@ -2622,6 +2811,7 @@ async function requestRescheduleLocked(
       input.newSlotCode as SlotCode,
       appointment.type,
       appointment._id.toString(),
+      ocularRouteOf(appointment),
     );
     if (appointment.type === AppointmentType.OCULAR) {
       await releaseSlotLock(oldDate, oldSlot as SlotCode, salesStaffId);
@@ -2776,7 +2966,7 @@ async function completeRescheduleLocked(
     audience: 'staff',
   });
   await assertDateAvailable(input.date);
-  await assertSlotAvailable(input.date, input.slotCode, appointment.type, appointment._id.toString());
+  await assertSlotAvailable(input.date, input.slotCode, appointment.type, appointment._id.toString(), ocularRouteOf(appointment));
 
   // Reschedule acceptance updates the customer schedule first. The appointment
   // agent then assigns an available sales staff member for review.

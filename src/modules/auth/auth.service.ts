@@ -155,6 +155,16 @@ async function verifyOtp(email: string, otp: string, purpose: OtpPurpose): Promi
 
 // ── Service Methods ──
 
+/**
+ * Register page live check. Only a verified account makes an email "taken": an unverified
+ * registration is replaced by the next one (see register()), so that email can still be used.
+ */
+export async function isEmailAvailable(email: string) {
+  const normalized = email.trim().toLowerCase();
+  const existing = await User.findOne({ email: normalized }).select('isEmailVerified').lean();
+  return { available: !(existing && existing.isEmailVerified) };
+}
+
 export async function register(input: RegisterInput, ip?: string, ua?: string) {
   const { email, password, firstName, lastName, phone, addressData } = input;
   const defaultAddress = addressData ? normalizeUserAddress({ ...addressData, isDefault: true }, 'Primary address') : null;

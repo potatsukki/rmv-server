@@ -23,10 +23,11 @@ export const INTERNAL_AVAILABILITY_ROLES: Role[] = [
 ];
 
 const INTERNAL_AVAILABILITY_ROLE_SET = new Set<Role>(INTERNAL_AVAILABILITY_ROLES);
-// A sales staff member can't hold two office consultations whose time slots overlap on the same
-// date, and an ocular visit takes their whole day (travel to the site and back): on a date with
-// an ocular visit they hold no other appointment. An appointment on another date never blocks.
-// Cancelled, completed and no-show appointments free their time.
+// A sales staff member can't hold two appointments on the same date whose busy times overlap
+// (staffBusyWindow): a consultation is its one-hour slot, and an ocular visit runs from leaving
+// the shop until getting back (travel + traffic allowance + 1.5 hr on site). An ocular visit
+// without a computed route (no site pin) still takes the whole day. An appointment on another
+// date never blocks. Cancelled, completed and no-show appointments free their time.
 export const SALES_SLOT_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.COMPLETED,
@@ -50,24 +51,94 @@ export function slotsOverlap(a: string | undefined | null, b: string | undefined
   return startA < startB + APPOINTMENT_SLOT_MINUTES && startB < startA + APPOINTMENT_SLOT_MINUTES;
 }
 
-type ScheduledVisit = { type?: AppointmentType | string | null; slotCode?: string | null };
+/** Time on site for an ocular visit (measuring). */
+export const OCULAR_SITE_MINUTES = 90;
+/** Traffic allowance added to each one-way trip of an ocular visit (the route has no live traffic). */
+export const OCULAR_TRAFFIC_BUFFER_MINUTES = 45;
+/** A site this close to the shop (route km) gets no traffic allowance. */
+export const OCULAR_NEAR_SHOP_KM = 4;
+
+/** One-way trip to an ocular site with the traffic allowance (none for a site near the shop). */
+export function legMinutes(travelMinutes: number, distanceKm?: number | null): number {
+  const isNearShop = typeof distanceKm === 'number' && Number.isFinite(distanceKm) && distanceKm <= OCULAR_NEAR_SHOP_KM;
+  return Math.ceil(Math.max(0, travelMinutes)) + (isNearShop ? 0 : OCULAR_TRAFFIC_BUFFER_MINUTES);
+}
+
+/** An ocular site's route from the shop, as saved on the appointment. */
+export type OcularRoute = {
+  /** One-way drive from the shop (route estimate, no traffic). */
+  travelDurationMinutes?: number | null;
+  /** Route distance from the shop. */
+  distanceKm?: number | null;
+};
 
 /**
- * True when one sales staff member can't hold both appointments on the same date: an ocular
- * visit takes the whole day (travel included), and consultations clash when their slots overlap.
+ * The route a lookup passed as query strings (`travelMinutes`, `distanceKm`), or undefined when
+ * there is none. Express 5 keeps req.query as raw strings even after validation.
+ */
+export function ocularRouteFromQuery(travelMinutes?: unknown, distanceKm?: unknown): OcularRoute | undefined {
+  const toNumber = (value: unknown) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : undefined;
+  };
+  const travel = toNumber(travelMinutes);
+  return travel === undefined ? undefined : { travelDurationMinutes: travel, distanceKm: toNumber(distanceKm) };
+}
+
+type ScheduledVisit = OcularRoute & {
+  type?: AppointmentType | string | null;
+  slotCode?: string | null;
+};
+
+/**
+ * Minutes of the day [start, end) the visit keeps its sales staff busy: a consultation is its
+ * slot; an ocular visit runs from leaving the shop until getting back (travel + traffic allowance
+ * each way, 1.5 hr on site). Null when that is unknown (an ocular visit with no route): it then
+ * takes the whole day.
+ */
+export function staffBusyWindow(visit: ScheduledVisit): { start: number; end: number } | null {
+  const start = slotStartMinutes(visit.slotCode);
+  if (start === undefined) return null;
+  if (visit.type !== AppointmentType.OCULAR) return { start, end: start + APPOINTMENT_SLOT_MINUTES };
+  const travel = visit.travelDurationMinutes;
+  if (typeof travel !== 'number' || !Number.isFinite(travel) || travel < 0) return null;
+  const leg = legMinutes(travel, visit.distanceKm);
+  return { start: start - leg, end: start + OCULAR_SITE_MINUTES + leg };
+}
+
+/**
+ * True when one sales staff member can't hold both appointments on the same date: their busy
+ * times overlap (staffBusyWindow). An ocular visit with no route still takes the whole day.
  */
 export function appointmentsConflict(a: ScheduledVisit, b: ScheduledVisit): boolean {
+  const windowA = staffBusyWindow(a);
+  const windowB = staffBusyWindow(b);
+  if (windowA && windowB) return windowA.start < windowB.end && windowB.start < windowA.end;
   return a.type === AppointmentType.OCULAR
     || b.type === AppointmentType.OCULAR
     || slotsOverlap(a.slotCode, b.slotCode);
 }
 
+/** "8:05 AM" for minutes of the day. */
+export function formatMinutesLabel(totalMinutes: number) {
+  const minutes = ((Math.round(totalMinutes) % 1440) + 1440) % 1440;
+  const hour = Math.floor(minutes / 60);
+  const minute = minutes % 60;
+  return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
+/** "11:30 AM–4:00 PM": the time an ocular visit keeps its staff busy, or null when unknown. */
+export function formatOcularBusyWindow(visit: ScheduledVisit): string | null {
+  if (visit.type !== AppointmentType.OCULAR) return null;
+  const window = staffBusyWindow(visit);
+  return window ? `${formatMinutesLabel(window.start)}–${formatMinutesLabel(window.end)}` : null;
+}
+
 function formatSlotLabel(slotCode: string) {
   const start = slotStartMinutes(slotCode);
   if (start === undefined) return slotCode;
-  const hour = Math.floor(start / 60);
-  const minute = start % 60;
-  return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'}`;
+  return formatMinutesLabel(start);
 }
 
 // Appointments still waiting on their sales staff (any date). Used for the customer's
@@ -86,7 +157,8 @@ export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
 /**
  * The staff member's other appointment on this date (YYYY-MM-DD) that clashes with a new one of
  * this type at this slot, if any (see appointmentsConflict); cancelled, completed and no-show
- * appointments don't count. A same-time clash is reported before a whole-day ocular one.
+ * appointments don't count. A same-time clash is reported before an ocular travel-time one.
+ * For a new ocular visit, pass its route (travel minutes, km) so only its busy time counts.
  */
 export async function findActiveSalesAssignment(
   salesStaffId: string,
@@ -94,6 +166,7 @@ export async function findActiveSalesAssignment(
   dateStr: string,
   slotCode: string,
   appointmentType?: AppointmentType | string,
+  route?: OcularRoute,
 ) {
   const filter: Record<string, unknown> = {
     salesStaffId,
@@ -101,8 +174,10 @@ export async function findActiveSalesAssignment(
     status: { $nin: SALES_SLOT_FREEING_STATUSES },
   };
   if (excludeAppointmentId) filter._id = { $ne: excludeAppointmentId };
-  const sameDay = await Appointment.find(filter).select('appointmentNumber date slotCode type status').lean();
-  const incoming = { type: appointmentType, slotCode };
+  const sameDay = await Appointment.find(filter)
+    .select('appointmentNumber date slotCode type status travelDurationMinutes distanceKm')
+    .lean();
+  const incoming = { type: appointmentType, slotCode, ...route };
   return sameDay.find((appointment) => slotsOverlap(appointment.slotCode, slotCode))
     ?? sameDay.find((appointment) => appointmentsConflict(incoming, appointment))
     ?? null;
@@ -318,6 +393,8 @@ export async function evaluateSalesAssignmentEligibility(input: {
   /** The appointment being assigned or moved, so it never blocks itself. */
   appointmentId?: string;
   appointmentType?: AppointmentType;
+  /** Ocular only: the site's route, so only the visit's busy time counts (none: the whole day). */
+  route?: OcularRoute;
 }): Promise<SalesAssignmentEligibility> {
   const {
     salesStaffId,
@@ -327,6 +404,7 @@ export async function evaluateSalesAssignmentEligibility(input: {
     slotCode,
     appointmentId,
     appointmentType,
+    route,
   } = input;
 
   // ⚠️  TESTING BYPASS – set to `true` to skip shift/availability checks.
@@ -356,17 +434,26 @@ export async function evaluateSalesAssignmentEligibility(input: {
     }
   }
 
-  // Another appointment at the same time blocks, and an ocular visit takes the whole day: a
-  // staff member with one that day takes nothing else, and an ocular visit needs a free day.
-  const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr, slotCode, appointmentType);
+  // Another appointment whose busy time overlaps blocks (staffBusyWindow): an ocular visit keeps
+  // its staff from leaving the shop until getting back, or the whole day when it has no route.
+  const activeAssignment = await findActiveSalesAssignment(salesStaffId, appointmentId, dateStr, slotCode, appointmentType, route);
   if (activeAssignment) {
     const when = `${formatSlotLabel(activeAssignment.slotCode || slotCode)}, ${formatAppointmentDay(dateStr)}`;
     const detail = activeAssignment.appointmentNumber ? `${when} · ${activeAssignment.appointmentNumber}` : when;
-    const reason = slotsOverlap(activeAssignment.slotCode, slotCode)
-      ? `Already has an appointment at this time (${detail})`
-      : activeAssignment.type === AppointmentType.OCULAR
-        ? `Has an ocular visit that day (${detail}); an ocular visit takes the whole day`
-        : `Has another appointment that day (${detail}); an ocular visit takes the whole day`;
+    let reason: string;
+    if (slotsOverlap(activeAssignment.slotCode, slotCode)) {
+      reason = `Already has an appointment at this time (${detail})`;
+    } else if (activeAssignment.type === AppointmentType.OCULAR) {
+      const away = formatOcularBusyWindow(activeAssignment);
+      reason = away
+        ? `Has an ocular visit that day (${detail}) and is away ${away}, travel included`
+        : `Has an ocular visit that day (${detail}); it has no site pin yet, so it takes the whole day`;
+    } else {
+      const away = formatOcularBusyWindow({ type: appointmentType, slotCode, ...route });
+      reason = away
+        ? `Has another appointment (${detail}) while this ocular visit keeps them away ${away}, travel included`
+        : `Has another appointment that day (${detail}); an ocular visit without a site pin takes the whole day`;
+    }
     return { assignmentEligible: false, assignmentBlockedReason: reason };
   }
 

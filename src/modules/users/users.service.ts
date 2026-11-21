@@ -27,6 +27,7 @@ import {
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   hasInternalAvailabilityRole,
+  ocularRouteFromQuery,
 } from './availability-session.service.js';
 
 async function attachAvailabilitySummaries<T extends {
@@ -550,10 +551,15 @@ export async function listByRole(
   const dateStr = assignmentContext.date;
   const slotCode = assignmentContext.slotCode as SlotCode;
   const targetAppointment = assignmentContext.appointmentId
-    ? await Appointment.findById(assignmentContext.appointmentId).select('type').lean()
+    ? await Appointment.findById(assignmentContext.appointmentId).select('type travelDurationMinutes distanceKm').lean()
     : null;
   // The appointment being assigned says what it is; a new ocular visit has no appointment yet.
   const appointmentType = (targetAppointment?.type as AppointmentType | undefined) ?? assignmentContext.appointmentType;
+  // An ocular visit's route (its own, else the pinned site the caller sent) limits its busy time.
+  const route = appointmentType !== AppointmentType.OCULAR
+    ? undefined
+    : ocularRouteFromQuery(targetAppointment?.travelDurationMinutes, targetAppointment?.distanceKm)
+      ?? ocularRouteFromQuery(assignmentContext.travelMinutes, assignmentContext.distanceKm);
   const salesUsers = withSummaries as Array<{
     _id: string | Types.ObjectId;
     availabilityStatus?: StaffAvailabilityStatus;
@@ -570,6 +576,7 @@ export async function listByRole(
         slotCode,
         appointmentType,
         appointmentId: assignmentContext.appointmentId,
+        route,
       });
 
       return {

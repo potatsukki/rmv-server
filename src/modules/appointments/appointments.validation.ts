@@ -122,6 +122,9 @@ export const availableSlotsQuerySchema = z.object({
   type: z.nativeEnum(AppointmentType),
   /** Staff only: show the days this sales staff member is free (e.g. a project's ocular visit). */
   salesStaffId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+  /** Ocular only: the pinned site's one-way drive (minutes) and route km, so only its busy time counts. */
+  travelMinutes: z.coerce.number().int().min(0).max(600).optional(),
+  distanceKm: z.coerce.number().min(0).max(1000).optional(),
 });
 
 export const appointmentQueueQuerySchema = z.object({

@@ -28,8 +28,10 @@ import {
   appointmentsConflict,
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
+  legMinutes,
   SALES_SLOT_FREEING_STATUSES,
   slotsOverlap,
+  staffBusyWindow,
 } from './availability-session.service.js';
 import { AppointmentStatus, AppointmentType, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
@@ -270,24 +272,24 @@ describe('availability-session.service sales staff appointment conflicts per tim
     expect(result).toEqual({ assignmentEligible: true });
   });
 
-  // An ocular visit takes the sales staff member's whole day (travel to the site and back).
+  // An ocular visit with no route (no site pin) still takes the sales staff member's whole day.
   it.each([
     [
       'a consultation on a day that already has an ocular visit',
       AppointmentType.OFFICE, AppointmentType.OCULAR,
-      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); it has no site pin yet, so it takes the whole day',
     ],
     [
       'an ocular visit on a day that already has a consultation',
       AppointmentType.OCULAR, AppointmentType.OFFICE,
-      'Has another appointment that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+      'Has another appointment that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit without a site pin takes the whole day',
     ],
     [
       'a second ocular visit on the same day',
       AppointmentType.OCULAR, AppointmentType.OCULAR,
-      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); an ocular visit takes the whole day',
+      'Has an ocular visit that day (9:00 AM, Nov 14, 2026 · APT-20261114-0001); it has no site pin yet, so it takes the whole day',
     ],
-  ])('blocks %s, even in a different slot', async (_label, appointmentType, existingType, reason) => {
+  ])('blocks %s without a site pin, even in a different slot', async (_label, appointmentType, existingType, reason) => {
     mockSameDayAppointments([{ ...nineAm, type: existingType }]);
 
     const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, appointmentType, session: buildSession() as never });
@@ -306,7 +308,7 @@ describe('availability-session.service sales staff appointment conflicts per tim
     expect(result.assignmentBlockedReason).toBe('Already has an appointment at this time (9:00 AM, Nov 14, 2026 · APT-20261114-0001)');
   });
 
-  it('treats any pair with an ocular visit as a clash, and consultations only when their slots overlap', () => {
+  it('treats any pair with an unpinned ocular visit as a clash, and consultations only when their slots overlap', () => {
     const office = (slotCode: string) => ({ type: AppointmentType.OFFICE, slotCode });
     const ocular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode });
 
@@ -315,6 +317,85 @@ describe('availability-session.service sales staff appointment conflicts per tim
     expect(appointmentsConflict(office('09:00'), ocular('15:00'))).toBe(true);
     expect(appointmentsConflict(ocular('09:00'), office('15:00'))).toBe(true);
     expect(appointmentsConflict(ocular('09:00'), ocular('15:00'))).toBe(true);
+  });
+
+  describe('ocular visit busy time (travel + traffic + 1.5 hr on site)', () => {
+    const office = (slotCode: string) => ({ type: AppointmentType.OFFICE, slotCode });
+    // 45 min drive, 18 km away: 45 min of traffic is added each way.
+    const farOcular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode, travelDurationMinutes: 45, distanceKm: 18 });
+    // 10 min drive, 3 km away: near the shop, so no traffic allowance.
+    const nearOcular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode, travelDurationMinutes: 10, distanceKm: 3 });
+
+    it('adds 45 min of traffic to each one-way trip, except for a site within 4 km of the shop', () => {
+      expect(legMinutes(45, 18)).toBe(90);
+      expect(legMinutes(10, 3)).toBe(10);
+      expect(legMinutes(10, 4)).toBe(10);
+      expect(legMinutes(44.2, undefined)).toBe(90);
+    });
+
+    it('keeps the staff busy from leaving the shop until getting back', () => {
+      expect(staffBusyWindow(farOcular('13:00'))).toEqual({ start: 11 * 60 + 30, end: 16 * 60 });
+      expect(staffBusyWindow(nearOcular('13:00'))).toEqual({ start: 12 * 60 + 50, end: 14 * 60 + 40 });
+      expect(staffBusyWindow(office('13:00'))).toEqual({ start: 13 * 60, end: 14 * 60 });
+      expect(staffBusyWindow({ type: AppointmentType.OCULAR, slotCode: '13:00' })).toBeNull();
+    });
+
+    it('rejects a booking while the staff is travelling or on site, and frees the rest of the day', () => {
+      // 1 PM far ocular: away 11:30 AM–4:00 PM.
+      expect(appointmentsConflict(farOcular('13:00'), office('14:00'))).toBe(true);
+      expect(appointmentsConflict(farOcular('13:00'), office('11:00'))).toBe(true);
+      expect(appointmentsConflict(farOcular('13:00'), office('15:00'))).toBe(true);
+      expect(appointmentsConflict(farOcular('13:00'), office('10:00'))).toBe(false);
+      expect(appointmentsConflict(farOcular('13:00'), office('16:00'))).toBe(false);
+      // Another far ocular at 4 PM must leave at 2:30 PM, while the staff is still away.
+      expect(appointmentsConflict(farOcular('13:00'), farOcular('16:00'))).toBe(true);
+      // 1 PM near ocular: away 12:50–2:40 PM, so 3 PM is free.
+      expect(appointmentsConflict(nearOcular('13:00'), office('15:00'))).toBe(false);
+      expect(appointmentsConflict(nearOcular('13:00'), office('14:00'))).toBe(true);
+    });
+
+    it('allows two ocular visits on the same day when their busy times do not overlap', () => {
+      // 9 AM near ocular (8:50–10:50 AM) + 1 PM far ocular (11:30 AM–4:00 PM).
+      expect(appointmentsConflict(nearOcular('09:00'), farOcular('13:00'))).toBe(false);
+      // Two far ones: 7:30 AM–12:00 PM and 11:30 AM–4:00 PM overlap.
+      expect(appointmentsConflict(farOcular('09:00'), farOcular('13:00'))).toBe(true);
+    });
+
+    it('names the busy time when a consultation falls inside an ocular visit', async () => {
+      mockSameDayAppointments([{ ...nineAm, slotCode: '13:00', ...farOcular('13:00') }]);
+
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '11:00', session: buildSession() as never });
+
+      expect(result).toEqual({
+        assignmentEligible: false,
+        assignmentBlockedReason: 'Has an ocular visit that day (1:00 PM, Nov 14, 2026 · APT-20261114-0001) and is away 11:30 AM–4:00 PM, travel included',
+      });
+    });
+
+    it('names the new ocular visit’s busy time when it would fall over a consultation', async () => {
+      mockSameDayAppointments([{ ...nineAm, slotCode: '15:00', type: AppointmentType.OFFICE }]);
+
+      const result = await evaluateSalesAssignmentEligibility({
+        ...newAssignment,
+        slotCode: '13:00',
+        appointmentType: AppointmentType.OCULAR,
+        route: { travelDurationMinutes: 45, distanceKm: 18 },
+        session: buildSession() as never,
+      });
+
+      expect(result).toEqual({
+        assignmentEligible: false,
+        assignmentBlockedReason: 'Has another appointment (3:00 PM, Nov 14, 2026 · APT-20261114-0001) while this ocular visit keeps them away 11:30 AM–4:00 PM, travel included',
+      });
+    });
+
+    it('lets a consultation outside the ocular visit through', async () => {
+      mockSameDayAppointments([{ ...nineAm, slotCode: '13:00', ...farOcular('13:00') }]);
+
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '16:00', session: buildSession() as never });
+
+      expect(result).toEqual({ assignmentEligible: true });
+    });
   });
 
   it('blocks the same date + the same slot', async () => {

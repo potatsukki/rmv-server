@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fabUpdateAggregate = vi.hoisted(() => vi.fn());
+const fabUpdateFindOne = vi.hoisted(() => vi.fn());
 const mocks = vi.hoisted(() => ({
   openDesignFee: vi.fn(),
   appointmentFindById: vi.fn(),
@@ -43,7 +44,10 @@ vi.mock('../../models/index.js', () => ({
   User: { findOne: mocks.userFindOne, find: mocks.userFind },
   AuditLog: { create: mocks.auditCreate },
   VisitReport: { findOne: mocks.reportFindOne, find: mocks.reportFind },
-  FabricationUpdate: { aggregate: (...args: unknown[]) => fabUpdateAggregate(...args) },
+  FabricationUpdate: {
+    aggregate: (...args: unknown[]) => fabUpdateAggregate(...args),
+    findOne: (...args: unknown[]) => fabUpdateFindOne(...args),
+  },
 }));
 vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mocks.paymentPlanFindOne, find: mocks.paymentPlanFind, insertMany: mocks.paymentPlanInsertMany } }));
 vi.mock('../../models/Blueprint.js', () => ({ Blueprint: { findOne: mocks.blueprintFindOne } }));
@@ -86,7 +90,7 @@ vi.mock('./fabrication-scheduling.js', async (importActual) => ({
 }));
 vi.mock('../maps/maps.service.js', () => ({ computeRoute: scheduling.computeRoute }));
 
-import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
+import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, confirmInstallation, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
 import { createAndSendNotification } from '../notifications/socket.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
@@ -1161,8 +1165,12 @@ describe('scheduleProjectOcular', () => {
 
     await scheduleProjectOcular('project-1', { ...visit, salesStaffId: otherStaffId }, actorId, [Role.SALES_STAFF]);
 
-    // The chosen person's day is checked and locked, not the project owner's.
-    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ salesStaffId: otherStaffId }));
+    // The chosen person's day is checked and locked, not the project owner's, for the visit's busy
+    // time only: the pinned site's route (55 min, 40 km) is passed to the schedule check.
+    expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      salesStaffId: otherStaffId,
+      route: { travelDurationMinutes: 55, distanceKm: 40 },
+    }));
     expect(mocks.appointmentCreate).toHaveBeenCalledWith(expect.objectContaining({
       type: 'ocular', salesStaffId: otherStaffId, travelDurationMinutes: 55, distanceKm: 40,
     }));
@@ -1288,6 +1296,10 @@ describe('assignDeliveryCrew', () => {
     expect(scheduling.acquireStaffLock).not.toHaveBeenCalled();
     const notified = vi.mocked(createAndSendNotification).mock.calls.map((call) => call[0]);
     expect(notified).toEqual(['customer-1', 'lead-1']);
+    // The customer confirms a delivery once the order is received, not the schedule.
+    const [, , title, message] = vi.mocked(createAndSendNotification).mock.calls[0]!;
+    expect(title).toBe('Delivery Scheduled');
+    expect(message).toContain('confirm in the project once you receive your order');
   });
 
   it('needs the fabrication team first', async () => {
@@ -1314,6 +1326,70 @@ describe('assignDeliveryCrew', () => {
       .rejects.toThrow('One or more crew member IDs are invalid');
     expect(scheduling.acquireStaffLock).not.toHaveBeenCalled();
     expect(project.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('confirmInstallation (customer confirmation)', () => {
+  let project: Record<string, any>;
+  let item: Record<string, any>;
+  const latestStatus = (status: string | null) => fabUpdateFindOne.mockReturnValue({
+    sort: () => ({ select: () => ({ lean: async () => (status ? { status } : null) }) }),
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = {
+      _id: 'project-1', title: 'Cart project', status: ProjectStatus.FABRICATION,
+      customerId: { _id: { toString: () => customerId }, firstName: 'Maria', lastName: 'Cruz' },
+      fabricationLeadId: { _id: 'lead-1' },
+      deliveryType: DeliveryType.SHOP_FABRICATED,
+      deliverySchedule: { date: '2026-11-25' },
+      installationConfirmedAt: null,
+      save: vi.fn(),
+    };
+    item = { _id: { toString: () => 'item-1' }, title: 'Food cart', installationConfirmedAt: null, save: vi.fn() };
+    mocks.projectFindById.mockReturnValue({ populate: () => ({ populate: async () => project }) });
+    // Chainable + awaitable, for both the item lookup and attachProjectItems' populated reload.
+    const itemQuery: Record<string, any> = {
+      sort: () => itemQuery, populate: () => itemQuery, select: () => itemQuery, lean: () => itemQuery,
+      then: (resolve: (items: unknown[]) => unknown) => resolve([item]),
+    };
+    mocks.projectItemFind.mockReturnValue(itemQuery);
+    mocks.reportFind.mockReturnValue({ sort: async () => [] });
+  });
+
+  it('refuses a delivery confirmation before the order is out for delivery', async () => {
+    latestStatus('quality_check');
+
+    await expect(confirmInstallation('project-1', customerId, [Role.CUSTOMER]))
+      .rejects.toThrow('You can confirm once your order is out for delivery.');
+    expect(item.save).not.toHaveBeenCalled();
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('records that the customer received the delivery once it is Ready for Delivery', async () => {
+    latestStatus('ready_for_delivery');
+
+    await confirmInstallation('project-1', customerId, [Role.CUSTOMER]);
+
+    expect(item.installationConfirmedAt).toBeInstanceOf(Date);
+    expect(project.installationConfirmedAt).toBeInstanceOf(Date);
+    const [recipient, , title, message] = vi.mocked(createAndSendNotification).mock.calls[0]!;
+    expect(recipient).toBe('lead-1');
+    expect(title).toBe('Order Received');
+    expect(message).toContain('You may now mark it as Done.');
+  });
+
+  it('lets an on-site customer confirm the schedule before Installation, without the delivery check', async () => {
+    project.deliveryType = DeliveryType.ON_SITE_INSTALLATION;
+
+    await confirmInstallation('project-1', customerId, [Role.CUSTOMER]);
+
+    expect(fabUpdateFindOne).not.toHaveBeenCalled();
+    expect(item.installationConfirmedAt).toBeInstanceOf(Date);
+    const [, , title, message] = vi.mocked(createAndSendNotification).mock.calls[0]!;
+    expect(title).toBe('Installation Confirmed');
+    expect(message).toContain('You may now proceed to Installation.');
   });
 });
 

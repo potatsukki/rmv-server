@@ -183,20 +183,37 @@ describe('createFabricationUpdate', () => {
     expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
   });
 
-  it('allows an explicit shop-fabricated project to finish without installation confirmation', async () => {
-    const save = vi.fn();
-    mockProjectFindById.mockResolvedValue({
-      _id: 'project-1',
-      customerId: 'customer-1',
-      title: 'Deliverable Project',
-      status: ProjectStatus.FABRICATION,
-      deliveryType: DeliveryType.SHOP_FABRICATED,
-      fabricationLeadId: { toString: () => 'lead-1' },
-      fabricationAssistantIds: [],
-      engineerIds: [],
-      installationConfirmedAt: null,
-      save,
+  const shopDeliveryProject = (overrides: Record<string, unknown> = {}) => ({
+    _id: 'project-1',
+    customerId: 'customer-1',
+    title: 'Deliverable Project',
+    status: ProjectStatus.FABRICATION,
+    deliveryType: DeliveryType.SHOP_FABRICATED,
+    fabricationLeadId: { toString: () => 'lead-1' },
+    fabricationAssistantIds: [],
+    engineerIds: [],
+    installationConfirmedAt: null,
+    save: vi.fn(),
+    ...overrides,
+  });
+
+  it('keeps a delivery open until the customer confirms they received the order', async () => {
+    mockProjectFindById.mockResolvedValue(shopDeliveryProject());
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Delivered.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({
+      code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED,
+      message: 'Customer must confirm they received the order before marking it as Done',
     });
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+  });
+
+  it('finishes a delivery once the customer confirmed receiving the order', async () => {
+    const project = shopDeliveryProject({ installationConfirmedAt: new Date() });
+    mockProjectFindById.mockResolvedValue(project);
 
     await createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Delivered.' },
@@ -205,7 +222,24 @@ describe('createFabricationUpdate', () => {
     );
 
     expect(mockFabricationUpdateCreate).toHaveBeenCalled();
-    expect(save).toHaveBeenCalled();
+    expect(project.save).toHaveBeenCalled();
+  });
+
+  it('asks the customer to confirm receipt when a delivery is ready', async () => {
+    mockProjectFindById.mockResolvedValue(shopDeliveryProject({ deliverySchedule: { date: '2026-11-25' } }));
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.QUALITY_CHECK }) });
+    mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.READY_FOR_DELIVERY, notes: 'Out for delivery.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    const notification = vi.mocked(createAndSendNotification).mock.calls[0];
+    expect(notification[2]).toBe('Your Order Is On Its Way');
+    expect(notification[3]).toContain('confirm in the project once you receive your order');
+    expect(sendReadyForDeliveryEmail).not.toHaveBeenCalled();
   });
 
   it('lets the delivery / installation crew post an update, but not unassigned fabrication staff', async () => {
@@ -219,7 +253,7 @@ describe('createFabricationUpdate', () => {
       fabricationAssistantIds: [],
       deliveryCrewIds: [{ toString: () => 'crew-1' }],
       engineerIds: [],
-      installationConfirmedAt: null,
+      installationConfirmedAt: new Date(),
       save: vi.fn(),
     });
     const update = { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Delivered.' };
@@ -258,7 +292,6 @@ describe('createFabricationUpdate', () => {
   it.each([
     [null, FabricationStatus.FABRICATION],
     [FabricationStatus.FABRICATION, FabricationStatus.WELDING_ASSEMBLY],
-    [FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.INSTALLATION],
     [FabricationStatus.INSTALLATION, FabricationStatus.FINISHING],
     [FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK],
   ])('lets a fully paid on-site project advance from %s to %s before confirmation', async (currentStatus, targetStatus) => {
@@ -282,6 +315,33 @@ describe('createFabricationUpdate', () => {
     const notification = vi.mocked(createAndSendNotification).mock.calls[0];
     expect(notification[2]).toBe('Fabrication Update');
     expect(notification[3]).not.toMatch(/deliver/i);
+  });
+
+  it('keeps an on-site project out of Installation until the customer confirms the schedule', async () => {
+    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY);
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toMatchObject({
+      code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED,
+      message: 'Customer must confirm the installation schedule before moving to Installation',
+    });
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+  });
+
+  it('moves an on-site project to Installation once the customer confirmed the schedule', async () => {
+    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, true);
+    mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockFabricationUpdateCreate).toHaveBeenCalledWith(expect.objectContaining({ status: FabricationStatus.INSTALLATION }));
   });
 
   it('requires a delivery / installation crew before Installation, but not for workshop stages', async () => {
@@ -381,14 +441,14 @@ describe('createFabricationUpdate', () => {
     expect(mockPaymentPlanFindOne).toHaveBeenLastCalledWith({ projectId: 'project-1', projectItemId: { $exists: false } });
   });
 
-  it('requires the selected item to be confirmed at Done even if its parent is confirmed', async () => {
-    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+  it('requires the selected item to be confirmed before Installation even if its parent is confirmed', async () => {
+    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, true);
     mockProjectItemFindOne.mockResolvedValue({
       _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
     });
 
     await expect(createFabricationUpdate(
-      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.DONE, notes: 'Installation complete.' },
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
     )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED });
@@ -412,17 +472,17 @@ describe('createFabricationUpdate', () => {
     expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
   });
 
-  it('requires installation confirmation at Done even when the on-site project is fully paid', async () => {
+  it('no longer asks for confirmation again at Done once the on-site work is installed', async () => {
     setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
+    mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
-    await expect(createFabricationUpdate(
+    await createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.DONE, notes: 'Installation complete.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
-    )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_INSTALLATION_NOT_CONFIRMED });
+    );
 
-    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
-    expect(mockAuditLogCreate).not.toHaveBeenCalled();
+    expect(mockFabricationUpdateCreate).toHaveBeenCalledWith(expect.objectContaining({ status: FabricationStatus.DONE }));
   });
 
   it('lets a fully paid on-site project finish once installation is confirmed', async () => {
@@ -451,7 +511,22 @@ describe('createFabricationUpdate', () => {
     expect(notification[3]).not.toMatch(/deliver/i);
   });
 
-  it('advertises Done as the confirmation gate while leaving the paid first stage available', async () => {
+  it('advertises Done as the confirmation gate for a delivery', async () => {
+    mockProjectFindById.mockReturnValue({
+      select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.SHOP_FABRICATED }),
+    });
+    mockFabricationUpdateFindOne.mockReturnValue({
+      sort: vi.fn().mockReturnValue({ populate: vi.fn().mockResolvedValue({ status: FabricationStatus.READY_FOR_DELIVERY }) }),
+    });
+    mockPaymentPlanFindOne.mockResolvedValue(null);
+
+    const result = await getLatestFabricationStatus('project-1', 'admin-1', [Role.ADMIN]);
+
+    expect(result.confirmationGateStatus).toBe(FabricationStatus.DONE);
+    expect(result.allowedTransitions).toEqual([FabricationStatus.DONE]);
+  });
+
+  it('advertises Installation as the confirmation gate while leaving the paid first stage available', async () => {
     mockProjectFindById.mockReturnValue({
       select: vi.fn().mockResolvedValue({ deliveryType: DeliveryType.ON_SITE_INSTALLATION }),
     });
@@ -464,7 +539,7 @@ describe('createFabricationUpdate', () => {
 
     const result = await getLatestFabricationStatus('project-1', 'admin-1', [Role.ADMIN]);
 
-    expect(result.confirmationGateStatus).toBe(FabricationStatus.DONE);
+    expect(result.confirmationGateStatus).toBe(FabricationStatus.INSTALLATION);
     expect(result.currentStatus).toBe(FabricationStatus.QUEUED);
     expect(result.lifecycleStatuses).toEqual(['fabrication', 'welding_assembly', 'installation', 'finishing', 'quality_check', 'done']);
     expect(result.allowedTransitions).toEqual([FabricationStatus.FABRICATION]);
