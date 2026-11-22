@@ -7,7 +7,7 @@ import {
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   AppointmentStatus, AppointmentType, AppointmentAttendanceStatus, Role, AuditAction, MIN_BOOKING_LEAD_DAYS,
-  NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
+  MAX_ACTIVE_APPOINTMENTS_PER_CUSTOMER, NotificationCategory, PaymentMethod, ProjectStatus, SLOT_CODES, StaffAvailabilityStatus, type SlotCode,
 } from '../../utils/constants.js';
 import { appointmentStateMachine } from '../../utils/stateMachine.js';
 import {
@@ -446,60 +446,34 @@ function assertAttendanceTransition(
   }
 }
 
-async function assertNoActiveAppointment(
+/**
+ * A customer may book more than one appointment (one per project, say), each at its own date and
+ * time: assertCustomerScheduleFree rejects an overlapping time. This caps how many not-yet-finished
+ * appointments (any type, including an ocular visit under way) they hold at once. Only a NEW
+ * consultation booking is counted; an ocular visit continues a project that already exists.
+ */
+async function assertActiveAppointmentLimit(
   customerId: string,
-  excludeAppointmentIds: string[] = [],
   /** Who sees the error: the customer ("You already have…") or staff acting for them. */
   options: { audience?: 'customer' | 'staff' } = {},
 ): Promise<void> {
-  // Every not-yet-finished status counts, including an ocular visit already under way, so a
-  // customer never holds a consultation and an ocular visit at the same time.
-  const filter: Record<string, unknown> = {
+  const active = await Appointment.find({
     customerId,
     status: { $in: SALES_ACTIVE_ASSIGNMENT_STATUSES },
-  };
-  if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
-  const active = await Appointment.findOne(filter);
-  if (active) {
-    // Name the blocking appointment: a project's ocular visit is not listed on the Appointments page.
-    const owningProject = await Project.findOne({
-      $or: [{ ocularAppointmentId: active._id }, { appointmentId: active._id }],
-      status: { $ne: ProjectStatus.CANCELLED },
-    }).select('projectNumber').lean();
-    const kind = active.type === AppointmentType.OCULAR ? 'ocular visit' : 'consultation';
-    const when = active.date
-      ? `${formatAppointmentDate(active.date)}${active.slotCode ? `, ${formatSlotTime(active.slotCode)}` : ''}`
-      : '';
-    const statusLabel = String(active.status || '').replace(/_/g, ' ');
-    const detail = [
-      active.appointmentNumber,
-      when,
-      statusLabel && statusLabel.charAt(0).toUpperCase() + statusLabel.slice(1),
-      owningProject?.projectNumber,
-    ].filter(Boolean).join(' · ');
-    const message = options.audience === 'staff'
-      ? `This customer already has an active ${kind}${detail ? ` (${detail})` : ''}. Complete or cancel it first.`
-      : `You already have an active appointment${detail ? ` (${detail})` : ''}. Please complete or cancel it first.`;
-    throw AppError.conflict(
-      message,
-      ErrorCode.DUPLICATE_ENTRY,
-      {
-        activeAppointmentId: active._id.toString(),
-        activeAppointmentNumber: active.appointmentNumber,
-        activeAppointmentStatus: active.status,
-        activeAppointmentType: active.type,
-        activeAppointmentDate: active.date,
-        activeAppointmentSlotCode: active.slotCode,
-        activeProjectNumber: owningProject?.projectNumber,
-      },
-    );
-  }
-}
+  }).select('appointmentNumber').lean();
+  if (active.length < MAX_ACTIVE_APPOINTMENTS_PER_CUSTOMER) return;
 
-function formatAppointmentDate(dateStr: string) {
-  const [year = 0, month = 1, day = 1] = dateStr.slice(0, 10).split('-').map(Number);
-  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  const numbers = active
+    .map((appointment) => appointment.appointmentNumber)
+    .filter((value): value is string => Boolean(value));
+  const list = numbers.length ? ` (${numbers.join(', ')})` : '';
+  const message = options.audience === 'staff'
+    ? `This customer already has ${active.length} active appointments${list}. Complete or cancel one first.`
+    : `You already have ${active.length} active appointments${list}. Please complete or cancel one before booking another.`;
+  throw AppError.conflict(message, ErrorCode.ACTIVE_APPOINTMENT_LIMIT, {
+    activeAppointmentLimit: MAX_ACTIVE_APPOINTMENTS_PER_CUSTOMER,
+    activeAppointmentCount: active.length,
+    activeAppointmentNumbers: numbers,
   });
 }
 
@@ -527,9 +501,9 @@ export async function prepareProjectOcularSchedule(input: {
   route?: OcularRoute;
 }): Promise<string> {
   assertOcularAfterConsultation(input.date, input.consultationDate);
-  // The customer's schedule stays locked until the caller has saved the ocular appointment.
+  // The customer's schedule stays locked until the caller has saved the ocular appointment. An ocular
+  // visit continues an existing project, so only a time overlap blocks it (no active-appointment cap).
   await acquireCustomerScheduleLock(input.locks, input.customerId, input.lockedBy || input.customerId);
-  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
   await assertCustomerScheduleFree({
     customerId: input.customerId,
     date: input.date,
@@ -568,7 +542,6 @@ export async function assertConsultationOcularSchedule(input: {
   }
   const ownAppointmentIds = [input.consultationAppointmentId, input.existingOcularId].filter((id): id is string => Boolean(id));
   await acquireCustomerScheduleLock(input.locks, input.customerId, input.salesStaffId);
-  await assertNoActiveAppointment(input.customerId, ownAppointmentIds, { audience: 'staff' });
   await assertCustomerScheduleFree({
     customerId: input.customerId,
     date: input.date,
@@ -993,7 +966,7 @@ async function requestAppointmentLocked(
   }
 
   await acquireCustomerScheduleLock(locks, customerId, customerId);
-  await assertNoActiveAppointment(customerId);
+  await assertActiveAppointmentLimit(customerId);
   await assertCustomerScheduleFree({ customerId, date: input.date, slotCode: input.slotCode, incomingType: input.type });
   await assertDateAvailable(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
@@ -1084,7 +1057,7 @@ async function agentCreateAppointmentLocked(
   }
 
   await acquireCustomerScheduleLock(locks, input.customerId, agentId);
-  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
+  await assertActiveAppointmentLimit(input.customerId, { audience: 'staff' });
   await assertCustomerScheduleFree({
     customerId: input.customerId,
     date: input.date,
@@ -1557,7 +1530,6 @@ async function agentCreateOcularLocked(
   }
 
   await acquireCustomerScheduleLock(locks, input.customerId, actorId);
-  await assertNoActiveAppointment(input.customerId, [], { audience: 'staff' });
   await assertCustomerScheduleFree({
     customerId: input.customerId,
     date: input.date,
