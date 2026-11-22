@@ -209,9 +209,16 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     const projectId = await projectWaitingForOcular();
     await bookConsultation('09:00');
 
-    await expect(scheduleOcular(projectId, '09:00')).rejects.toThrow(/This customer already has an active consultation \(APT-20261118-\d+ · Nov 18, 2026, 9:00 AM · Confirmed\)/);
+    await expect(scheduleOcular(projectId, '09:00')).rejects.toMatchObject({
+      ...CONFLICT,
+      message: expect.stringMatching(/^This customer already has a consultation on Nov 18, 2026, 9:00 AM to 10:00 AM \(APT-20261118-\d+ · Confirmed\)\. An ocular visit on Nov 18, 2026 at 9:00 AM would overlap it\./),
+    });
     expect(await heldOn('09:00')).toBe(1);
     expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OCULAR })).toBe(0);
+
+    // The pending consultation (another project) does not block the ocular visit at a free time.
+    await scheduleOcular(projectId, '11:00');
+    expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OCULAR, date: DAY, slotCode: '11:00' })).toBe(1);
   });
 
   it('ocular visit first: refuses a consultation booking at the same start time, by the customer or by an agent', async () => {
@@ -220,12 +227,37 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
 
     await expect(appointments.requestAppointment(
       { type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00', serviceTypes: ['railings'] } as never, customerId, [Role.CUSTOMER],
-    )).rejects.toThrow(/You already have an active appointment \(APT-20261118-\d+ · Nov 18, 2026, 9:00 AM · Confirmed · PRJ-2026-\d+\)/);
+    )).rejects.toMatchObject({
+      ...CONFLICT,
+      message: expect.stringMatching(/^You already have an ocular visit on Nov 18, 2026, 9:00 AM to 10:00 AM \(APT-20261118-\d+ · Confirmed · PRJ-2026-\d+\)\. A consultation on Nov 18, 2026 at 9:00 AM would overlap it\./),
+    });
     await expect(appointments.agentCreateAppointment(
       { customerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00' } as never, agentId,
-    )).rejects.toThrow('This customer already has an active ocular visit');
+    )).rejects.toMatchObject({ ...CONFLICT, message: expect.stringContaining('This customer already has an ocular visit on Nov 18, 2026, 9:00 AM to 10:00 AM') });
     expect(await heldOn('09:00')).toBe(1);
     expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OFFICE, date: DAY })).toBe(0);
+  });
+
+  it('multiple bookings: a new consultation at its own time is accepted while others are active, up to 3 active', async () => {
+    const projectId = await projectWaitingForOcular();
+    await scheduleOcular(projectId, '09:00');
+    // Same day, another hour: accepted although the ocular visit is still active.
+    await bookConsultation('11:00');
+    // Another day: accepted.
+    await bookConsultation('09:00', '2026-11-19');
+
+    // 3 active now (ocular + 2 consultations): a 4th booking is refused, by the customer or an agent.
+    await expect(appointments.requestAppointment(
+      { type: AppointmentType.OFFICE, date: '2026-11-20', slotCode: '09:00', serviceTypes: ['railings'] } as never, customerId, [Role.CUSTOMER],
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ACTIVE_APPOINTMENT_LIMIT',
+      message: expect.stringMatching(/^You already have 3 active appointments \(.+\)\. Please complete or cancel one before booking another\.$/),
+    });
+    await expect(appointments.agentCreateAppointment(
+      { customerId, type: AppointmentType.OFFICE, date: '2026-11-20', slotCode: '09:00' } as never, agentId,
+    )).rejects.toMatchObject({ code: 'ACTIVE_APPOINTMENT_LIMIT', message: expect.stringContaining('This customer already has 3 active appointments') });
+    expect(await Appointment.countDocuments({ customerId, date: '2026-11-20' })).toBe(0);
   });
 
   /**

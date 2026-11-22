@@ -190,23 +190,20 @@ function createAppointment(overrides: Record<string, unknown> = {}) {
 describe('prepareProjectOcularSchedule', () => {
   afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
-  it('rejects a second active appointment before scheduling a pending ocular', async () => {
+  it("is not blocked by the customer's other active appointment (another project's booking); only a time overlap blocks it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
     mockAppointmentFindOne.mockResolvedValue({ _id: 'active-1', status: AppointmentStatus.REQUESTED });
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' })).rejects.toThrow('This customer already has an active');
-  });
+    mockHolidayFindOne.mockResolvedValue(null);
+    // Stops at the slot check, which runs after every customer check.
+    mockBlockedSlotExists.mockResolvedValueOnce(true);
 
-  it("names the blocking appointment, including another project's ocular hidden from the Appointments page", async () => {
-    mockAppointmentFindOne.mockResolvedValue({
-      _id: 'ocular-other', appointmentNumber: 'APT-20261113-0002', type: AppointmentType.OCULAR,
-      date: '2026-11-13', slotCode: '09:00', status: AppointmentStatus.CONFIRMED,
-    });
-    mockProjectFindOne.mockReturnValueOnce({ select: () => ({ lean: async () => ({ projectNumber: 'PRJ-2026-00091' }) }) });
-
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-11-28', slotCode: '11:00', salesStaffId: 'sales-1' }))
-      .rejects.toMatchObject({
-        message: 'This customer already has an active ocular visit (APT-20261113-0002 · Nov 13, 2026, 9:00 AM · Confirmed · PRJ-2026-00091). Complete or cancel it first.',
-        details: expect.objectContaining({ activeAppointmentNumber: 'APT-20261113-0002', activeProjectNumber: 'PRJ-2026-00091' }),
-      });
+    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' }))
+      .rejects.toThrow('blocked by an administrator');
+    expect(mockAppointmentFind).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'customer-1' }));
+    expect(mockAssertCustomerScheduleFree).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', incomingType: AppointmentType.OCULAR,
+    }));
   });
 
   it('rejects an ocular scheduled less than 3 days after its consultation', async () => {
@@ -782,17 +779,6 @@ describe('sales staff availability per time slot', () => {
     expect(result.slots.every((slot) => slot.available && slot.remaining === 1)).toBe(true);
   });
 
-  it('counts an ocular visit already under way as an active appointment of the customer', async () => {
-    mockAppointmentFindOne.mockResolvedValue({ _id: 'ocular-1', status: AppointmentStatus.ON_THE_WAY });
-
-    await expect(prepareProjectOcularSchedule({ customerId: 'customer-1', date: '2026-10-08', slotCode: '09:00', salesStaffId: 'sales-1' }))
-      .rejects.toThrow('This customer already has an active');
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith({
-      customerId: 'customer-1',
-      status: { $in: expect.arrayContaining([AppointmentStatus.ON_THE_WAY, AppointmentStatus.IN_PROGRESS]) },
-    });
-  });
-
   it('rejects an ocular visit at a time that is not a real slot', async () => {
     await expect(assertConsultationOcularSchedule({
       customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-10-08', slotCode: '09:30',
@@ -800,16 +786,22 @@ describe('sales staff availability per time slot', () => {
     })).rejects.toThrow('Choose a valid ocular visit time.');
   });
 
-  it('never lets the source consultation or the moved ocular visit block itself', async () => {
+  it("never lets the source consultation or the moved ocular visit block itself, nor the customer's other active appointment", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-05T01:00:00Z'));
     mockAppointmentFindOne.mockResolvedValue({ _id: 'other-1', status: AppointmentStatus.CONFIRMED });
+    mockHolidayFindOne.mockResolvedValue(null);
+    // Stops at the slot check, which runs after every customer check.
+    mockBlockedSlotExists.mockResolvedValueOnce(true);
 
     await expect(assertConsultationOcularSchedule({
       customerId: 'customer-1', salesStaffId: 'sales-1', date: '2026-10-08', slotCode: '09:00',
       consultationAppointmentId: 'consult-1', existingOcularId: 'ocular-1',
-    })).rejects.toThrow('This customer already has an active');
-    expect(mockAppointmentFindOne).toHaveBeenCalledWith(expect.objectContaining({
+    })).rejects.toThrow('blocked by an administrator');
+    expect(mockAppointmentFind).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'customer-1' }));
+    expect(mockAssertCustomerScheduleFree).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
-      _id: { $nin: ['consult-1', 'ocular-1'] },
+      excludeAppointmentIds: ['consult-1', 'ocular-1'],
     }));
   });
 });
@@ -860,11 +852,16 @@ describe('requestAppointment', () => {
     vi.clearAllMocks();
   });
 
-  it('persists multiple selected designs and keeps the first as the legacy snapshot', async () => {
+  /** Booking on Aug 24, 2026 by a customer who holds `activeAppointments` (the first find: the cap). */
+  function mockActiveAppointments(activeAppointments: Array<{ appointmentNumber: string }>) {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    mockAppointmentFind.mockReturnValueOnce(selectLeanResult(activeAppointments));
+  }
 
-    mockAppointmentFindOne.mockResolvedValueOnce(null);
+  /** A free 9:00 AM office slot on Sep 1, 2026, booked by a customer who holds `activeAppointments`. */
+  function mockBookableOfficeSlot(activeAppointments: Array<{ appointmentNumber: string }> = []) {
+    mockActiveAppointments(activeAppointments);
     mockHolidayFindOne.mockResolvedValueOnce(null);
     mockBlockedSlotExists.mockResolvedValueOnce(false);
     mockUserFind.mockReturnValueOnce(selectLeanResult([{
@@ -888,6 +885,49 @@ describe('requestAppointment', () => {
     }));
     mockAuditCreate.mockResolvedValueOnce({});
     mockNotifyRole.mockResolvedValueOnce(undefined);
+  }
+
+  const officeRequest = {
+    type: AppointmentType.OFFICE,
+    date: '2026-09-01',
+    slotCode: '09:00',
+    serviceTypes: [ServiceType.RAILINGS],
+  } as Parameters<typeof requestAppointment>[0];
+
+  it('books another appointment while the customer already holds 2 active ones (each at its own date and time)', async () => {
+    mockBookableOfficeSlot([{ appointmentNumber: 'APT-20261126-0001' }, { appointmentNumber: 'APT-20261127-0001' }]);
+
+    await requestAppointment(officeRequest, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mockAppointmentFind).toHaveBeenNthCalledWith(1, {
+      customerId: 'customer-1',
+      status: { $in: expect.arrayContaining([AppointmentStatus.REQUESTED, AppointmentStatus.ON_THE_WAY, AppointmentStatus.IN_PROGRESS]) },
+    });
+    // Only an overlapping time blocks the customer.
+    expect(mockAssertCustomerScheduleFree).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1', date: '2026-09-01', slotCode: '09:00',
+    }));
+    expect(mockAppointmentCreate).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a 4th booking while the customer holds 3 active appointments', async () => {
+    mockActiveAppointments([
+      { appointmentNumber: 'APT-20261126-0001' },
+      { appointmentNumber: 'APT-20261127-0001' },
+      { appointmentNumber: 'APT-20261128-0001' },
+    ]);
+
+    await expect(requestAppointment(officeRequest, 'customer-1', [Role.CUSTOMER])).rejects.toMatchObject({
+      code: 'ACTIVE_APPOINTMENT_LIMIT',
+      message: 'You already have 3 active appointments (APT-20261126-0001, APT-20261127-0001, APT-20261128-0001). Please complete or cancel one before booking another.',
+      details: expect.objectContaining({ activeAppointmentLimit: 3, activeAppointmentCount: 3 }),
+    });
+    expect(mockAppointmentCreate).not.toHaveBeenCalled();
+    expect(mockAssertCustomerScheduleFree).not.toHaveBeenCalled();
+  });
+
+  it('persists multiple selected designs and keeps the first as the legacy snapshot', async () => {
+    mockBookableOfficeSlot();
 
     await requestAppointment(
       {
