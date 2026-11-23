@@ -594,7 +594,7 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
   // Enforce the minimum advance booking
   const minBookingDate = startOfDay(addDays(now, MIN_BOOKING_LEAD_DAYS));
   if (isBefore(target, minBookingDate)) {
-    throw AppError.badRequest(`Appointments must be booked at least ${MIN_BOOKING_LEAD_DAYS} days in advance`);
+    throw AppError.badRequest(`Appointments must be booked at least ${MIN_BOOKING_LEAD_DAYS} day${MIN_BOOKING_LEAD_DAYS === 1 ? '' : 's'} in advance`);
   }
 
   // Bookings are open every day of the week; only holidays are blocked.
