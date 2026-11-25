@@ -7,6 +7,13 @@ export const recordCashCollectionSchema = z.object({
   amountCollected: z.number().positive().max(MAX_CASH_AMOUNT),
   notes: z.string().max(500).trim().optional(),
   photoKey: z.string().optional(),
+  customerAcknowledgedInPerson: z.boolean().optional(),
+});
+
+/** Sales staff records cash the customer handed over during the ocular visit. */
+export const onsiteCashSchema = z.object({
+  customerAcknowledgedInPerson: z.boolean().optional(),
+  notes: z.string().max(500).trim().optional(),
 });
 
 export const receiveCashSchema = z.object({
@@ -18,5 +25,6 @@ export const resolveDiscrepancySchema = z.object({
 });
 
 export type RecordCashCollectionInput = z.infer<typeof recordCashCollectionSchema>;
+export type OnsiteCashBody = z.infer<typeof onsiteCashSchema>;
 export type ReceiveCashInput = z.infer<typeof receiveCashSchema>;
 export type ResolveDiscrepancyInput = z.infer<typeof resolveDiscrepancySchema>;

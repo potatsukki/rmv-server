@@ -43,9 +43,44 @@ function cleanReference(input: RecordFeeInput) {
   return referenceNumber;
 }
 
+/** Official receipt PDF + number for a one-off fee, issued in the cashier's (`issuerId`) name. */
+async function generateFeeReceipt(args: {
+  project: { _id: Types.ObjectId; customerId: Types.ObjectId; title: string };
+  label: string;
+  amount: number;
+  method: PaymentMethod | string;
+  referenceNumber?: string;
+  issuerId: string;
+  issuedAt: Date;
+}) {
+  const receiptNumber = await generateNextReceiptNumber();
+  const [customer, issuer] = await Promise.all([User.findById(args.project.customerId), User.findById(args.issuerId)]);
+  const receipt = await generateAndUploadReceipt({
+    receiptNumber,
+    customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
+    customerEmail: customer?.email || '',
+    customerAddress: '',
+    projectTitle: args.project.title,
+    stageName: args.label,
+    amountPaid: args.amount,
+    paymentMethod: args.method as PaymentMethod,
+    referenceNumber: args.referenceNumber,
+    creditApplied: 0,
+    excessCredit: 0,
+    verifiedByName: issuer ? `${issuer.firstName} ${issuer.lastName}` : 'Cashier',
+    verifiedAt: args.issuedAt,
+    totalProjectCost: args.amount,
+    totalPaid: args.amount,
+    totalOutstanding: 0,
+  });
+  return { receiptNumber, receipt, customer };
+}
+
 /**
- * Shared cashier flow for a one-off fee (design fee, revision fee): receipt PDF, verified Payment,
- * audit log, customer notification + receipt email. The caller has already claimed the fee atomically.
+ * Shared flow for a one-off fee (design fee, revision fee): verified Payment, audit log, and — when
+ * the cashier records it — the receipt PDF + email. Cash a sales staff collected (`issueReceipt:
+ * false`) is paid at once without a receipt; the cashier issues it on receiving the cash
+ * (issueFeeReceipt). The caller has already claimed the fee atomically.
  */
 async function issueVerifiedFeePayment(args: {
   paymentId: Types.ObjectId;
@@ -61,28 +96,16 @@ async function issueVerifiedFeePayment(args: {
   paidAt: Date;
   ip?: string;
   ua?: string;
+  issueReceipt?: boolean;
 }) {
   const { project, amount, label, input, referenceNumber, actorId, paidAt } = args;
-  const receiptNumber = await generateNextReceiptNumber();
-  const [customer, cashier] = await Promise.all([User.findById(project.customerId), User.findById(actorId)]);
-  const receipt = await generateAndUploadReceipt({
-    receiptNumber,
-    customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
-    customerEmail: customer?.email || '',
-    customerAddress: '',
-    projectTitle: project.title,
-    stageName: label,
-    amountPaid: amount,
-    paymentMethod: input.method,
-    referenceNumber,
-    creditApplied: 0,
-    excessCredit: 0,
-    verifiedByName: cashier ? `${cashier.firstName} ${cashier.lastName}` : 'Cashier',
-    verifiedAt: paidAt,
-    totalProjectCost: amount,
-    totalPaid: amount,
-    totalOutstanding: 0,
-  });
+  const issued = args.issueReceipt === false
+    ? null
+    : await generateFeeReceipt({ project, label, amount, method: input.method, referenceNumber, issuerId: actorId, issuedAt: paidAt });
+  const receiptNumber = issued?.receiptNumber;
+  const receiptKey = issued?.receipt.key || undefined;
+  const customer = issued?.customer;
+  const receipt = issued?.receipt;
 
   const payment = await Payment.create({
     _id: args.paymentId,
@@ -99,7 +122,7 @@ async function issueVerifiedFeePayment(args: {
     verifiedBy: actorId,
     verifiedAt: paidAt,
     receiptNumber,
-    receiptKey: receipt.key || undefined,
+    receiptKey,
     evidenceTrail: [{
       version: 1,
       source: args.source,
@@ -107,9 +130,9 @@ async function issueVerifiedFeePayment(args: {
       method: input.method,
       amountPaid: amount,
       referenceNumber,
-      receiptKey: receipt.key || undefined,
+      receiptKey,
       receiptNumber,
-      note: `${label} recorded and receipt issued`,
+      note: issued ? `${label} recorded and receipt issued` : `${label} received; the cashier issues the official receipt on receiving the cash`,
       actorId,
       capturedAt: paidAt,
     }],
@@ -125,7 +148,7 @@ async function issueVerifiedFeePayment(args: {
     userAgent: args.ua,
   });
 
-  if (customer?.email) {
+  if (customer?.email && receiptNumber && receipt) {
     await sendPaymentVerifiedEmail(customer.email, {
       amount: formatCurrency(amount),
       stageLabel: label,
@@ -140,6 +163,53 @@ async function issueVerifiedFeePayment(args: {
   });
 
   return { payment, receiptNumber };
+}
+
+/**
+ * The cashier received the cash a sales staff collected for a design / revision fee: issue its
+ * official receipt now (in the cashier's name) and email it. Returns the existing number when the
+ * payment already has one.
+ */
+export async function issueFeeReceipt(paymentId: string | Types.ObjectId, cashierId: string) {
+  const payment = await Payment.findById(paymentId);
+  if (!payment) throw AppError.notFound('Payment not found');
+  if (payment.receiptNumber) return payment.receiptNumber;
+  const project = await Project.findById(payment.projectId);
+  if (!project) throw AppError.notFound('Project not found');
+
+  const label = isRevisionFeePaymentStage(payment.stageId) ? 'Revision Fee' : DESIGN_FEE_LABEL;
+  const issuedAt = new Date();
+  const { receiptNumber, receipt, customer } = await generateFeeReceipt({
+    project, label, amount: payment.amountPaid, method: payment.method,
+    referenceNumber: payment.referenceNumber, issuerId: cashierId, issuedAt,
+  });
+  payment.receiptNumber = receiptNumber;
+  if (receipt.key) payment.receiptKey = receipt.key;
+  payment.evidenceTrail.push({
+    version: payment.evidenceTrail.length + 1,
+    source: 'cashier_receipt_on_turnover',
+    status: payment.status,
+    method: payment.method,
+    amountPaid: payment.amountPaid,
+    receiptKey: receipt.key || undefined,
+    receiptNumber,
+    note: 'Official receipt issued when the cashier received the cash',
+    actorId: cashierId as unknown as Types.ObjectId,
+    capturedAt: issuedAt,
+  });
+  await payment.save();
+  if (isDesignFeePaymentStage(payment.stageId)) {
+    await Project.updateOne({ _id: project._id }, { $set: { 'designFee.receiptNumber': receiptNumber } });
+  }
+  if (customer?.email) {
+    await sendPaymentVerifiedEmail(customer.email, {
+      amount: formatCurrency(payment.amountPaid),
+      stageLabel: label,
+      receiptNumber,
+      projectId: project._id.toString(),
+    }, receipt.buffer.length > 0 ? receipt.buffer : undefined);
+  }
+  return receiptNumber;
 }
 
 // ── Design fee becomes due once the customer proceeds (project submitted after the ocular) ──
@@ -215,6 +285,12 @@ export async function recordDesignFeePayment(
   actorId: string,
   ip?: string,
   ua?: string,
+  /**
+   * Evidence source; the sales staff's on-site cash collection passes its own with
+   * `issueReceipt: false` (the cashier issues the receipt on receiving the cash, and the caller
+   * sends the customer the collection acknowledgement).
+   */
+  options: { source?: string; issueReceipt?: boolean } = {},
 ) {
   const existing = await Project.findById(projectId);
   if (!existing) throw AppError.notFound('Project not found');
@@ -268,21 +344,23 @@ export async function recordDesignFeePayment(
     input,
     referenceNumber,
     actorId,
-    source: 'cashier_design_fee',
+    source: options.source ?? 'cashier_design_fee',
     auditType: 'design_fee',
     paidAt: now,
     ip,
     ua,
+    issueReceipt: options.issueReceipt,
   });
-  await Project.updateOne({ _id: project._id }, { $set: { 'designFee.receiptNumber': receiptNumber } });
-
-  await createAndSendNotification(
-    project.customerId,
-    NotificationCategory.PAYMENT,
-    'Design Fee Received',
-    `Your design fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. The engineer can now start your blueprint.`,
-    `/projects/${project._id}/payments`,
-  );
+  if (receiptNumber) {
+    await Project.updateOne({ _id: project._id }, { $set: { 'designFee.receiptNumber': receiptNumber } });
+    await createAndSendNotification(
+      project.customerId,
+      NotificationCategory.PAYMENT,
+      'Design Fee Received',
+      `Your design fee of ${formatCurrency(amount)} for "${project.title}" is verified. Receipt: ${receiptNumber}. The engineer can now start your blueprint.`,
+      `/projects/${project._id}/payments`,
+    );
+  }
   await notifyRole(
     Role.ENGINEER,
     NotificationCategory.PROJECT,

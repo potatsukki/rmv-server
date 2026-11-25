@@ -1960,15 +1960,9 @@ export async function agentFinalizeOcular(
     throw AppError.badRequest('Customer has not yet submitted their location');
   }
 
-  // Ensure ocular fee is resolved (paid, within NCR, or cash will be collected on-site)
-  const isWithinNCR = appointment.ocularFeeBreakdown?.isWithinNCR;
-  const isCashOnSite = appointment.ocularFeeStatus === 'cash_pending';
-  if (!isWithinNCR && !appointment.ocularFeePaid && !isCashOnSite) {
-    throw AppError.badRequest(
-      'Ocular fee must be paid before finalizing. The location is outside Metro Manila.',
-      ErrorCode.VALIDATION_ERROR,
-    );
-  }
+  // An unpaid ocular fee (outside Metro Manila) no longer blocks the visit: the customer may pay
+  // online before, or in person during the visit (the sales staff records it). The visit report
+  // still needs the fee recorded (visit-reports.service submitReport).
 
   if (!appointment.salesStaffId) {
     throw AppError.badRequest(
@@ -2206,23 +2200,8 @@ export async function updateVisitStatus(
     );
   }
 
-  if (
-    appointment.type === AppointmentType.OCULAR
-    && [
-      AppointmentStatus.ON_THE_WAY,
-      AppointmentStatus.ARRIVED_AT_SITE,
-      AppointmentStatus.IN_PROGRESS,
-    ].includes(newStatus)
-    && appointment.ocularFeeBreakdown
-    && !appointment.ocularFeeBreakdown.isWithinNCR
-    && !appointment.ocularFeePaid
-    && appointment.ocularFeeStatus !== 'cash_pending'
-  ) {
-    throw AppError.badRequest(
-      'Ocular fee must be paid before starting the visit. The location is outside Metro Manila.',
-      ErrorCode.VALIDATION_ERROR,
-    );
-  }
+  // An unpaid ocular fee (outside Metro Manila) does not stop the visit: the customer may pay the
+  // sales staff at the site. The visit report still needs the fee recorded.
 
   appointmentStateMachine.assertTransition(appointment.status, newStatus);
   const statusBeforeStep = appointment.status;
@@ -4330,7 +4309,11 @@ export async function listAppointments(query: {
   if (statusGroupFilter) appendAndFilter(filter, statusGroupFilter);
   if (query.type) filter.type = query.type;
   if (query.date) filter.date = query.date;
-  if (query.ocularFeeStatus) filter.ocularFeeStatus = query.ocularFeeStatus;
+  if (query.ocularFeeStatus) {
+    // One status, or several separated by commas (the customer's unpaid fees: pending,cash_pending,declined).
+    const statuses = String(query.ocularFeeStatus).split(',').map((status) => status.trim()).filter(Boolean);
+    filter.ocularFeeStatus = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  }
   if (query.customerId && !filter.customerId) filter.customerId = query.customerId;
   if (query.salesStaffId && !filter.salesStaffId) filter.salesStaffId = query.salesStaffId;
 

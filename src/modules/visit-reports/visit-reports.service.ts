@@ -1348,11 +1348,17 @@ export async function createReport(
 
 // ── Get by ID ──
 
+/**
+ * Appointment fields the report page needs. The ocular fee fields let the sales staff see an unpaid
+ * outside-NCR fee (the report cannot be submitted until it is paid) and record the customer's cash.
+ */
+const REPORT_APPOINTMENT_FIELDS = 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt ocularFee ocularFeeBreakdown ocularFeePaid ocularFeeStatus ocularFeeNonRefundableAckAt';
+
 function populateVisitReportDetail(query: any) {
   return query
     .populate('customerId', 'firstName lastName email phone')
     .populate('salesStaffId', 'firstName lastName email')
-    .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
+    .populate('appointmentId', REPORT_APPOINTMENT_FIELDS);
 }
 
 async function findFirstVisitReportForAppointment(appointmentId: string) {
@@ -1458,7 +1464,7 @@ export async function getVisitReport(reportId: string, fabricatorId?: string) {
       })
         .populate('customerId', 'firstName lastName email phone')
         .populate('salesStaffId', 'firstName lastName email')
-        .populate('appointmentId', 'customerId date slotCode type status customerAddress serviceTypes serviceTypeCustom selectedDesignTemplateId selectedDesignTemplateName selectedDesignTemplateImageUrl customerSiteDetails salesStaffId sourceConsultationAppointmentId sourceConsultationReportId attendanceStatus actualArrivalAt consultationStartedAt consultationCompletedAt attendanceNotes attendanceUpdatedAt updatedAt createdAt');
+        .populate('appointmentId', REPORT_APPOINTMENT_FIELDS);
 
       if (canonicalReport && (!fabricatorId || await canFabricatorReadVisitReport(canonicalReport, fabricatorId))) {
         report = canonicalReport;

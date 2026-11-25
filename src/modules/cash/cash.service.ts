@@ -2,9 +2,10 @@ import {
   CashCollection, CashDiscrepancy, Appointment, AuditLog,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { CashCollectionStatus, AuditAction, NotificationCategory, Role, AppointmentStatus } from '../../utils/constants.js';
+import { CashCollectionStatus, AuditAction, NotificationCategory, Role, AppointmentStatus, AppointmentType } from '../../utils/constants.js';
 import { createAndSendNotification, notifyRole } from '../notifications/socket.service.js';
 import { formatCurrency } from '../../utils/helpers.js';
+import { collectOcularFeeOnSite, issueCollectionReceipt } from './onsite-fee.service.js';
 import type {
   RecordCashCollectionInput,
   ReceiveCashInput,
@@ -22,6 +23,22 @@ export async function recordCashCollection(
 ) {
   const appointment = await Appointment.findById(input.appointmentId);
   if (!appointment) throw AppError.notFound('Appointment not found');
+
+  // An unpaid ocular fee goes through the on-site flow: paid at once with a receipt, then received by
+  // the cashier. The amount must still match the fee exactly.
+  const ocularFee = appointment.ocularFee ?? appointment.ocularFeeBreakdown?.total ?? 0;
+  if (appointment.type === AppointmentType.OCULAR && ocularFee > 0 && !appointment.ocularFeePaid) {
+    if (Math.abs(input.amountCollected - ocularFee) > 0.01) {
+      throw AppError.badRequest(
+        `Amount must match the ocular fee of ${formatCurrency(ocularFee)}. You entered ${formatCurrency(input.amountCollected)}.`,
+      );
+    }
+    const result = await collectOcularFeeOnSite(input.appointmentId, salesStaffId, {
+      customerAcknowledgedInPerson: input.customerAcknowledgedInPerson,
+      notes: input.notes,
+    }, ip, ua);
+    return result.collection;
+  }
 
   // Only allow recording when appointment is on_the_way or completed
   const allowedStatuses = [AppointmentStatus.ON_THE_WAY, AppointmentStatus.COMPLETED];
@@ -151,6 +168,8 @@ export async function receiveCash(
   // No discrepancy
   collection.status = CashCollectionStatus.RECEIVED;
   await collection.save();
+  // The cashier has the cash: the official receipt for an on-site collection is issued now.
+  await issueCollectionReceipt(collection, cashierId);
 
   await AuditLog.create({
     action: AuditAction.CASH_RECEIVED,
@@ -195,10 +214,13 @@ export async function resolveDiscrepancy(
   discrepancy.resolutionNotes = input.resolutionNotes;
   await discrepancy.save();
 
-  // Update cash collection status
-  await CashCollection.findByIdAndUpdate(discrepancy.cashCollectionId, {
-    status: CashCollectionStatus.RECEIVED,
-  });
+  // Update cash collection status; the official receipt waited for the discrepancy to be resolved.
+  const collection = await CashCollection.findByIdAndUpdate(
+    discrepancy.cashCollectionId,
+    { status: CashCollectionStatus.RECEIVED },
+    { new: true },
+  );
+  if (collection) await issueCollectionReceipt(collection, String(discrepancy.cashierId));
 
   await AuditLog.create({
     action: AuditAction.CASH_RECEIVED,
@@ -238,6 +260,8 @@ export async function listCashCollections(query: {
       .populate('salesStaffId', 'firstName lastName')
       .populate('customerId', 'firstName lastName')
       .populate('receivedBy', 'firstName lastName')
+      .populate('appointmentId', 'appointmentNumber date')
+      .populate('projectId', 'title projectNumber')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -304,6 +328,8 @@ export async function listPendingCashAppointments(actorId: string, actorRoles: R
       ocularFee: a.ocularFee,
       ocularFeeStatus: a.ocularFeeStatus,
       ocularFeeBreakdown: a.ocularFeeBreakdown,
+      ocularFeeNonRefundableAckAt: a.ocularFeeNonRefundableAckAt,
+      appointmentNumber: a.appointmentNumber,
       formattedAddress: a.formattedAddress || a.customerAddress,
       customerId: customer?._id || a.customerId,
       customerName: customer ? `${customer.firstName} ${customer.lastName}` : undefined,
