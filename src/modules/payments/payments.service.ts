@@ -799,9 +799,10 @@ export async function getPaymentEvidenceTrail(
   };
 }
 
-export async function issueGcashReceipt(payment: import('../../models/Payment.js').IPayment) {
+/** Receipt for a booking (ocular fee) or stage payment. `issuerId`: the cashier whose name it carries (default: who verified it). */
+export async function issueGcashReceipt(payment: import('../../models/Payment.js').IPayment, issuerId?: string) {
   const customer = await User.findById(payment.customerId);
-  const verifier = await User.findById(payment.verifiedBy);
+  const verifier = await User.findById(issuerId ?? payment.verifiedBy);
   const project = payment.projectId ? await Project.findById(payment.projectId) : null;
   const booking = payment.bookingId ? await Appointment.findById(payment.bookingId) : null;
   const plan = payment.projectId ? await PaymentPlan.findOne({ 'stages.stageId': payment.stageId }) : null;
@@ -853,6 +854,8 @@ export async function getMyPaymentHistory(customerId: string) {
   // Build unified timeline
   const history: Array<{
     _id: string;
+    /** Ocular fee rows: the appointment to pay for (the customer can still pay an unpaid one). */
+    bookingId?: string;
     type: 'project_payment' | 'ocular_fee';
     amount: number;
     status: string;
@@ -895,6 +898,7 @@ export async function getMyPaymentHistory(customerId: string) {
   for (const a of ocularAppointments) {
     history.push({
       _id: a._id.toString(),
+      bookingId: a._id.toString(),
       type: 'ocular_fee',
       amount: a.ocularFee!,
       status: a.ocularFeePaid ? 'verified' : (a.ocularFeeStatus || 'pending'),
@@ -904,7 +908,7 @@ export async function getMyPaymentHistory(customerId: string) {
     });
   }
   for (const payment of bookingPayments) {
-    history.push({ _id: payment._id.toString(), type: 'ocular_fee', amount: payment.amountPaid,
+    history.push({ _id: payment._id.toString(), bookingId: payment.bookingId?.toString(), type: 'ocular_fee', amount: payment.amountPaid || payment.amountRequired || 0,
       status: payment.paymentStatus || payment.status, method: payment.method, referenceNumber: payment.referenceNumber,
       receiptNumber: payment.receiptNumber, description: 'Booking Payment', date: payment.createdAt.toISOString(),
       declineReason: payment.declineReason, verifiedAt: payment.verifiedAt, rejectedAt: payment.rejectedAt,

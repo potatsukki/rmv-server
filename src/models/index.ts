@@ -10,7 +10,7 @@ export { ProjectItem, type IProjectItem } from './ProjectItem.js';
 export { Blueprint, type IBlueprint } from './Blueprint.js';
 export { BlueprintDraft, type IBlueprintDraft } from './BlueprintDraft.js';
 export { PaymentPlan, type IPaymentPlan, Payment, type IPayment, type IPaymentStage } from './Payment.js';
-export { CashCollection, type ICashCollection } from './CashCollection.js';
+export { CashCollection, type ICashCollection, CashCollectionCounter, generateNextCollectionNumber } from './CashCollection.js';
 export { CashDiscrepancy, type ICashDiscrepancy } from './CashDiscrepancy.js';
 export { FabricationUpdate, type IFabricationUpdate } from './FabricationUpdate.js';
 export { FabricationItem, type IFabricationItem } from './FabricationItem.js';

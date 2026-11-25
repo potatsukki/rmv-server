@@ -1,6 +1,21 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as cashService from './cash.service.js';
+import * as onsiteFeeService from './onsite-fee.service.js';
+
+export const collectOcularFeeOnSite = asyncHandler(async (req: Request, res: Response) => {
+  const result = await onsiteFeeService.collectOcularFeeOnSite(
+    req.params.appointmentId as string, req.userId!, req.body, req.ip, req.get('user-agent'),
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const collectDesignFeeOnSite = asyncHandler(async (req: Request, res: Response) => {
+  const result = await onsiteFeeService.collectDesignFeeOnSite(
+    req.params.projectId as string, req.userId!, req.body, req.ip, req.get('user-agent'),
+  );
+  res.status(201).json({ success: true, data: result });
+});
 
 export const recordCashCollection = asyncHandler(async (req: Request, res: Response) => {
   const collection = await cashService.recordCashCollection(req.body, req.userId!, req.ip, req.get('user-agent'));

@@ -5,12 +5,30 @@ import { authorize } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { Role } from '../../utils/constants.js';
 import {
+  onsiteCashSchema,
   recordCashCollectionSchema,
   receiveCashSchema,
   resolveDiscrepancySchema,
 } from './cash.validation.js';
 
 const router = Router();
+
+// ── Sales Staff: cash taken during the ocular visit (paid at once; the cashier receives it later) ──
+router.post(
+  '/onsite/ocular-fee/:appointmentId',
+  authenticate,
+  authorize(Role.SALES_STAFF),
+  validate(onsiteCashSchema),
+  ctrl.collectOcularFeeOnSite,
+);
+
+router.post(
+  '/onsite/design-fee/:projectId',
+  authenticate,
+  authorize(Role.SALES_STAFF),
+  validate(onsiteCashSchema),
+  ctrl.collectDesignFeeOnSite,
+);
 
 // ── Sales Staff: Record ──
 router.post(
