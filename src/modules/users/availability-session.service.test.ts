@@ -29,6 +29,7 @@ import {
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
   legMinutes,
+  roundTravelMinutes,
   SALES_SLOT_FREEING_STATUSES,
   slotsOverlap,
   staffBusyWindow,
@@ -321,43 +322,59 @@ describe('availability-session.service sales staff appointment conflicts per tim
 
   describe('ocular visit busy time (travel + traffic + 1.5 hr on site)', () => {
     const office = (slotCode: string) => ({ type: AppointmentType.OFFICE, slotCode });
-    // 45 min drive, 18 km away: 45 min of traffic is added each way.
+    // 45 min drive (rounded to 1 hr), 18 km away: 1 hr of traffic is added each way.
     const farOcular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode, travelDurationMinutes: 45, distanceKm: 18 });
-    // 10 min drive, 3 km away: near the shop, so no traffic allowance.
+    // 10 min drive (rounded to 30 min), 3 km away: near the shop, so no traffic allowance.
     const nearOcular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode, travelDurationMinutes: 10, distanceKm: 3 });
 
-    it('adds 45 min of traffic to each one-way trip, except for a site within 4 km of the shop', () => {
-      expect(legMinutes(45, 18)).toBe(90);
-      expect(legMinutes(10, 3)).toBe(10);
-      expect(legMinutes(10, 4)).toBe(10);
-      expect(legMinutes(44.2, undefined)).toBe(90);
+    it('rounds the drive time up to the next 30 min', () => {
+      expect(roundTravelMinutes(0)).toBe(0);
+      expect(roundTravelMinutes(10)).toBe(30);
+      expect(roundTravelMinutes(30)).toBe(30);
+      expect(roundTravelMinutes(31)).toBe(60);
+      expect(roundTravelMinutes(48)).toBe(60);
+      expect(roundTravelMinutes(70)).toBe(90);
+      expect(roundTravelMinutes(90)).toBe(90);
+      expect(roundTravelMinutes(91)).toBe(120);
+      expect(roundTravelMinutes(-5)).toBe(0);
+    });
+
+    it('adds 1 hr of traffic to each rounded one-way trip, except for a site within 4 km of the shop', () => {
+      expect(legMinutes(45, 18)).toBe(120);
+      expect(legMinutes(48, 41)).toBe(120);
+      expect(legMinutes(10, 3)).toBe(30);
+      expect(legMinutes(10, 4)).toBe(30);
+      expect(legMinutes(44.2, undefined)).toBe(120);
     });
 
     it('keeps the staff busy from leaving the shop until getting back', () => {
-      expect(staffBusyWindow(farOcular('13:00'))).toEqual({ start: 11 * 60 + 30, end: 16 * 60 });
-      expect(staffBusyWindow(nearOcular('13:00'))).toEqual({ start: 12 * 60 + 50, end: 14 * 60 + 40 });
+      expect(staffBusyWindow(farOcular('13:00'))).toEqual({ start: 11 * 60, end: 16 * 60 + 30 });
+      expect(staffBusyWindow(nearOcular('13:00'))).toEqual({ start: 12 * 60 + 30, end: 15 * 60 });
+      // The QA site: 48 min / 41 km at 10:00 → leave 8:00 AM, back 1:30 PM.
+      expect(staffBusyWindow({ type: AppointmentType.OCULAR, slotCode: '10:00', travelDurationMinutes: 48, distanceKm: 41 }))
+        .toEqual({ start: 8 * 60, end: 13 * 60 + 30 });
       expect(staffBusyWindow(office('13:00'))).toEqual({ start: 13 * 60, end: 14 * 60 });
       expect(staffBusyWindow({ type: AppointmentType.OCULAR, slotCode: '13:00' })).toBeNull();
     });
 
     it('rejects a booking while the staff is travelling or on site, and frees the rest of the day', () => {
-      // 1 PM far ocular: away 11:30 AM–4:00 PM.
+      // 1 PM far ocular: away 11:00 AM–4:30 PM.
       expect(appointmentsConflict(farOcular('13:00'), office('14:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('11:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('15:00'))).toBe(true);
+      expect(appointmentsConflict(farOcular('13:00'), office('16:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('10:00'))).toBe(false);
-      expect(appointmentsConflict(farOcular('13:00'), office('16:00'))).toBe(false);
-      // Another far ocular at 4 PM must leave at 2:30 PM, while the staff is still away.
+      // Another far ocular at 4 PM must leave at 2:00 PM, while the staff is still away.
       expect(appointmentsConflict(farOcular('13:00'), farOcular('16:00'))).toBe(true);
-      // 1 PM near ocular: away 12:50–2:40 PM, so 3 PM is free.
+      // 1 PM near ocular: away 12:30–3:00 PM, so 3 PM is free.
       expect(appointmentsConflict(nearOcular('13:00'), office('15:00'))).toBe(false);
       expect(appointmentsConflict(nearOcular('13:00'), office('14:00'))).toBe(true);
     });
 
     it('allows two ocular visits on the same day when their busy times do not overlap', () => {
-      // 9 AM near ocular (8:50–10:50 AM) + 1 PM far ocular (11:30 AM–4:00 PM).
+      // 9 AM near ocular (8:30–11:00 AM) + 1 PM far ocular (11:00 AM–4:30 PM).
       expect(appointmentsConflict(nearOcular('09:00'), farOcular('13:00'))).toBe(false);
-      // Two far ones: 7:30 AM–12:00 PM and 11:30 AM–4:00 PM overlap.
+      // Two far ones: 7:00 AM–12:30 PM and 11:00 AM–4:30 PM overlap.
       expect(appointmentsConflict(farOcular('09:00'), farOcular('13:00'))).toBe(true);
     });
 
@@ -368,7 +385,7 @@ describe('availability-session.service sales staff appointment conflicts per tim
 
       expect(result).toEqual({
         assignmentEligible: false,
-        assignmentBlockedReason: 'Has an ocular visit that day (1:00 PM, Nov 14, 2026 · APT-20261114-0001) and is away 11:30 AM–4:00 PM, travel included',
+        assignmentBlockedReason: 'Has an ocular visit that day (1:00 PM, Nov 14, 2026 · APT-20261114-0001) and is away 11:00 AM–4:30 PM, travel included',
       });
     });
 
@@ -385,14 +402,15 @@ describe('availability-session.service sales staff appointment conflicts per tim
 
       expect(result).toEqual({
         assignmentEligible: false,
-        assignmentBlockedReason: 'Has another appointment (3:00 PM, Nov 14, 2026 · APT-20261114-0001) while this ocular visit keeps them away 11:30 AM–4:00 PM, travel included',
+        assignmentBlockedReason: 'Has another appointment (3:00 PM, Nov 14, 2026 · APT-20261114-0001) while this ocular visit keeps them away 11:00 AM–4:30 PM, travel included',
       });
     });
 
     it('lets a consultation outside the ocular visit through', async () => {
       mockSameDayAppointments([{ ...nineAm, slotCode: '13:00', ...farOcular('13:00') }]);
 
-      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '16:00', session: buildSession() as never });
+      // The 10:00 consultation ends at 11:00 AM, when the staff leaves for the 1 PM ocular visit.
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '10:00', session: buildSession() as never });
 
       expect(result).toEqual({ assignmentEligible: true });
     });

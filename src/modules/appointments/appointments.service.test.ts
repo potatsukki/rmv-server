@@ -569,16 +569,19 @@ describe('ocularArrivalEstimate (On The Way notification)', () => {
   // 8:20 AM in Manila.
   const now = new Date('2026-09-10T00:20:00.000Z');
 
-  it('gives the drive time up to the drive plus 45 min of traffic for a far site', () => {
+  it('gives the rounded drive time up to that plus 1 hr of traffic for a far site', () => {
+    // 45 min drive → 1 hr; + 1 hr traffic → 2 hr.
     expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }, now))
-      .toBe(' Estimated arrival: around 9:05–9:50 AM.');
-    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }, new Date('2026-09-10T03:00:00.000Z')))
-      .toBe(' Estimated arrival: around 11:45 AM–12:30 PM.');
+      .toBe(' Estimated arrival: around 9:20–10:20 AM.');
+    // Left 10:30 AM.
+    expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }, new Date('2026-09-10T02:30:00.000Z')))
+      .toBe(' Estimated arrival: around 11:30 AM–12:30 PM.');
   });
 
   it('gives a single time for a site near the shop, and nothing without a route or for a consultation', () => {
+    // 10 min drive → 30 min, no traffic allowance within 4 km.
     expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR, travelDurationMinutes: 10, distanceKm: 3 }, now))
-      .toBe(' Estimated arrival: around 8:30 AM.');
+      .toBe(' Estimated arrival: around 8:50 AM.');
     expect(ocularArrivalEstimate({ type: AppointmentType.OCULAR }, now)).toBe('');
     expect(ocularArrivalEstimate({ type: AppointmentType.OFFICE, travelDurationMinutes: 10, distanceKm: 3 }, now)).toBe('');
   });
@@ -595,7 +598,7 @@ describe('assertOcularWindowFree (a new site pin on a scheduled ocular visit)', 
     ]));
 
     await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 45, distanceKm: 18 }))
-      .rejects.toThrow('the visit would keep the sales staff away 11:30 AM–4:00 PM, which runs into their 3:00 PM appointment (APT-1)');
+      .rejects.toThrow('the visit would keep the sales staff away 11:00 AM–4:30 PM, which runs into their 3:00 PM appointment (APT-1)');
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
       salesStaffId: 'sales-a', date: '2026-09-10', _id: { $ne: 'ocular-1' },
     }));
@@ -606,7 +609,7 @@ describe('assertOcularWindowFree (a new site pin on a scheduled ocular visit)', 
       { appointmentNumber: 'APT-1', slotCode: '15:00', type: AppointmentType.OFFICE, status: AppointmentStatus.CONFIRMED },
     ]));
 
-    // 10 min, 3 km: away 12:50–2:40 PM.
+    // 10 min (rounded to 30), 3 km: away 12:30–3:00 PM.
     await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 10, distanceKm: 3 })).resolves.toBeUndefined();
   });
 
@@ -668,20 +671,20 @@ describe('sales staff availability per time slot', () => {
 
   it('with a pinned site, takes a staff member out only while away for the ocular visit', async () => {
     twoAvailableStaff();
-    // sales-a has a 1 PM ocular visit, 45 min drive, 18 km: away 11:30 AM–4:00 PM (45 min traffic each way).
+    // sales-a has a 1 PM ocular visit, 45 min drive (→ 1 hr), 18 km: away 11:00 AM–4:30 PM (1 hr traffic each way).
     mockAppointmentFind.mockImplementation(() => selectLeanResult([
       { salesStaffId: 'sales-a', slotCode: '13:00', type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 },
     ]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
-    for (const code of ['11:00', '13:00', '14:00', '15:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
-    for (const code of ['09:00', '10:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
+    for (const code of ['11:00', '13:00', '14:00', '15:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
+    for (const code of ['09:00', '10:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
   });
 
   it('offers a pinned ocular visit wherever its travel time and site visit fit around a consultation', async () => {
     twoAvailableStaff();
-    // sales-a has a 9:00 consultation. A new 45 min / 18 km ocular visit needs 1.5 hr + 45 min traffic each way.
+    // sales-a has a 9:00 consultation. A new 45 min / 18 km ocular visit needs 1.5 hr + 1 hr drive + 1 hr traffic each way.
     mockAppointmentFind.mockImplementation(() => selectLeanResult([{ salesStaffId: 'sales-a', slotCode: '09:00', type: AppointmentType.OFFICE }]));
 
     // Query strings, as the route sends them.
@@ -689,7 +692,7 @@ describe('sales staff availability per time slot', () => {
       date: '2026-09-10', type: AppointmentType.OCULAR, travelMinutes: '45', distanceKm: '18',
     } as never);
 
-    // Leaving at 9:30 for an 11:00 visit still clashes with the 9:00–10:00 consultation.
+    // Leaving at 9:00 for an 11:00 visit still clashes with the 9:00–10:00 consultation.
     for (const code of ['09:00', '10:00', '11:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
     for (const code of ['13:00', '14:00', '15:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
   });

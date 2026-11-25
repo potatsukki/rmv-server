@@ -30,6 +30,7 @@ import {
   findActiveSalesAssignment,
   formatOcularBusyWindow,
   legMinutes,
+  roundTravelMinutes,
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
@@ -2282,8 +2283,9 @@ export async function updateVisitStatus(
 }
 
 /**
- * " Estimated arrival: around 9:05–9:50 AM." for an ocular visit whose staff just left: the drive
- * time, up to the drive plus the traffic allowance (a site near the shop gets a single time).
+ * " Estimated arrival: around 9:20–10:20 AM." for an ocular visit whose staff just left: the drive
+ * time (rounded up to 30 min), up to that plus the traffic allowance (a site near the shop gets a
+ * single time).
  */
 export function ocularArrivalEstimate(
   appointment: { type?: string; travelDurationMinutes?: number | null; distanceKm?: number | null },
@@ -2292,7 +2294,7 @@ export function ocularArrivalEstimate(
   const travel = appointment.travelDurationMinutes;
   if (appointment.type !== AppointmentType.OCULAR || typeof travel !== 'number' || !Number.isFinite(travel) || travel < 0) return '';
   const at = (minutes: number) => format(toZonedTime(addMinutes(now, minutes), TZ), 'h:mm a');
-  const earliest = at(Math.ceil(travel));
+  const earliest = at(roundTravelMinutes(travel));
   const latest = at(legMinutes(travel, appointment.distanceKm));
   if (earliest === latest) return ` Estimated arrival: around ${earliest}.`;
   // "9:05–9:50 AM" within the same half of the day, else "11:30 AM–12:15 PM".

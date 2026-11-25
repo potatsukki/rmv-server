@@ -193,15 +193,15 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // The site is 5 km / 18 min away: the staff is away from 18 + 45 min (traffic) before the visit
-    // until 1.5 hr + 63 min after it starts. So the active 9:00 consultation blocks 9:00 and 10:00.
+    // The site is 5 km / 18 min away: the staff is away from 30 (rounded drive) + 60 min (traffic)
+    // before the visit until 1.5 hr + 90 min after it starts. So the active 9:00 consultation blocks 9:00 and 10:00.
     for (const slotCode of ['09:00', '10:00']) {
       await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode, ...SITE } as never, salesId, [Role.SALES_STAFF]))
         .rejects.toThrow(/at this time|keeps (them away|the staff busy)/);
     }
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
 
-    // 13:00 (away 11:57 AM–3:33 PM) fits around it, and the completed 13:00 consultation frees its time.
+    // 13:00 (away 11:30 AM–4:00 PM) fits around it, and the completed 13:00 consultation frees its time.
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
@@ -215,7 +215,7 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // 9:00 booked → a 10:00 ocular visit the same day is refused: the staff would leave at 8:57.
+    // 9:00 booked → a 10:00 ocular visit the same day is refused: the staff would leave at 8:30.
     await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
       .rejects.toThrow(/keeps (them away|the staff busy)/);
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-17', slotCode: '10:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
