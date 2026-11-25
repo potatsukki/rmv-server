@@ -332,8 +332,11 @@ appointmentSchema.index(
   { unique: true, partialFilterExpression: { queueSequence: { $exists: true } } },
 );
 
+// Only an appointment that really has no number gets one: a new booking, or an old record loaded
+// in full. A record loaded without the field (a .select() or populate field list) is left alone;
+// numbering it would replace its existing number (QA: APT-20261125-0003 became 0006 at auto-start).
 appointmentSchema.pre('validate', async function () {
-  if (!this.appointmentNumber && this.date) {
+  if (!this.appointmentNumber && this.date && this.isSelected('appointmentNumber')) {
     this.appointmentNumber = await generateAppointmentNumber(this.date);
   }
 });

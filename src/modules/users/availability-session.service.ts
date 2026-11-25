@@ -25,7 +25,7 @@ export const INTERNAL_AVAILABILITY_ROLES: Role[] = [
 const INTERNAL_AVAILABILITY_ROLE_SET = new Set<Role>(INTERNAL_AVAILABILITY_ROLES);
 // A sales staff member can't hold two appointments on the same date whose busy times overlap
 // (staffBusyWindow): a consultation is its one-hour slot, and an ocular visit runs from leaving
-// the shop until getting back (travel + traffic allowance + 1.5 hr on site). An ocular visit
+// the shop until getting back (drive rounded up to 30 min + traffic allowance + 1.5 hr on site). An ocular visit
 // without a computed route (no site pin) still takes the whole day. An appointment on another
 // date never blocks. Cancelled, completed and no-show appointments free their time.
 export const SALES_SLOT_FREEING_STATUSES: AppointmentStatus[] = [
@@ -54,14 +54,21 @@ export function slotsOverlap(a: string | undefined | null, b: string | undefined
 /** Time on site for an ocular visit (measuring). */
 export const OCULAR_SITE_MINUTES = 90;
 /** Traffic allowance added to each one-way trip of an ocular visit (the route has no live traffic). */
-export const OCULAR_TRAFFIC_BUFFER_MINUTES = 45;
+export const OCULAR_TRAFFIC_BUFFER_MINUTES = 60;
 /** A site this close to the shop (route km) gets no traffic allowance. */
 export const OCULAR_NEAR_SHOP_KM = 4;
+/** The route's drive time is rounded up to this step, so the schedule has no odd minutes. */
+export const OCULAR_TRAVEL_STEP_MINUTES = 30;
 
-/** One-way trip to an ocular site with the traffic allowance (none for a site near the shop). */
+/** Drive time rounded up to the next 30 min (48 → 60, 70 → 90); 0 stays 0. */
+export function roundTravelMinutes(travelMinutes: number): number {
+  return Math.ceil(Math.max(0, travelMinutes) / OCULAR_TRAVEL_STEP_MINUTES) * OCULAR_TRAVEL_STEP_MINUTES;
+}
+
+/** One-way trip to an ocular site: rounded drive + the traffic allowance (none for a site near the shop). */
 export function legMinutes(travelMinutes: number, distanceKm?: number | null): number {
   const isNearShop = typeof distanceKm === 'number' && Number.isFinite(distanceKm) && distanceKm <= OCULAR_NEAR_SHOP_KM;
-  return Math.ceil(Math.max(0, travelMinutes)) + (isNearShop ? 0 : OCULAR_TRAFFIC_BUFFER_MINUTES);
+  return roundTravelMinutes(travelMinutes) + (isNearShop ? 0 : OCULAR_TRAFFIC_BUFFER_MINUTES);
 }
 
 /** An ocular site's route from the shop, as saved on the appointment. */
@@ -93,8 +100,8 @@ type ScheduledVisit = OcularRoute & {
 
 /**
  * Minutes of the day [start, end) the visit keeps its sales staff busy: a consultation is its
- * slot; an ocular visit runs from leaving the shop until getting back (travel + traffic allowance
- * each way, 1.5 hr on site). Null when that is unknown (an ocular visit with no route): it then
+ * slot; an ocular visit runs from leaving the shop until getting back (rounded drive + traffic
+ * allowance each way, 1.5 hr on site). Null when that is unknown (an ocular visit with no route): it then
  * takes the whole day.
  */
 export function staffBusyWindow(visit: ScheduledVisit): { start: number; end: number } | null {
