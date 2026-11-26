@@ -20,8 +20,13 @@ describe('defaultAppointmentSort', () => {
     });
   });
 
-  it('sorts the Completed status group newest first', () => {
+  it('sorts the Completed and No Show status groups newest first', () => {
     expect(defaultAppointmentSort(undefined, 'completed')).toEqual({
+      date: -1,
+      slotCode: -1,
+      createdAt: -1,
+    });
+    expect(defaultAppointmentSort(undefined, 'no_show')).toEqual({
       date: -1,
       slotCode: -1,
       createdAt: -1,

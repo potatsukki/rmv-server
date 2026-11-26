@@ -20,8 +20,8 @@ vi.mock('../notifications/email.service.js', async (importOriginal) => stubAll(a
 vi.mock('../../services/paymongo.service.js', async (importOriginal) => stubAll(await importOriginal()));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
-import { Appointment, BlockedSlot, SalesAvailability, SlotLock, User } from '../../models/index.js';
-import { AppointmentStatus, AppointmentType, Role } from '../../utils/constants.js';
+import { Appointment, BlockedSlot, Holiday, SalesAvailability, SlotLock, User } from '../../models/index.js';
+import { AppointmentStatus, AppointmentType, Role, ServiceType, type SlotCode } from '../../utils/constants.js';
 import * as appointments from './appointments.service.js';
 
 const MONGO_URI = process.env.RMV_MONGO_TEST_URI;
@@ -55,6 +55,7 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
   }
 
   beforeEach(async () => {
+    vi.setSystemTime(new Date('2026-11-26T02:00:00Z'));
     await Promise.all(Object.values(mongoose.connection.collections).map((collection) => collection.deleteMany({})));
     staffA = await createUser('salesa@example.test', [Role.SALES_STAFF]);
     customers = [];
@@ -66,9 +67,9 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
     return slots.filter((slot) => slot.available).map((slot) => slot.slotCode);
   }
 
-  function book(customerIndex: number, slotCode: string) {
+  function book(customerIndex: number, slotCode: SlotCode, date = DATE) {
     return appointments.requestAppointment(
-      { type: AppointmentType.OFFICE, date: DATE, slotCode, purpose: 'Railings', serviceTypes: ['railings'] } as never,
+      { type: AppointmentType.OFFICE, date, slotCode, purpose: 'Railings', serviceTypes: [ServiceType.RAILINGS] },
       customers[customerIndex]!,
       [Role.CUSTOMER],
     );
@@ -86,14 +87,26 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
 
     expect(await freeSlots()).toEqual(['09:00', '11:00', '13:00', '14:00', '15:00', '16:00']);
     await expect(book(0, '10:00')).rejects.toThrow('No sales staff is available');
-    await expect(book(0, '11:00')).resolves.toBeDefined();
+    await expect(book(0, '09:00')).resolves.toBeDefined();
   });
 
-  it('an ocular visit closes its whole busy time (travel + traffic + 1.5 hr on site)', async () => {
-    // 13:00 ocular, 48 min / 41 km away: away 11:00 AM – 4:30 PM.
+  it('closes 9:00 for the staff member travelling to a 10:00 ocular visit and reopens it when another staff member is free', async () => {
+    await staffAppointment({ type: AppointmentType.OCULAR, travelDurationMinutes: 30, distanceKm: 3 });
+
+    expect(await freeSlots()).not.toContain('09:00');
+    await expect(book(0, '09:00')).rejects.toThrow('No sales staff is available');
+
+    await createUser('salesb@example.test', [Role.SALES_STAFF]);
+    expect(await freeSlots()).toContain('09:00');
+    await expect(book(0, '09:00')).resolves.toBeDefined();
+  });
+
+  it('an ocular visit closes its whole busy time (15 min prep + travel + traffic + 1.5 hr on site)', async () => {
+    // 13:00 ocular, 48 min / 41 km away: busy 10:45 AM (prep) – 4:30 PM, so a 10:00 consultation (until 11:00) no longer fits.
     await staffAppointment({ type: AppointmentType.OCULAR, slotCode: '13:00', travelDurationMinutes: 48, distanceKm: 41 });
 
-    expect(await freeSlots()).toEqual(['09:00', '10:00']);
+    expect(await freeSlots()).toEqual(['09:00']);
+    await expect(book(0, '10:00')).rejects.toThrow('No sales staff is available');
     await expect(book(0, '16:00')).rejects.toThrow('No sales staff is available');
   });
 
@@ -115,8 +128,8 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
     await expect(book(0, '10:00')).resolves.toBeDefined();
   });
 
-  // Reproduces the QA bug (fails today); enabled again with the Travel Time S4 fix (holdsStaffTime).
-  it.skip('an appointment completed early (before its time) still holds that time', async () => {
+  // The QA bug: it failed before the Travel Time S4 fix (holdsStaffTime).
+  it('an appointment completed early (before its time) still holds that time', async () => {
     // Completed on Nov 26 (day check bypassed) although it is scheduled for Nov 28 at 10:00.
     await staffAppointment({ status: AppointmentStatus.COMPLETED });
 
@@ -132,5 +145,30 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
     await book(0, '10:00'); // unassigned request: it will need staff B
     expect(await freeSlots()).not.toContain('10:00');
     await expect(book(1, '10:00')).rejects.toThrow('No sales staff is available');
+  });
+
+  it('saves an upcoming same-day slot before 4 PM and refuses any same-day booking at the cutoff', async () => {
+    const date = '2026-11-26';
+    const query = { date, type: AppointmentType.OFFICE, flow: 'customer_booking' } as const;
+    vi.setSystemTime(new Date(`${date}T15:59:59+08:00`));
+
+    const { slots } = await appointments.getAvailableSlots(query);
+    expect(slots.filter((slot) => slot.available).map((slot) => slot.slotCode)).toEqual(['16:00']);
+    const saved = await book(0, '16:00', date);
+    expect(saved).toMatchObject({ status: AppointmentStatus.REQUESTED, date, slotCode: '16:00' });
+
+    vi.setSystemTime(new Date(`${date}T16:00:00+08:00`));
+    await expect(appointments.getAvailableSlots(query)).rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
+    await expect(book(1, '16:00', date)).rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
+    expect(await Appointment.countDocuments({ date })).toBe(1);
+  });
+
+  it('keeps the holiday restriction on same-day bookings', async () => {
+    const date = '2026-11-26';
+    await Holiday.create({ date, name: 'Test holiday', createdBy: staffA });
+
+    await expect(appointments.getAvailableSlots({ date, type: AppointmentType.OFFICE, flow: 'customer_booking' }))
+      .rejects.toThrow('Test holiday');
+    await expect(book(0, '16:00', date)).rejects.toThrow('Test holiday');
   });
 });

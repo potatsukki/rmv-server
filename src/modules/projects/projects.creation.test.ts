@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   projectFindOne: vi.fn(),
   projectFindById: vi.fn(),
   projectFindOneAndUpdate: vi.fn(),
+  projectUpdateOne: vi.fn(),
   projectCreate: vi.fn(),
   projectFind: vi.fn(),
   userFindOne: vi.fn(),
@@ -32,7 +33,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../models/index.js', () => ({
-  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, findOneAndUpdate: mocks.projectFindOneAndUpdate, create: mocks.projectCreate, find: mocks.projectFind },
+  Project: { findOne: mocks.projectFindOne, findById: mocks.projectFindById, findOneAndUpdate: mocks.projectFindOneAndUpdate, updateOne: mocks.projectUpdateOne, create: mocks.projectCreate, find: mocks.projectFind },
   ProjectItem: {
     create: mocks.projectItemCreate,
     findOneAndUpdate: mocks.projectItemFindOneAndUpdate,
@@ -1064,7 +1065,8 @@ describe('selectPaymentPlan for a project with several items', () => {
     query.populate.mockReturnValue(query);
     Object.assign(query, { then: (resolve: (value: unknown) => unknown) => Promise.resolve(project).then(resolve) });
     mocks.projectFindById.mockReturnValue(query);
-    mocks.projectItemFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(items) });
+    mocks.projectItemFind.mockReturnValue({ sort: vi.fn().mockResolvedValue(items), select: vi.fn().mockResolvedValue(items) });
+    mocks.projectUpdateOne.mockImplementation(async (_filter, update) => Object.assign(project, update.$set));
     mocks.paymentPlanFind.mockResolvedValue([]);
     mocks.paymentPlanInsertMany.mockImplementation(async (docs) => docs);
     mocks.auditCreate.mockResolvedValue({});
@@ -1082,7 +1084,7 @@ describe('selectPaymentPlan for a project with several items', () => {
     expect(result.paymentPlan).not.toHaveProperty('projectItemId');
     expect(result.paymentPlan!.stages).toHaveLength(1);
     expect(result.paymentPlan!.stages[0]).toMatchObject({ label: 'Full Payment', amount: 3000, remainingBalance: 3000 });
-    expect(mocks.projectItemUpdateMany).toHaveBeenCalledWith({ _id: { $in: ['item-1', 'item-2'] } }, { $set: { status: ProjectStatus.PAYMENT_PENDING } });
+    expect(mocks.projectItemUpdateMany).toHaveBeenCalledWith({ _id: { $in: ['item-1', 'item-2'] }, status: ProjectStatus.APPROVED }, { $set: { status: ProjectStatus.PAYMENT_PENDING } });
     expect(project.status).toBe(ProjectStatus.PAYMENT_PENDING);
   });
 

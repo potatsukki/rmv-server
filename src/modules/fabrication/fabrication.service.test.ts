@@ -160,6 +160,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('keeps assigned fabricators from posting before the required payment is verified', async () => {
+    mockPaymentPlanFindOne.mockResolvedValue({ stages: [{ status: PaymentStageStatus.PROOF_SUBMITTED }] });
     mockProjectFindById.mockResolvedValue({
       _id: 'project-1',
       customerId: 'customer-1',

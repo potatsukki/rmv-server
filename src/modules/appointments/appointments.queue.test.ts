@@ -134,6 +134,38 @@ describe('listAppointmentQueue', () => {
     expect(result.items.every((item) => item.segment === 'recent')).toBe(true);
   });
 
+  it('lists the No Show tab newest first as history, with only no-show appointments', async () => {
+    const noShows = [
+      appointment({
+        _id: 'consult-no-show',
+        type: AppointmentType.OFFICE,
+        status: AppointmentStatus.COMPLETED,
+        attendanceStatus: 'no_show',
+        date: '2026-11-20',
+        slotCode: '09:00',
+      }),
+      appointment({
+        _id: 'ocular-no-show',
+        type: AppointmentType.OCULAR,
+        status: AppointmentStatus.NO_SHOW,
+        date: '2026-11-25',
+        slotCode: '10:00',
+      }),
+    ];
+    const chain = mockAppointments(noShows);
+    mockLeanQuery(mockVisitReportFind, []);
+    mockLeanQuery(mockProjectFind, []);
+
+    const result = await listAppointmentQueue({ statusGroup: 'no_show' } as never, SALES_ID, [Role.SALES_STAFF]);
+
+    expect(JSON.stringify(mockAppointmentFind.mock.calls[0]?.[0])).toContain(
+      '{"$or":[{"status":"no_show"},{"status":"completed","attendanceStatus":"no_show"}]}',
+    );
+    expect(chain.sort).toHaveBeenCalledWith({ date: -1, slotCode: -1, createdAt: -1 });
+    expect(result.items.map((item) => String(item.appointment._id))).toEqual(['ocular-no-show', 'consult-no-show']);
+    expect(result.items.every((item) => item.segment === 'recent')).toBe(true);
+  });
+
   it('keeps a completed ocular dated in the future inside the default All window', async () => {
     mockAppointments([]);
 

@@ -89,7 +89,7 @@ describe('listProjects stage and payment filters', () => {
     expect(pagedFilter()).toEqual({ $and: [{ _id: { $in: ['p1', 'p2'] } }] });
   });
 
-  it('keeps the customer visibility rule and lists active projects', async () => {
+  it('keeps the customer to their own projects (contract or not) and lists active projects', async () => {
     setup(
       [
         { _id: 'p1', status: 'draft' },
@@ -105,10 +105,8 @@ describe('listProjects stage and payment filters', () => {
 
     const filter = pagedFilter();
     expect(filter.customerId).toBe('customer-1');
-    expect(filter.$and).toEqual([
-      expect.objectContaining({ $or: expect.any(Array) }),
-      { _id: { $in: ['p1', 'p4'] } },
-    ]);
+    // No contract condition since 2026-11-26: only the stage match is added.
+    expect(filter.$and).toEqual([{ _id: { $in: ['p1', 'p4'] } }]);
   });
 
   it('lists a fabricator’s current and past assignments by lead, assistant, or crew membership', async () => {

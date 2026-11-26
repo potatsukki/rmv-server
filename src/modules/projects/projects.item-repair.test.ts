@@ -122,6 +122,33 @@ describe('fabrication project access', () => {
   });
 });
 
+describe('customer project access (user decision 2026-11-26: with or without a signed contract)', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  // A draft with no contract and no ocular visit: before, the customer got "Project not found".
+  const data = { _id: 'project-1', status: ProjectStatus.DRAFT, contractStatus: 'missing', customerId: { _id: 'customer-1' } };
+
+  it('lets the customer open their project before the signed contract is uploaded', async () => {
+    const project = { ...data, visitReportId: 'report-1', toObject: () => data };
+    const item = { _id: 'item-1', projectId: 'project-1', ocularVisitReportId: 'report-1' };
+    mocks.projectFindById.mockReturnValue(thenablePopulate(project));
+    mocks.visitReportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    mocks.projectItemFind
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue([item]) })
+      .mockReturnValueOnce(populatedItems([item]));
+
+    await expect(getProjectById('project-1', 'customer-1', [Role.CUSTOMER])).resolves.toMatchObject(data);
+  });
+
+  it('still refuses another customer', async () => {
+    mocks.projectFindById.mockReturnValue(thenablePopulate({ ...data, visitReportId: 'report-1' }));
+
+    await expect(getProjectById('project-1', 'customer-2', [Role.CUSTOMER])).rejects.toMatchObject({ statusCode: 403 });
+  });
+});
+
 describe('getProjectById project-item repair', () => {
   beforeEach(() => {
     vi.resetAllMocks();

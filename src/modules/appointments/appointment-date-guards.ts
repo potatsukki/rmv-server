@@ -1,8 +1,31 @@
-import { format } from 'date-fns';
+import { format, isMatch } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 
 const TZ = 'Asia/Manila';
+const CUSTOMER_BOOKING_CUTOFF = '16:00';
+
+/** Validates a new customer consultation and returns the elapsed time on today's schedule. */
+export function assertCustomerBookingWindow(date: string, slotCode?: string, now = new Date()): string | undefined {
+  if (!isMatch(date, 'yyyy-MM-dd')) throw AppError.badRequest('Choose a valid appointment date.');
+
+  const manilaNow = toZonedTime(now, TZ);
+  const today = format(manilaNow, 'yyyy-MM-dd');
+  const details = { serverTime: now.getTime() };
+  if (date < today) {
+    throw AppError.badRequest('This date has passed. Choose another date.', ErrorCode.BOOKING_TIME_UNAVAILABLE, details);
+  }
+  if (date > today) return;
+
+  const time = format(manilaNow, 'HH:mm');
+  if (time >= CUSTOMER_BOOKING_CUTOFF) {
+    throw AppError.badRequest('Same-day booking closes at 4:00 PM Manila time. Choose tomorrow or a later date.', ErrorCode.BOOKING_TIME_UNAVAILABLE, details);
+  }
+  if (slotCode && slotCode <= time) {
+    throw AppError.badRequest('This time slot has already started. Choose a later time or date.', ErrorCode.BOOKING_TIME_UNAVAILABLE, details);
+  }
+  return time;
+}
 
 // ⚠️  TEMPORARY BYPASS (2026-11-09): check-in, visit progress, report submission and completion
 //     are allowed before the appointment day. Set back to `false` to enforce

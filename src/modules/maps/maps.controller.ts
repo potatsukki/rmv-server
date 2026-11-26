@@ -1,11 +1,22 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as mapsService from './maps.service.js';
+import { describeOcularSchedulesBySlot, travelLabel } from '../scheduling/travel-time.js';
 
 export const computeOcularFee = asyncHandler(async (req: Request, res: Response) => {
   const { lat, lng } = req.body;
   const result = await mapsService.computeOcularFee({ lat, lng });
-  res.json({ success: true, data: result });
+  // The travel time and the schedule for each slot come from scheduling/travel-time.ts, so the
+  // web shows the same prep / leave / back times the server uses for availability.
+  const route = { travelDurationMinutes: result.route.durationMinutes, distanceKm: result.route.distanceKm };
+  res.json({
+    success: true,
+    data: {
+      ...result,
+      travelLabel: travelLabel(result.route.durationMinutes),
+      ocularSchedules: describeOcularSchedulesBySlot(route),
+    },
+  });
 });
 
 export const computeRoute = asyncHandler(async (req: Request, res: Response) => {

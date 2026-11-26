@@ -199,7 +199,7 @@ describe('dashboard pending payment projects', () => {
       appointmentCounts();
     });
 
-    it('counts only projects the customer can see, by the Projects page listing stage', async () => {
+    it('counts every project of the customer (with or without a contract), by the Projects page listing stage', async () => {
       customerProjects(
         [
           { _id: 'p1', status: 'draft' },
@@ -225,10 +225,7 @@ describe('dashboard pending payment projects', () => {
         fabricationInProgress: 2,
         completedProjects: 2,
       });
-      expect(dashboardMocks.projectFind).toHaveBeenCalledWith(expect.objectContaining({
-        customerId: 'customer-1',
-        $and: expect.any(Array),
-      }));
+      expect(dashboardMocks.projectFind).toHaveBeenCalledWith({ customerId: 'customer-1' });
       expect(dashboardMocks.projectCount).not.toHaveBeenCalled();
     });
 

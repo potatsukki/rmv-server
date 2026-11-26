@@ -28,6 +28,7 @@ import {
   appointmentsConflict,
   buildAvailabilityStateSummary,
   evaluateSalesAssignmentEligibility,
+  holdsStaffTime,
   legMinutes,
   roundTravelMinutes,
   SALES_SLOT_FREEING_STATUSES,
@@ -320,7 +321,7 @@ describe('availability-session.service sales staff appointment conflicts per tim
     expect(appointmentsConflict(ocular('09:00'), ocular('15:00'))).toBe(true);
   });
 
-  describe('ocular visit busy time (travel + traffic + 1.5 hr on site)', () => {
+  describe('ocular visit busy time (15 min prep + travel + traffic + 1.5 hr on site)', () => {
     const office = (slotCode: string) => ({ type: AppointmentType.OFFICE, slotCode });
     // 45 min drive (rounded to 1 hr), 18 km away: 1 hr of traffic is added each way.
     const farOcular = (slotCode: string) => ({ type: AppointmentType.OCULAR, slotCode, travelDurationMinutes: 45, distanceKm: 18 });
@@ -347,34 +348,42 @@ describe('availability-session.service sales staff appointment conflicts per tim
       expect(legMinutes(44.2, undefined)).toBe(120);
     });
 
-    it('keeps the staff busy from leaving the shop until getting back', () => {
-      expect(staffBusyWindow(farOcular('13:00'))).toEqual({ start: 11 * 60, end: 16 * 60 + 30 });
-      expect(staffBusyWindow(nearOcular('13:00'))).toEqual({ start: 12 * 60 + 30, end: 15 * 60 });
-      // The QA site: 48 min / 41 km at 10:00 → leave 8:00 AM, back 1:30 PM.
+    it('keeps the staff busy from preparing at the shop (15 min before leaving) until getting back', () => {
+      // Far 1 PM: prep 10:45, leave 11:00, back 4:30 PM.
+      expect(staffBusyWindow(farOcular('13:00'))).toEqual({ start: 10 * 60 + 45, end: 16 * 60 + 30 });
+      // Near 1 PM: prep 12:15, leave 12:30, back 3:00 PM.
+      expect(staffBusyWindow(nearOcular('13:00'))).toEqual({ start: 12 * 60 + 15, end: 15 * 60 });
+      // The QA site: 48 min / 41 km at 10:00 → prep 7:45, leave 8:00 AM, back 1:30 PM.
       expect(staffBusyWindow({ type: AppointmentType.OCULAR, slotCode: '10:00', travelDurationMinutes: 48, distanceKm: 41 }))
-        .toEqual({ start: 8 * 60, end: 13 * 60 + 30 });
+        .toEqual({ start: 7 * 60 + 45, end: 13 * 60 + 30 });
+      // Consultations have no prep: just their one-hour slot.
       expect(staffBusyWindow(office('13:00'))).toEqual({ start: 13 * 60, end: 14 * 60 });
       expect(staffBusyWindow({ type: AppointmentType.OCULAR, slotCode: '13:00' })).toBeNull();
     });
 
-    it('rejects a booking while the staff is travelling or on site, and frees the rest of the day', () => {
-      // 1 PM far ocular: away 11:00 AM–4:30 PM.
+    it('rejects a booking while the staff is preparing, travelling or on site, and frees the rest of the day', () => {
+      // 1 PM far ocular: busy 10:45 AM–4:30 PM.
       expect(appointmentsConflict(farOcular('13:00'), office('14:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('11:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('15:00'))).toBe(true);
       expect(appointmentsConflict(farOcular('13:00'), office('16:00'))).toBe(true);
-      expect(appointmentsConflict(farOcular('13:00'), office('10:00'))).toBe(false);
-      // Another far ocular at 4 PM must leave at 2:00 PM, while the staff is still away.
+      // The 10:00 consultation runs until 11:00, into the 10:45 prep.
+      expect(appointmentsConflict(farOcular('13:00'), office('10:00'))).toBe(true);
+      expect(appointmentsConflict(farOcular('13:00'), office('09:00'))).toBe(false);
+      // Another far ocular at 4 PM must start preparing at 1:45 PM, while the staff is still away.
       expect(appointmentsConflict(farOcular('13:00'), farOcular('16:00'))).toBe(true);
-      // 1 PM near ocular: away 12:30–3:00 PM, so 3 PM is free.
+      // 1 PM near ocular: busy 12:15–3:00 PM, so 3 PM is free and the 12:00 consultation is not.
       expect(appointmentsConflict(nearOcular('13:00'), office('15:00'))).toBe(false);
       expect(appointmentsConflict(nearOcular('13:00'), office('14:00'))).toBe(true);
+      expect(appointmentsConflict(nearOcular('13:00'), office('12:00'))).toBe(true);
     });
 
     it('allows two ocular visits on the same day when their busy times do not overlap', () => {
-      // 9 AM near ocular (8:30–11:00 AM) + 1 PM far ocular (11:00 AM–4:30 PM).
-      expect(appointmentsConflict(nearOcular('09:00'), farOcular('13:00'))).toBe(false);
-      // Two far ones: 7:00 AM–12:30 PM and 11:00 AM–4:30 PM overlap.
+      // 9 AM near ocular (8:15–11:00 AM) + 2 PM far ocular (11:45 AM–5:30 PM).
+      expect(appointmentsConflict(nearOcular('09:00'), farOcular('14:00'))).toBe(false);
+      // With a 1 PM far ocular (prep from 10:45) they overlap.
+      expect(appointmentsConflict(nearOcular('09:00'), farOcular('13:00'))).toBe(true);
+      // Two far ones: 6:45 AM–12:30 PM and 10:45 AM–4:30 PM overlap.
       expect(appointmentsConflict(farOcular('09:00'), farOcular('13:00'))).toBe(true);
     });
 
@@ -385,7 +394,7 @@ describe('availability-session.service sales staff appointment conflicts per tim
 
       expect(result).toEqual({
         assignmentEligible: false,
-        assignmentBlockedReason: 'Has an ocular visit that day (1:00 PM, Nov 14, 2026 · APT-20261114-0001) and is away 11:00 AM–4:30 PM, travel included',
+        assignmentBlockedReason: 'Has an ocular visit that day (1:00 PM, Nov 14, 2026 · APT-20261114-0001) and is away 10:45 AM–4:30 PM, prep and travel included',
       });
     });
 
@@ -402,15 +411,15 @@ describe('availability-session.service sales staff appointment conflicts per tim
 
       expect(result).toEqual({
         assignmentEligible: false,
-        assignmentBlockedReason: 'Has another appointment (3:00 PM, Nov 14, 2026 · APT-20261114-0001) while this ocular visit keeps them away 11:00 AM–4:30 PM, travel included',
+        assignmentBlockedReason: 'Has another appointment (3:00 PM, Nov 14, 2026 · APT-20261114-0001) while this ocular visit keeps them away 10:45 AM–4:30 PM, prep and travel included',
       });
     });
 
     it('lets a consultation outside the ocular visit through', async () => {
       mockSameDayAppointments([{ ...nineAm, slotCode: '13:00', ...farOcular('13:00') }]);
 
-      // The 10:00 consultation ends at 11:00 AM, when the staff leaves for the 1 PM ocular visit.
-      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '10:00', session: buildSession() as never });
+      // The 9:00 consultation ends at 10:00 AM, before the 10:45 prep for the 1 PM ocular visit.
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
 
       expect(result).toEqual({ assignmentEligible: true });
     });
@@ -455,27 +464,71 @@ describe('availability-session.service sales staff appointment conflicts per tim
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-15' }));
   });
 
-  it('does not let cancelled, completed or no-show appointments block their slot', () => {
-    expect(SALES_SLOT_FREEING_STATUSES).toEqual([
-      AppointmentStatus.CANCELLED,
-      AppointmentStatus.COMPLETED,
-      AppointmentStatus.NO_SHOW,
-    ]);
-    for (const occupying of [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.IN_PROGRESS, AppointmentStatus.READY_FOR_OCULAR]) {
+  it('gives the time back at once for cancelled and no-show; a completed one only after its time has passed', () => {
+    expect(SALES_SLOT_FREEING_STATUSES).toEqual([AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW]);
+    for (const occupying of [
+      AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.IN_PROGRESS, AppointmentStatus.READY_FOR_OCULAR, AppointmentStatus.COMPLETED,
+    ]) {
       expect(SALES_SLOT_FREEING_STATUSES).not.toContain(occupying);
     }
+
+    // 10:00 AM in Manila on Nov 26, 2026.
+    const at = new Date('2026-11-26T02:00:00.000Z');
+    const completed = (date: string, slotCode: string, extra: Record<string, unknown> = {}) => (
+      { status: AppointmentStatus.COMPLETED, type: AppointmentType.OFFICE, date, slotCode, ...extra }
+    );
+    // Completed early (the QA case): Nov 28 at 10:00 has not happened yet, so it still holds.
+    expect(holdsStaffTime(completed('2026-11-28', '10:00'), at)).toBe(true);
+    // A 9:00 consultation ended at 10:00, and an older one: their time is free again.
+    expect(holdsStaffTime(completed('2026-11-26', '09:00'), at)).toBe(false);
+    expect(holdsStaffTime(completed('2026-11-25', '15:00'), at)).toBe(false);
+    // A far 9:00 ocular keeps its staff until 12:30 PM, so at 10:00 it still holds.
+    expect(holdsStaffTime(completed('2026-11-26', '09:00', { type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 }), at)).toBe(true);
+    expect(holdsStaffTime({ status: AppointmentStatus.CANCELLED, date: '2026-11-28', slotCode: '10:00' }, at)).toBe(false);
+    expect(holdsStaffTime({ status: AppointmentStatus.NO_SHOW, date: '2026-11-28', slotCode: '10:00' }, at)).toBe(false);
+    expect(holdsStaffTime({ status: AppointmentStatus.CONFIRMED, date: '2026-11-25', slotCode: '09:00' }, at)).toBe(true);
   });
 
-  it('allows the same slot once the earlier appointment is final (excluded by the status filter)', async () => {
-    // The completed/cancelled 9:00 appointment is filtered out by `$nin`, so nothing comes back.
+  it('allows the same slot once the earlier appointment is cancelled or no-show (excluded by the status filter)', async () => {
     mockSameDayAppointments([]);
 
     const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
 
     expect(result).toEqual({ assignmentEligible: true });
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
-      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW] },
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
     }));
+  });
+
+  describe('a completed appointment on the same slot', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('still blocks while its time is ahead (completed early)', async () => {
+      // 8:00 AM Manila on Nov 14: the 9:00 consultation was completed before it started.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-14T00:00:00.000Z'));
+      mockSameDayAppointments([{ ...nineAm, type: AppointmentType.OFFICE, date: '2026-11-14', status: AppointmentStatus.COMPLETED }]);
+
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
+
+      expect(result).toEqual({
+        assignmentEligible: false,
+        assignmentBlockedReason: 'Already has an appointment at this time (9:00 AM, Nov 14, 2026 · APT-20261114-0001)',
+      });
+    });
+
+    it('frees the slot once its time has passed', async () => {
+      // 11:00 AM Manila on Nov 14: the 9:00–10:00 consultation is over.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-14T03:00:00.000Z'));
+      mockSameDayAppointments([{ ...nineAm, type: AppointmentType.OFFICE, date: '2026-11-14', status: AppointmentStatus.COMPLETED }]);
+
+      const result = await evaluateSalesAssignmentEligibility({ ...newAssignment, slotCode: '09:00', session: buildSession() as never });
+
+      expect(result).toEqual({ assignmentEligible: true });
+    });
   });
 
   it('applies the rule to a brand-new appointment too (no id to exclude)', async () => {

@@ -10,11 +10,8 @@ import { APPOINTMENT_SLOT_MINUTES, slotsOverlap } from '../users/availability-se
  * takes the STAFF member's whole day (travel), but the customer only has to be there for the
  * visit's own time slot (APPOINTMENT_SLOT_MINUTES from its start, on its Asia/Manila date).
  *
- * Only a cancelled or no-show appointment gives its time back. A completed one keeps it: under the
- * normal rules an appointment is completed on its own day, which is always before any date that can
- * still be booked (bookings need MIN_BOOKING_LEAD_DAYS notice), so this never blocks a real booking.
- * It only matters when an appointment was marked Completed BEFORE its scheduled day; its record
- * still shows that date and time, and a second appointment there would read as a double booking.
+ * Only a cancelled or no-show appointment gives its time back. A completed one keeps its slot, so
+ * completing early still prevents the customer from double-booking that time.
  */
 export const CUSTOMER_TIME_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,

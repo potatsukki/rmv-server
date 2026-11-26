@@ -120,6 +120,7 @@ export const declineOcularFeeSchema = z.object({
 export const availableSlotsQuerySchema = z.object({
   date: z.string().regex(dateRegex),
   type: z.nativeEnum(AppointmentType),
+  flow: z.literal('customer_booking').optional(),
   /** Staff only: show the days this sales staff member is free (e.g. a project's ocular visit). */
   salesStaffId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   /** Ocular only: the pinned site's one-way drive (minutes) and route km, so only its busy time counts. */

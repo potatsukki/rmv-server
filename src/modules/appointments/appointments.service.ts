@@ -26,6 +26,7 @@ import type { SortOrder } from 'mongoose';
 import {
   appointmentsConflict,
   buildAvailabilityStateSummary,
+  describeOcularSchedule,
   evaluateSalesAssignmentEligibility,
   findActiveSalesAssignment,
   formatOcularBusyWindow,
@@ -33,6 +34,7 @@ import {
   roundTravelMinutes,
   getOpenAvailabilitySession,
   getOpenAvailabilitySessionsByUserIds,
+  holdsStaffTime,
   SALES_ACTIVE_ASSIGNMENT_STATUSES,
   SALES_SLOT_FREEING_STATUSES,
   ocularRouteFromQuery,
@@ -58,9 +60,9 @@ import type {
   SubmitOcularLocationInput,
   AgentFinalizeOcularInput,
 } from './appointments.validation.js';
-import { buildAppointmentStatusGroupFilter } from './appointment-status-groups.js';
+import { buildAppointmentStatusGroupFilter, isHistoryStatusGroup } from './appointment-status-groups.js';
 import { assertOcularAfterConsultation } from './ocular-schedule-rules.js';
-import { assertAppointmentDayReached, assertNoShowAllowed, NO_SHOW_GRACE_MINUTES } from './appointment-date-guards.js';
+import { assertAppointmentDayReached, assertCustomerBookingWindow, assertNoShowAllowed, NO_SHOW_GRACE_MINUTES } from './appointment-date-guards.js';
 import { getActivityHistory } from '../reports/activity-history.js';
 import type { Types } from 'mongoose';
 
@@ -599,7 +601,10 @@ async function assertDateAvailable(dateStr: string): Promise<void> {
   }
 
   // Bookings are open every day of the week; only holidays are blocked.
-  // Check it's not a holiday
+  await assertNotHoliday(dateStr);
+}
+
+async function assertNotHoliday(dateStr: string): Promise<void> {
   const holiday = await Holiday.findOne({ date: dateStr });
   if (holiday) {
     throw AppError.badRequest(`${dateStr} is a holiday: ${holiday.name}`);
@@ -676,18 +681,20 @@ async function getSlotAvailability(
 
   // A sales staff member is taken when one of their appointments on this date clashes with the
   // new one (appointmentsConflict): their busy times overlap. An ocular visit keeps its staff away
-  // from leaving the shop until getting back (travel + traffic allowance + 1.5 hr on site), or the
-  // whole day when it has no route yet. Cancelled, completed and no-show appointments free their
-  // time. Unassigned requests that clash will need staff of their own, so they use some up too.
+  // from preparing at the shop until getting back (prep + travel + traffic allowance + 1.5 hr on
+  // site), or the whole day when it has no route yet. Cancelled and no-show appointments free their
+  // time; a completed one keeps it until that time has passed (holdsStaffTime), because it can be
+  // completed early. Unassigned requests that clash will need staff of their own, so they use some up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
     status: { $nin: SALES_SLOT_FREEING_STATUSES },
   };
   if (appointmentId) appointmentFilter._id = { $ne: appointmentId };
 
-  const sameDayAppointments = await Appointment.find(appointmentFilter)
-    .select('salesStaffId slotCode type travelDurationMinutes distanceKm')
-    .lean();
+  const sameDayAppointments = (await Appointment.find(appointmentFilter)
+    .select('salesStaffId date status slotCode type travelDurationMinutes distanceKm')
+    .lean())
+    .filter((appointment) => holdsStaffTime(appointment));
   const incoming = { type, slotCode, ...route };
   const scheduledAppointments = sameDayAppointments
     .filter((appointment) => appointmentsConflict(incoming, appointment));
@@ -722,7 +729,7 @@ async function assertSlotAvailable(
   if (!capacity.available) {
     throw AppError.conflict(
       type === AppointmentType.OCULAR
-        ? 'No sales staff is free for this ocular visit time. An ocular visit keeps the staff busy from leaving the shop until they get back (travel, traffic allowance and 1.5 hr on site). Please choose another time or date.'
+        ? 'No sales staff is free for this ocular visit time. An ocular visit keeps the staff busy from preparing at the shop until they get back (15 min prep, travel, traffic allowance and 1.5 hr on site). Please choose another time or date.'
         : 'No sales staff is available for this date and time. Please choose another schedule.',
       ErrorCode.SLOT_LOCKED,
     );
@@ -899,7 +906,9 @@ async function releaseSlotLock(
 
 export async function getAvailableSlots(query: AvailableSlotsQuery) {
   const { date, type, salesStaffId } = query;
-  await assertDateAvailable(date);
+  const customerBooking = query.flow === 'customer_booking' && type === AppointmentType.OFFICE;
+  const elapsedThrough = customerBooking ? assertCustomerBookingWindow(date) : undefined;
+  await (customerBooking ? assertNotHoliday(date) : assertDateAvailable(date));
   // A new ocular visit with a pinned site only needs its busy time free (travel there and back,
   // traffic allowance, 1.5 hr on site); without a route it needs the whole day.
   const route = type === AppointmentType.OCULAR
@@ -911,13 +920,17 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
   // admin/agent blocked slots. With salesStaffId, only that staff member counts.
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
+      const time = formatSlotTime(slotCode);
+      if (elapsedThrough && slotCode <= elapsedThrough) {
+        return { slotCode, time, available: false, remaining: 0, blocked: false };
+      }
       const blocked = await BlockedSlot.exists({ date, slotCode, type });
       const capacity = blocked
         ? { available: false, remaining: 0 }
         : await getSlotAvailability(date, slotCode, type, undefined, salesStaffId, route);
       return {
         slotCode,
-        time: formatSlotTime(slotCode),
+        time,
         available: capacity.available && !blocked,
         remaining: capacity.remaining,
         blocked: !!blocked,
@@ -925,7 +938,15 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
     }),
   );
 
-  return { date, type, slots };
+  // The availability reads can cross a slot start or the cutoff.
+  const latestTime = customerBooking ? assertCustomerBookingWindow(date) : undefined;
+  return {
+    date,
+    type,
+    slots: latestTime && latestTime !== elapsedThrough
+      ? slots.map((slot) => slot.slotCode <= latestTime ? { ...slot, available: false, remaining: 0 } : slot)
+      : slots,
+  };
 }
 
 // ── Customer: Request Appointment ──
@@ -967,10 +988,12 @@ async function requestAppointmentLocked(
   }
 
   await acquireCustomerScheduleLock(locks, customerId, customerId);
+  assertCustomerBookingWindow(input.date, input.slotCode);
   await assertActiveAppointmentLimit(customerId);
   await assertCustomerScheduleFree({ customerId, date: input.date, slotCode: input.slotCode, incomingType: input.type });
-  await assertDateAvailable(input.date);
+  await assertNotHoliday(input.date);
   await assertSlotAvailable(input.date, input.slotCode, input.type);
+  assertCustomerBookingWindow(input.date, input.slotCode);
 
   const primarySelectedDesign = input.selectedDesignTemplates?.[0];
 
@@ -3664,6 +3687,8 @@ export async function getAppointmentById(appointmentId: string, actorId: string,
   }
   // An ocular scheduled from a project belongs to that project; the page links back to it.
   if (appointment.type === AppointmentType.OCULAR) {
+    // Prep / leave / on-site / back times, from the one travel-time source (null without a site pin).
+    appointmentObject.ocularSchedule = describeOcularSchedule(appointment.slotCode, appointment);
     const linkedProject = await Project.findOne({
       ocularAppointmentId: appointment._id,
       status: { $ne: ProjectStatus.CANCELLED },
@@ -3958,9 +3983,9 @@ export async function listAppointmentQueue(
     .filter(Boolean) || [];
   const isHistoricalStatusFilter = requestedStatuses.length > 0
     && requestedStatuses.every((status) => APPOINTMENT_QUEUE_RECENT_STATUSES.includes(status as AppointmentStatus));
-  // The Completed tab is history: list everything newest first instead of pinning
+  // The Completed and No Show tabs are history: list everything newest first instead of pinning
   // finished consultations to the top as actionable items.
-  const isHistoricalView = isHistoricalStatusFilter || query.statusGroup === 'completed';
+  const isHistoricalView = isHistoricalStatusFilter || isHistoryStatusGroup(query.statusGroup);
 
   if (query.status) {
     const includesReadyForOcular = requestedStatuses.includes(AppointmentStatus.READY_FOR_OCULAR);
@@ -4211,7 +4236,7 @@ export function defaultAppointmentSort(status?: string, statusGroup?: string) {
     .filter(Boolean) || [];
 
   // History is listed newest first, so a capped page drops the oldest records, not the newest.
-  const isHistoricalOnly = statusGroup === 'completed' || (
+  const isHistoricalOnly = isHistoryStatusGroup(statusGroup) || (
     statuses.length > 0
     && statuses.every((value) => APPOINTMENT_HISTORY_STATUSES.has(value))
   );
@@ -4223,7 +4248,7 @@ export function defaultAppointmentSort(status?: string, statusGroup?: string) {
 
 export async function listAppointments(query: {
   status?: string;
-  /** One of the four statuses the UI shows (requested, assigned, confirmed, completed). */
+  /** One of the five statuses the UI shows (requested, assigned, confirmed, completed, no_show). */
   statusGroup?: string;
   type?: string;
   date?: string;

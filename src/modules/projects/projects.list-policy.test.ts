@@ -3,9 +3,16 @@ import { describe, expect, it } from 'vitest';
 import {
   activeProjectStatusesForRoles,
   canViewProjectTotalCost,
+  customerVisibleProjectsFilter,
   maskProjectTotalCostForActor,
 } from './projects.list-policy.js';
 import { ProjectStatus, Role } from '../../utils/constants.js';
+
+describe('customerVisibleProjectsFilter', () => {
+  it('lets a customer see all of their own projects, signed contract or not (user decision 2026-11-26)', () => {
+    expect(customerVisibleProjectsFilter('customer-1')).toEqual({ customerId: 'customer-1' });
+  });
+});
 
 describe('activeProjectStatusesForRoles', () => {
   it('keeps fabrication staff active queue fabrication-only', () => {

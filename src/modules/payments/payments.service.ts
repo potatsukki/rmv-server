@@ -7,7 +7,7 @@ import { AppError, ErrorCode } from '../../utils/appError.js';
 import {
   PaymentStageStatus, PaymentMethod, ProjectStatus, AuditAction, NotificationCategory, Role,
 } from '../../utils/constants.js';
-import { paymentStateMachine, projectStateMachine } from '../../utils/stateMachine.js';
+import { paymentStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, notifyRole, notifyUsers, emitRoleEvent } from '../notifications/socket.service.js';
 import { sendPaymentVerifiedEmail, sendPaymentDeclinedEmail } from '../notifications/email.service.js';
 import { formatCurrency, generateReceiptNumber } from '../../utils/helpers.js';
@@ -17,7 +17,7 @@ import { r2Client } from '../../config/r2.js';
 import { generateDownloadUrl } from '../uploads/upload.service.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
-import { applyTargetFinishDate } from '../projects/target-finish.js';
+import { enterPaymentPending, handleInitialFabricationPaymentVerified } from '../projects/fabrication-start.js';
 import { recordCashPaymentSchema } from './payments.validation.js';
 import type {
   CreatePaymentPlanInput,
@@ -84,99 +84,6 @@ function buildProjectPaymentsLink(projectId: string, projectItemId?: string | nu
     : `/projects/${projectId}/payments`;
 }
 
-async function allProjectItemsHaveFirstPaymentVerified(projectId: string) {
-  const items = await ProjectItem.find({ projectId }).select('_id');
-  if (!items.length) return true;
-
-  const plans = await PaymentPlan.find({
-    projectId,
-    projectItemId: { $in: items.map((item) => item._id) },
-  });
-  if (plans.length < items.length) return false;
-
-  return plans.every((plan) => plan.stages[0]?.status === PaymentStageStatus.VERIFIED);
-}
-
-async function isPaidScopeReadyForFabricationAssignment(project: any, projectItemId?: string) {
-  return projectItemId
-    ? await allProjectItemsHaveFirstPaymentVerified(project._id.toString())
-    : true;
-}
-
-export async function activateAssignedFabricationAfterInitialPayment(project: any, projectItemId?: string) {
-  const parentReady = await isPaidScopeReadyForFabricationAssignment(project, projectItemId);
-  const hasAssignedTeam = Boolean(project.fabricationLeadId);
-
-  if (!parentReady || !hasAssignedTeam || project.status !== ProjectStatus.PAYMENT_PENDING) {
-    return { parentReady, activated: false };
-  }
-
-  projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
-  project.status = ProjectStatus.FABRICATION;
-  await applyTargetFinishDate(project);
-  await project.save();
-  await ProjectItem.updateMany(
-    { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
-    { $set: { status: ProjectStatus.FABRICATION } },
-  );
-
-  return { parentReady, activated: true };
-}
-
-export async function handleInitialFabricationPaymentVerified(project: any, plan: any, projectItemId?: string) {
-  if (
-    plan.stages[0]?.status !== PaymentStageStatus.VERIFIED
-    || project.status !== ProjectStatus.PAYMENT_PENDING
-  ) return;
-
-  const { parentReady, activated } = await activateAssignedFabricationAfterInitialPayment(
-    project,
-    projectItemId,
-  );
-  const allVerified = plan.stages.every((stage: any) => stage.status === PaymentStageStatus.VERIFIED);
-
-  await createAndSendNotification(
-    project.customerId,
-    NotificationCategory.SYSTEM,
-    parentReady
-      ? (activated ? 'Fabrication Updates Unlocked' : (allVerified ? 'All Payments Verified' : 'Fabrication Team Assignment Pending'))
-      : 'Item Payment Verified',
-    parentReady
-      ? (activated
-        ? `The required payment for "${project.title}" is verified. The assigned fabrication team can now post work updates.`
-        : (allVerified
-          ? `All payments for "${project.title}" are verified. The engineer will now assign the fabrication team.`
-          : `The required first payments for "${project.title}" are verified. The engineer will now assign the fabrication team before fabrication starts.`))
-      : `Payment for one item in "${project.title}" has been verified. Other items still need their required first payment before the full project enters fabrication.`,
-    `/projects/${project._id}`,
-  );
-
-  if (!parentReady) return;
-
-  if (activated) {
-    const fabricationTeamIds = [
-      project.fabricationLeadId,
-      ...(project.fabricationAssistantIds || []),
-    ].filter(Boolean);
-    await Promise.all(fabricationTeamIds.map((staffId: any) => createAndSendNotification(
-      staffId,
-      NotificationCategory.FABRICATION,
-      'Fabrication Updates Unlocked',
-      `The required customer payment for "${project.title}" has been verified. You can now post fabrication updates.`,
-      `/projects/${project._id}`,
-    )));
-    return;
-  }
-
-  await Promise.all((project.engineerIds || []).map((engineerId: any) => createAndSendNotification(
-    engineerId,
-    NotificationCategory.FABRICATION,
-    'Assign Fabrication Team',
-    `The required first payment for "${project.title}" has been verified. Assign the fabrication team to start fabrication.`,
-    `/projects/${project._id}`,
-  )));
-}
-
 // ── Cashier: Create Payment Plan ──
 
 export async function createPaymentPlan(
@@ -235,13 +142,11 @@ export async function createPaymentPlan(
     createdBy,
   });
 
-  // Transition project to payment_pending
-  projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
-  project.status = ProjectStatus.PAYMENT_PENDING;
-  await project.save();
-  if (input.projectItemId) {
-    await ProjectItem.findByIdAndUpdate(input.projectItemId, { $set: { status: ProjectStatus.PAYMENT_PENDING } });
-  }
+  await ProjectItem.updateMany(
+    { projectId: project._id, ...(input.projectItemId ? { _id: input.projectItemId } : {}), status: ProjectStatus.APPROVED },
+    { $set: { status: ProjectStatus.PAYMENT_PENDING } },
+  );
+  await enterPaymentPending(project);
 
   await AuditLog.create({
     action: AuditAction.PAYMENT_PLAN_CREATED,
@@ -252,6 +157,8 @@ export async function createPaymentPlan(
     ipAddress: ip,
     userAgent: ua,
   });
+
+  await handleInitialFabricationPaymentVerified(project._id, plan);
 
   // Notify customer
   await createAndSendNotification(
@@ -472,6 +379,8 @@ export async function verifyPayment(
     userAgent: ua,
   });
 
+  await handleInitialFabricationPaymentVerified(project._id, plan);
+
   // Notify customer
   if (customer) {
     await createAndSendNotification(
@@ -499,12 +408,6 @@ export async function verifyPayment(
     `${formatCurrency(payment.amountPaid)} for "${project.title}" - ${stage.label} was verified. Receipt: ${receiptNumber}`,
     buildProjectPaymentsLink(project._id.toString(), payment.projectItemId?.toString()),
     { excludeUserId: actorId },
-  );
-
-  await handleInitialFabricationPaymentVerified(
-    project,
-    plan,
-    payment.projectItemId?.toString(),
   );
 
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
@@ -1394,6 +1297,8 @@ export async function recordCashPayment(
     userAgent: ua,
   });
 
+  await handleInitialFabricationPaymentVerified(project._id, plan);
+
   // Notify customer
   await createAndSendNotification(
     project.customerId,
@@ -1412,12 +1317,6 @@ export async function recordCashPayment(
       paymentStageId: stage.stageId,
     }, cashReceipt.buffer.length > 0 ? cashReceipt.buffer : undefined);
   }
-
-  await handleInitialFabricationPaymentVerified(
-    project,
-    plan,
-    plan.projectItemId?.toString(),
-  );
 
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', {
     type: 'cash_payment_recorded',
