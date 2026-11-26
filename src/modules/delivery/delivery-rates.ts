@@ -27,8 +27,11 @@ interface DeliveryFeeSummaryInput {
   ratesSnapshot?: Array<{ key?: string; label?: string }>;
 }
 
-/** Label of the engineer's manual courier fee (e.g. Lalamove booked by RMV outside the system). */
-export const THIRD_PARTY_DELIVERY_LABEL = 'Transport / Delivery (third party)';
+/**
+ * Label of the engineer's manual courier fee (e.g. Lalamove booked by RMV outside the system).
+ * Shown without "(third party)" on every screen and the contract (user decision 2026-11-27).
+ */
+export const THIRD_PARTY_DELIVERY_LABEL = 'Transport / Delivery';
 
 /**
  * Contract and customer label. Manual third-party fees read THIRD_PARTY_DELIVERY_LABEL; older

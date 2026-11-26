@@ -43,6 +43,8 @@ export const updateUserSchema = z.object({
   password: z.string().min(8).optional(),
   isActive: z.boolean().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  // Staff are Available by default; an admin only sets Unavailable / On Leave (or back to
+  // Available). There are no shifts: old clients' shiftStartAt / shiftEndAt are stripped.
   availabilityStatus: z.nativeEnum(StaffAvailabilityStatus).optional(),
   availabilityNote: z.union([z.string().max(240).trim(), z.literal(''), z.null()]).optional()
     .transform((value) => {
@@ -50,39 +52,6 @@ export const updateUserSchema = z.object({
       if (value === null || value === '') return null;
       return value;
     }),
-  shiftStartAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
-    .transform((value) => value === '' || value === null ? null : value),
-  shiftEndAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
-    .transform((value) => value === '' || value === null ? null : value),
-}).superRefine((value, ctx) => {
-  const needsShift = value.availabilityStatus === StaffAvailabilityStatus.AVAILABLE;
-  if (needsShift && !value.shiftStartAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['shiftStartAt'],
-      message: 'Shift start time is required when setting staff available',
-    });
-  }
-  if (needsShift && !value.shiftEndAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['shiftEndAt'],
-      message: 'Shift end time is required when setting staff available',
-    });
-  }
-  if (needsShift && value.shiftStartAt && value.shiftEndAt) {
-    const start = new Date(value.shiftStartAt);
-    const end = new Date(value.shiftEndAt);
-    if (Number.isNaN(start.getTime())) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftStartAt'], message: 'Shift start time is invalid' });
-    }
-    if (Number.isNaN(end.getTime())) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftEndAt'], message: 'Shift end time is invalid' });
-    }
-    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime()) && start.getTime() >= end.getTime()) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shiftEndAt'], message: 'Shift end time must be after the shift start time' });
-    }
-  }
 });
 
 export const updateProfileSchema = z.object({
@@ -104,20 +73,6 @@ export const updateProfileSchema = z.object({
 }).superRefine((data, ctx) => {
   // Note: Address fields are stripped server-side for non-customer roles.
   // This validation passes them through but the service layer handles role-based access.
-});
-
-export const updateOwnAvailabilitySchema = z.object({
-  availabilityStatus: z.literal(StaffAvailabilityStatus.AVAILABLE).optional(),
-  availabilityNote: z.union([z.string().max(240).trim(), z.literal(''), z.null()]).optional()
-    .transform((value) => {
-      if (value === undefined) return undefined;
-      if (value === null || value === '') return null;
-      return value;
-    }),
-  shiftStartAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
-    .transform((value) => value === '' || value === null ? null : value),
-  shiftEndAt: z.union([z.string().datetime({ offset: true }), z.literal(''), z.null()]).optional()
-    .transform((value) => value === '' || value === null ? null : value),
 });
 
 export const salesStaffLookupQuerySchema = z.object({
@@ -161,5 +116,4 @@ export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 export type DeleteAccountInput = z.infer<typeof deleteAccountSchema>;
-export type UpdateOwnAvailabilityInput = z.infer<typeof updateOwnAvailabilitySchema>;
 export type SalesStaffLookupQueryInput = z.infer<typeof salesStaffLookupQuerySchema>;

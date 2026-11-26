@@ -3,61 +3,51 @@ import { describe, expect, it } from 'vitest';
 import { StaffAvailabilityStatus } from '../../utils/constants.js';
 import {
   salesStaffLookupQuerySchema,
-  updateOwnAvailabilitySchema,
   updateUserSchema,
 } from './users.validation.js';
 
 describe('users.validation admin-managed availability rules', () => {
-  it('requires shift bounds when marking availability as available', () => {
+  // QA 2026-11-26: editing an Available staff (new password + contract date) failed with
+  // "shiftStartAt: Shift start time is required when setting staff available".
+  it('accepts Available without shift times, together with other edits', () => {
     const result = updateUserSchema.safeParse({
+      password: 'Pa$$w0rd1',
+      expiresAt: '2026-11-27T00:00:00.000Z',
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      availabilityNote: 'On-site work',
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error?.issues.map((issue) => issue.path.join('.'))).toEqual([
-      'shiftStartAt',
-      'shiftEndAt',
-    ]);
-  });
-
-  it('rejects shift windows where the end is not after the start', () => {
-    const result = updateUserSchema.safeParse({
-      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-      shiftStartAt: '2026-04-23T08:00:00.000Z',
-      shiftEndAt: '2026-04-23T08:00:00.000Z',
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error?.issues[0]?.message).toBe('Shift end time must be after the shift start time');
-  });
-
-  it('allows unavailable status without shift times', () => {
-    const result = updateUserSchema.safeParse({
-      availabilityStatus: StaffAvailabilityStatus.UNAVAILABLE,
-      availabilityNote: 'Not reporting today',
+      availabilityNote: 'Timed in',
     });
 
     expect(result.success).toBe(true);
     expect(result.data).toMatchObject({
-      availabilityStatus: StaffAvailabilityStatus.UNAVAILABLE,
-      availabilityNote: 'Not reporting today',
-    });
-  });
-});
-
-describe('users.validation employee time-in rules', () => {
-  it('accepts time-in without client-selected shift times', () => {
-    expect(updateOwnAvailabilitySchema.safeParse({
       availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
       availabilityNote: 'Timed in',
-    }).success).toBe(true);
-    expect(updateOwnAvailabilitySchema.safeParse({}).success).toBe(true);
+    });
+  });
+
+  it('strips the shift fields an older web still sends', () => {
+    const result = updateUserSchema.safeParse({
+      availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
+      shiftStartAt: '',
+      shiftEndAt: null,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('shiftStartAt');
+    expect(result.data).not.toHaveProperty('shiftEndAt');
   });
 
   it.each([StaffAvailabilityStatus.UNAVAILABLE, StaffAvailabilityStatus.ON_LEAVE])(
-    'does not allow employees to set admin-managed status %s through time-in', (availabilityStatus) => {
-      expect(updateOwnAvailabilitySchema.safeParse({ availabilityStatus }).success).toBe(false);
+    'accepts %s with a note', (availabilityStatus) => {
+      const result = updateUserSchema.safeParse({
+        availabilityStatus,
+        availabilityNote: 'Not reporting today',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        availabilityStatus,
+        availabilityNote: 'Not reporting today',
+      });
     },
   );
 });

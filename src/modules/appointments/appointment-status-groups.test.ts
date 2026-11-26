@@ -1,21 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { buildAppointmentStatusGroupFilter, isHistoryStatusGroup } from './appointment-status-groups.js';
+import { APPOINTMENT_STATUS_GROUPS, buildAppointmentStatusGroupFilter, isHistoryStatusGroup } from './appointment-status-groups.js';
 
 describe('buildAppointmentStatusGroupFilter', () => {
-  it('requested means no sales staff yet', () => {
+  it('requested includes legacy assigned records and requests with or without sales staff', () => {
     expect(buildAppointmentStatusGroupFilter('requested')).toEqual({
-      status: { $in: ['requested', 'reschedule_requested'] },
-      salesStaffId: null,
+      $or: [
+        { status: { $in: ['requested', 'assigned'] } },
+        { status: 'reschedule_requested', salesStaffId: null },
+      ],
     });
   });
 
-  it('assigned includes preassigned requested oculars', () => {
-    expect(buildAppointmentStatusGroupFilter('assigned')).toEqual({
-      $or: [
-        { status: 'assigned' },
-        { status: 'requested', salesStaffId: { $ne: null } },
-      ],
-    });
+  it('no longer exposes Assigned as a separate status group', () => {
+    expect(APPOINTMENT_STATUS_GROUPS).toEqual(['requested', 'confirmed', 'completed', 'no_show']);
+  });
+
+  it('redirects an older Assigned group request to Requested', () => {
+    expect(buildAppointmentStatusGroupFilter('assigned')).toEqual(buildAppointmentStatusGroupFilter('requested'));
   });
 
   it('confirmed includes the visit steps and staffed reschedules', () => {

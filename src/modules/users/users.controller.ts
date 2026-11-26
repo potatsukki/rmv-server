@@ -44,19 +44,6 @@ export const updateSalesAvailability = asyncHandler(async (req: Request, res: Re
   res.json({ success: true, data: result });
 });
 
-export const updateOwnAvailability = asyncHandler(async (req: Request, res: Response) => {
-  const result = await usersService.updateOwnAvailability(
-    req.userId!,
-    req.body,
-  );
-  res.json({ success: true, data: result });
-});
-
-export const closeOwnAvailability = asyncHandler(async (req: Request, res: Response) => {
-  const result = await usersService.closeOwnAvailability(req.userId!);
-  res.json({ success: true, data: result });
-});
-
 export const getSalesAvailability = asyncHandler(async (req: Request, res: Response) => {
   const result = await usersService.getSalesAvailability((req.params.id as string));
   res.json({ success: true, data: result });

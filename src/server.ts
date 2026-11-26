@@ -6,7 +6,6 @@ import { initializeSocket } from './modules/notifications/socket.service.js';
 import { processEmailRetries } from './modules/notifications/email.service.js';
 import { processPaymentReminders } from './jobs/paymentReminders.js';
 import { processContractExpiries } from './jobs/contractExpiry.js';
-import { processAvailabilityShiftReminders } from './jobs/availabilityShiftReminders.js';
 import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
 import { processAutomaticConsultationNoShows } from './modules/appointments/appointments.service.js';
 import { scheduleEveryMinute } from './jobs/minuteSchedule.js';
@@ -26,8 +25,6 @@ let emailRetryInterval: NodeJS.Timeout;
 let paymentReminderInterval: NodeJS.Timeout;
 // ── Contract Expiry Processor (every 12 hours) ──
 let contractExpiryInterval: NodeJS.Timeout;
-// ── Availability Shift Reminder Processor (every 15 minutes) ──
-let availabilityReminderInterval: NodeJS.Timeout;
 // ── Consultation attendance automation (every minute, 2 s after the minute starts) ──
 let stopConsultationAttendanceJobs: (() => void) | undefined;
 
@@ -80,14 +77,6 @@ async function startServer(): Promise<void> {
       }
     }, 12 * 60 * 60 * 1000); // every 12 hours
 
-    availabilityReminderInterval = setInterval(async () => {
-      try {
-        await processAvailabilityShiftReminders();
-      } catch (error) {
-        logger.error('Availability reminder processor error:', error);
-      }
-    }, 15 * 60 * 1000); // every 15 minutes
-
     // Follows the clock (hh:mm:02), not the server start time: a 9:00 AM consultation without a
     // check-in closes as No Show at 9:15:02 instead of anywhere up to 9:16.
     stopConsultationAttendanceJobs = scheduleEveryMinute(async () => {
@@ -110,9 +99,6 @@ async function startServer(): Promise<void> {
     // Run contract check once on startup
     processContractExpiries().catch(err =>
       logger.error('Initial contract expiry check failed:', err)
-    );
-    processAvailabilityShiftReminders().catch(err =>
-      logger.error('Initial availability reminder check failed:', err)
     );
     processAutomatedConsultationAttendance(
       new Date(),
@@ -152,9 +138,6 @@ function gracefulShutdown(signal: string): void {
     }
     if (contractExpiryInterval) {
       clearInterval(contractExpiryInterval);
-    }
-    if (availabilityReminderInterval) {
-      clearInterval(availabilityReminderInterval);
     }
     if (stopConsultationAttendanceJobs) {
       stopConsultationAttendanceJobs();

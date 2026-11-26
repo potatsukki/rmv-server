@@ -750,10 +750,7 @@ async function getCustomerDashboardCounts(customerId: string) {
     }).exec(),
     Appointment.countDocuments({
       customerId,
-      $or: [
-        buildAppointmentStatusGroupFilter('requested')!,
-        buildAppointmentStatusGroupFilter('assigned')!,
-      ],
+      ...buildAppointmentStatusGroupFilter('requested')!,
     }).exec(),
   ]);
 

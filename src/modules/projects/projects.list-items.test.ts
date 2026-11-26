@@ -52,6 +52,25 @@ describe('listProjects project-item fallback', () => {
     vi.resetAllMocks();
   });
 
+  it.each([Role.SALES_STAFF, Role.ENGINEER, Role.ADMIN])('filters initial-design declines before paging and counting while keeping %s scope', async (role) => {
+    const chain = queryChain([]);
+    mocks.projectFind.mockReturnValue(chain);
+    mocks.projectCountDocuments.mockResolvedValue(0);
+
+    await listProjects({ designReviewStatus: 'declined', page: '2', limit: '1' }, 'actor-1', [role]);
+
+    const filter = {
+      ...(role === Role.SALES_STAFF ? { salesStaffId: 'actor-1' } : role === Role.ENGINEER ? {
+        $or: [{ engineerIds: 'actor-1' }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } }],
+      } : {}),
+      designReviewStatus: 'declined',
+    };
+    expect(mocks.projectFind).toHaveBeenCalledExactlyOnceWith(filter);
+    expect(mocks.projectCountDocuments).toHaveBeenCalledExactlyOnceWith(filter);
+    expect(chain.skip).toHaveBeenCalledWith(1);
+    expect(chain.limit).toHaveBeenCalledWith(1);
+  });
+
   it('keeps primary project details off a missing sibling item', async () => {
     const project = {
       _id: 'project-1',

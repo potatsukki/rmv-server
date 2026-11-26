@@ -22,10 +22,12 @@ const {
   mockProjectFindOne,
   mockUserFindById,
   mockAssertCustomerScheduleFree,
+  mockGetCustomerBookedSlots,
 } = vi.hoisted(() => ({
   // The customer overlap rule has its own tests (customer-schedule-conflict*.test.ts); here it
   // passes unless a test makes it reject.
   mockAssertCustomerScheduleFree: vi.fn(),
+  mockGetCustomerBookedSlots: vi.fn().mockResolvedValue(new Set<string>()),
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
   mockAppointmentFind: vi.fn(),
@@ -96,6 +98,7 @@ vi.mock('../../utils/stateMachine.js', () => ({
 
 vi.mock('./customer-schedule-conflict.js', () => ({
   assertCustomerScheduleFree: mockAssertCustomerScheduleFree,
+  getCustomerBookedSlots: mockGetCustomerBookedSlots,
 }));
 
 vi.mock('../users/availability-session.service.js', async (importOriginal) => ({
@@ -644,10 +647,10 @@ describe('sales staff availability per time slot', () => {
 
   it('offers only upcoming slots for customer self-booking shortly before the cutoff', async () => {
     twoAvailableStaff();
-    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+    vi.setSystemTime(new Date('2026-11-27T15:59:59+08:00'));
     mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
 
-    const result = await getAvailableSlots({ date: '2026-11-26', type: AppointmentType.OFFICE, flow: 'customer_booking' });
+    const result = await getAvailableSlots({ date: '2026-11-27', type: AppointmentType.OFFICE, flow: 'customer_booking' });
 
     expect(result.slots.filter((slot) => slot.available).map((slot) => slot.slotCode)).toEqual(['16:00']);
     expect(slotByCode(result.slots, '15:00')).toMatchObject({ available: false, remaining: 0 });
@@ -655,13 +658,25 @@ describe('sales staff availability per time slot', () => {
 
   it('closes today for customer self-booking at 4 PM while leaving tomorrow bookable', async () => {
     twoAvailableStaff();
-    vi.setSystemTime(new Date('2026-11-26T16:00:00+08:00'));
+    vi.setSystemTime(new Date('2026-11-27T16:00:00+08:00'));
     mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
 
-    const query = { date: '2026-11-26', type: AppointmentType.OFFICE, flow: 'customer_booking' } as const;
+    const query = { date: '2026-11-27', type: AppointmentType.OFFICE, flow: 'customer_booking' } as const;
     await expect(getAvailableSlots(query)).rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
-    const tomorrow = await getAvailableSlots({ ...query, date: '2026-11-27' });
+    const tomorrow = await getAvailableSlots({ ...query, date: '2026-11-28' });
     expect(slotByCode(tomorrow.slots, '09:00')).toMatchObject({ available: true, remaining: 2 });
+  });
+
+  it('marks the customer own reserved slot unavailable even when other staff are free', async () => {
+    twoAvailableStaff();
+    vi.setSystemTime(new Date('2026-11-26T20:00:00+08:00'));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+    mockGetCustomerBookedSlots.mockResolvedValueOnce(new Set(['09:00']));
+
+    const result = await getAvailableSlots({ date: '2026-11-27', type: AppointmentType.OFFICE, flow: 'customer_booking' }, 'customer-1');
+    expect(mockGetCustomerBookedSlots).toHaveBeenCalledExactlyOnceWith('customer-1', '2026-11-27', expect.arrayContaining(['09:00', '10:00']));
+    expect(slotByCode(result.slots, '09:00')).toMatchObject({ customerBooked: true, available: false, remaining: 0 });
+    expect(slotByCode(result.slots, '10:00')).toMatchObject({ available: true, remaining: 2 });
   });
 
   it('retains advance booking for shared slots outside customer office self-booking', async () => {
@@ -943,10 +958,10 @@ describe('requestAppointment', () => {
 
   it('accepts a same-day 4 PM request just before the Manila cutoff', async () => {
     mockBookableOfficeSlot();
-    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+    vi.setSystemTime(new Date('2026-11-27T15:59:59+08:00'));
 
-    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
-      .resolves.toMatchObject({ date: '2026-11-26', slotCode: '16:00', status: AppointmentStatus.REQUESTED });
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-27', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
+      .resolves.toMatchObject({ date: '2026-11-27', slotCode: '16:00', status: AppointmentStatus.REQUESTED });
   });
 
   it.each([
@@ -954,21 +969,21 @@ describe('requestAppointment', () => {
     ['16:00:00', '16:00'],
   ] as const)('rejects a stale booking at %s Manila time for %s', async (now, slotCode) => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(`2026-11-26T${now}+08:00`));
+    vi.setSystemTime(new Date(`2026-11-27T${now}+08:00`));
 
-    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode }, 'customer-1', [Role.CUSTOMER]))
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-27', slotCode }, 'customer-1', [Role.CUSTOMER]))
       .rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
     expect(mockAppointmentCreate).not.toHaveBeenCalled();
   });
 
   it('rechecks the cutoff if the booking becomes stale while capacity is being checked', async () => {
     mockBookableOfficeSlot([], async () => {
-      vi.setSystemTime(new Date('2026-11-26T16:00:00+08:00'));
+      vi.setSystemTime(new Date('2026-11-27T16:00:00+08:00'));
       return false;
     });
-    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+    vi.setSystemTime(new Date('2026-11-27T15:59:59+08:00'));
 
-    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-27', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
       .rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
     expect(mockAppointmentCreate).not.toHaveBeenCalled();
     mockAppointmentCreate.mockReset();

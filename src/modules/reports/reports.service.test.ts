@@ -278,7 +278,7 @@ describe('dashboard pending payment projects', () => {
       }));
     });
 
-    it('counts pending visits as the Requested and Assigned appointment groups', async () => {
+    it('counts pending visits with the merged Requested appointment group', async () => {
       customerProjects([]);
       appointmentCounts({ pendingVisits: 3 });
 
@@ -287,7 +287,7 @@ describe('dashboard pending payment projects', () => {
       expect(summary.pendingAppointments).toBe(3);
       expect(dashboardMocks.appointmentCount).toHaveBeenCalledWith({
         customerId: 'customer-1',
-        $or: [buildAppointmentStatusGroupFilter('requested'), buildAppointmentStatusGroupFilter('assigned')],
+        ...buildAppointmentStatusGroupFilter('requested'),
       });
     });
 

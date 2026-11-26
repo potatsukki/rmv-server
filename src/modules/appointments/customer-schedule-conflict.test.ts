@@ -12,8 +12,8 @@ vi.mock('../../models/index.js', () => ({
   SalesAvailability: {},
 }));
 
-import { AppointmentStatus, AppointmentType } from '../../utils/constants.js';
-import { assertCustomerScheduleFree, findCustomerScheduleConflict } from './customer-schedule-conflict.js';
+import { AppointmentAttendanceStatus, AppointmentStatus, AppointmentType } from '../../utils/constants.js';
+import { assertCustomerScheduleFree, findCustomerScheduleConflict, getCustomerBookedSlots } from './customer-schedule-conflict.js';
 
 type Row = { _id: string; appointmentNumber?: string; type: AppointmentType; date: string; slotCode: string; status: AppointmentStatus };
 
@@ -86,7 +86,14 @@ describe('customer schedule conflict', () => {
     await expect(findCustomerScheduleConflict('customer-1', '2026-11-18', '10:00')).resolves.toBeNull();
   });
 
-  it('only looks at this customer on this date; cancelled and no-show appointments never block', async () => {
+  // Both No Show forms give the time back: an ocular visit closes as status no_show, an office
+  // consultation as completed + attendanceStatus no_show (user decision 2026-11-27).
+  const freedTimeFilter = {
+    status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
+    $nor: [{ status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW }],
+  };
+
+  it('only looks at this customer on this date; cancelled and no-show appointments (both forms) never block', async () => {
     customerHas([]);
 
     await expect(assertCustomerScheduleFree({
@@ -96,7 +103,7 @@ describe('customer schedule conflict', () => {
     expect(mocks.appointmentFind).toHaveBeenCalledExactlyOnceWith({
       customerId: 'customer-1',
       date: '2026-11-18',
-      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
+      ...freedTimeFilter,
     });
     expect(mocks.projectFindOne).not.toHaveBeenCalled();
   });
@@ -109,5 +116,23 @@ describe('customer schedule conflict', () => {
     expect(mocks.appointmentFind).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       _id: { $nin: ['appointment-being-moved'] },
     }));
+  });
+
+  it('marks exact and partial overlaps once per customer/date, while leaving adjacent slots free', async () => {
+    customerHas([{ ...consultation, slotCode: '09:30', status: AppointmentStatus.REQUESTED }]);
+    const booked = await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00', '11:00']);
+    expect([...booked]).toEqual(['09:00', '10:00']);
+    expect(mocks.appointmentFind).toHaveBeenCalledExactlyOnceWith({
+      customerId: 'customer-1', date: '2026-11-18',
+      ...freedTimeFilter,
+    });
+    expect(mocks.projectFindOne).not.toHaveBeenCalled();
+  });
+
+  it('keeps completed reservations blocked and frees the next non-overlapping hour', async () => {
+    customerHas([ocular]);
+    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00']))]).toEqual(['09:00']);
+    customerHas([]);
+    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-19', ['09:00', '10:00']))]).toEqual([]);
   });
 });

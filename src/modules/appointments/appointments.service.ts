@@ -42,7 +42,7 @@ import {
 } from '../users/availability-session.service.js';
 import { synchronizeConsultationAttendanceByTime } from './consultation-attendance-automation.js';
 import { acquireCustomerScheduleLock, acquireSalesDayLock, withSalesDayLocks, type SalesDayLocks } from './sales-day-lock.js';
-import { assertCustomerScheduleFree } from './customer-schedule-conflict.js';
+import { assertCustomerScheduleFree, getCustomerBookedSlots } from './customer-schedule-conflict.js';
 import type {
   RequestAppointmentInput,
   AgentCreateAppointmentInput,
@@ -904,11 +904,14 @@ async function releaseSlotLock(
 
 // ── Get Available Slots ──
 
-export async function getAvailableSlots(query: AvailableSlotsQuery) {
+export async function getAvailableSlots(query: AvailableSlotsQuery, customerId?: string) {
   const { date, type, salesStaffId } = query;
   const customerBooking = query.flow === 'customer_booking' && type === AppointmentType.OFFICE;
   const elapsedThrough = customerBooking ? assertCustomerBookingWindow(date) : undefined;
   await (customerBooking ? assertNotHoliday(date) : assertDateAvailable(date));
+  const customerBookedSlots = customerBooking && customerId
+    ? await getCustomerBookedSlots(customerId, date, SLOT_CODES)
+    : new Set<string>();
   // A new ocular visit with a pinned site only needs its busy time free (travel there and back,
   // traffic allowance, 1.5 hr on site); without a route it needs the whole day.
   const route = type === AppointmentType.OCULAR
@@ -921,6 +924,9 @@ export async function getAvailableSlots(query: AvailableSlotsQuery) {
   const slots = await Promise.all(
     SLOT_CODES.map(async (slotCode) => {
       const time = formatSlotTime(slotCode);
+      if (customerBookedSlots.has(slotCode)) {
+        return { slotCode, time, available: false, remaining: 0, blocked: false, customerBooked: true };
+      }
       if (elapsedThrough && slotCode <= elapsedThrough) {
         return { slotCode, time, available: false, remaining: 0, blocked: false };
       }

@@ -98,6 +98,10 @@ describe('requestAppointmentSchema selected design', () => {
 });
 
 describe('appointmentQueueQuerySchema', () => {
+  it('maps an older Assigned status filter to Requested', () => {
+    expect(appointmentQueueQuerySchema.parse({ statusGroup: 'assigned' }).statusGroup).toBe('requested');
+  });
+
   it('coerces numeric limit and keeps status/search filters', () => {
     const parsed = appointmentQueueQuerySchema.parse({
       status: 'requested,ready_for_ocular',
