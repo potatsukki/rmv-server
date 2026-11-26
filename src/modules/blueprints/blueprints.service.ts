@@ -1008,7 +1008,7 @@ export async function resolveDraftDeliveryFee(
   if (!chargeInfo.chargedHere) return null;
 
   if (!input.amount?.trim()) {
-    throw AppError.badRequest('Enter the third-party delivery fee (0 if there is no delivery charge).');
+    throw AppError.badRequest('Enter the delivery fee (0 if there is no delivery charge).');
   }
 
   return {

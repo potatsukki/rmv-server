@@ -48,7 +48,7 @@ describe('third-party delivery fee on the quotation', () => {
   });
 
   it('requires an amount when delivery is charged (0 means no charge)', async () => {
-    await expect(resolveDraftDeliveryFee(project, draftQuotation({ amount: '' }))).rejects.toThrow('Enter the third-party delivery fee');
+    await expect(resolveDraftDeliveryFee(project, draftQuotation({ amount: '' }))).rejects.toThrow('Enter the delivery fee (0 if there is no delivery charge).');
     await expect(resolveDraftDeliveryFee(project, draftQuotation({ amount: '0' }))).resolves.toMatchObject({ amount: 0 });
   });
 

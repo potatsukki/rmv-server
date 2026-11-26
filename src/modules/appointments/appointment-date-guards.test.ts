@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { APPOINTMENT_DAY_CHECK_BYPASSED, assertAppointmentDayReached, assertNoShowAllowed } from './appointment-date-guards.js';
+import { APPOINTMENT_DAY_CHECK_BYPASSED, assertAppointmentDayReached, assertCustomerBookingWindow, assertNoShowAllowed } from './appointment-date-guards.js';
 
 // Nov 8, 2026, 11:42 AM in Manila.
 const NOV_8 = new Date('2026-11-08T03:42:00Z');
 // The rule itself, checked with enforcement on regardless of the temporary bypass.
 const ENFORCE = true;
+
+describe('assertCustomerBookingWindow', () => {
+  // The temporary November 26 testing exception was removed (audit 2026-11-27): that day follows the normal rules.
+  it('applies the 4 PM cutoff and elapsed-slot rules on November 26 like any other day', () => {
+    expect(() => assertCustomerBookingWindow('2026-11-26', '09:00', new Date('2026-11-26T23:00:00+08:00')))
+      .toThrow('Same-day booking closes');
+    expect(() => assertCustomerBookingWindow('2026-11-26', '09:00', new Date('2026-11-26T09:30:00+08:00')))
+      .toThrow('already started');
+    expect(assertCustomerBookingWindow('2026-11-26', '10:00', new Date('2026-11-26T09:30:00+08:00'))).toBe('09:30');
+  });
+
+  it('rejects past dates and leaves later dates open', () => {
+    expect(() => assertCustomerBookingWindow('2026-11-26', '09:00', new Date('2026-11-27T00:00:00+08:00')))
+      .toThrow('This date has passed');
+    expect(assertCustomerBookingWindow('2026-11-28', '09:00', new Date('2026-11-27T20:00:00+08:00'))).toBeUndefined();
+  });
+});
 
 describe('assertAppointmentDayReached', () => {
   it('blocks a visit action before the appointment day', () => {

@@ -40,8 +40,9 @@ vi.mock('../maps/maps.service.js', async (importOriginal) => ({
 }));
 
 import { Appointment, Project, ProjectItem, SlotLock, User, VisitReport } from '../../models/index.js';
-import { AppointmentStatus, AppointmentType, Role } from '../../utils/constants.js';
+import { AppointmentAttendanceStatus, AppointmentStatus, AppointmentType, Role } from '../../utils/constants.js';
 import * as appointments from './appointments.service.js';
+import { getCustomerBookedSlots } from './customer-schedule-conflict.js';
 import * as visitReports from '../visit-reports/visit-reports.service.js';
 import * as projects from '../projects/projects.service.js';
 import { acquireCustomerScheduleLock, acquireSalesDayLock, withSalesDayLocks } from './sales-day-lock.js';
@@ -366,6 +367,26 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     const consultationId = await bookConsultation('09:00');
 
     expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
+  });
+
+  it('a consultation closed as No Show gives its time back; one the customer attended keeps it (user decision 2026-11-27)', async () => {
+    // An office No Show is stored as completed + attendanceStatus no_show (an ocular No Show as status no_show).
+    await Appointment.create({
+      customerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00',
+      status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW,
+      salesStaffId: bugoyId, bookedBy: customerId,
+    });
+    await Appointment.create({
+      customerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '10:00',
+      status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.CUSTOMER_DECLINED,
+      salesStaffId: bugoyId, bookedBy: customerId,
+    });
+
+    // The booking page's "Already booked" marks and the submission check use the same rule.
+    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00', '11:00']))]).toEqual(['10:00']);
+    const consultationId = await bookConsultation('09:00');
+    expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
+    await expect(bookConsultation('10:00')).rejects.toMatchObject(CONFLICT);
   });
 
   it('reschedule: refuses a move onto the customer\'s other appointment, and never compares an appointment with itself', async () => {

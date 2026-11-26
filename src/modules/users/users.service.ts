@@ -17,7 +17,6 @@ import type {
   UpdateProfileInput,
   DeleteAccountInput,
   SalesStaffLookupQueryInput,
-  UpdateOwnAvailabilityInput,
 } from './users.validation.js';
 import type { Types } from 'mongoose';
 import { getDefaultSavedAddress, normalizeSavedAddresses } from '../../utils/userAddresses.js';
@@ -215,12 +214,7 @@ export async function updateUser(userId: string, input: UpdateUserInput, adminId
     user.expiresAt = input.expiresAt ? new Date(input.expiresAt) : undefined;
   }
 
-  if (
-    input.availabilityStatus !== undefined
-    || input.availabilityNote !== undefined
-    || input.shiftStartAt !== undefined
-    || input.shiftEndAt !== undefined
-  ) {
+  if (input.availabilityStatus !== undefined || input.availabilityNote !== undefined) {
     if (!targetsInternalRole) {
       throw AppError.badRequest('Availability status can only be set for internal staff accounts');
     }
@@ -246,14 +240,6 @@ export async function updateUser(userId: string, input: UpdateUserInput, adminId
         userId: user._id,
         availabilityStatus: input.availabilityStatus,
         availabilityNote: input.availabilityNote || undefined,
-        shiftStartAt:
-          input.availabilityStatus === StaffAvailabilityStatus.AVAILABLE && input.shiftStartAt
-            ? new Date(input.shiftStartAt)
-            : undefined,
-        shiftEndAt:
-          input.availabilityStatus === StaffAvailabilityStatus.AVAILABLE && input.shiftEndAt
-            ? new Date(input.shiftEndAt)
-            : undefined,
         createdBy: adminId as unknown as Types.ObjectId,
         updatedBy: adminId as unknown as Types.ObjectId,
       });
@@ -432,89 +418,6 @@ export async function updateSalesAvailability(
   );
 
   return { message: 'Availability updated' };
-}
-
-// Employee: Time in. Availability scheduling remains admin-managed.
-export async function updateOwnAvailability(userId: string, input: UpdateOwnAvailabilityInput) {
-  const user = await User.findById(userId);
-  if (!user) throw AppError.notFound('User not found');
-  if (!hasInternalAvailabilityRole(user.roles)) {
-    throw AppError.badRequest('Only internal staff can time in');
-  }
-
-  const now = new Date();
-  const openSession = await getOpenAvailabilitySession(user._id);
-  if (openSession) {
-    throw AppError.badRequest('You are already timed in');
-  }
-
-  user.availabilityStatus = StaffAvailabilityStatus.AVAILABLE;
-  user.availabilityNote = input.availabilityNote || 'Timed in';
-  user.availabilityUpdatedAt = now;
-  await user.save();
-
-  await AvailabilitySession.create({
-    userId: user._id,
-    availabilityStatus: StaffAvailabilityStatus.AVAILABLE,
-    availabilityNote: input.availabilityNote || 'Timed in',
-    shiftStartAt: now,
-    createdBy: user._id,
-    updatedBy: user._id,
-  });
-
-  await AuditLog.create({
-    action: AuditAction.USER_UPDATED,
-    actorId: user._id,
-    targetType: 'user',
-    targetId: user._id,
-    details: {
-      timeIn: true,
-      shiftStartAt: now.toISOString(),
-    },
-  });
-
-  const nextSession = await getOpenAvailabilitySession(user._id);
-  return {
-    ...user.toObject(),
-    ...buildAvailabilityStateSummary(user, nextSession),
-  };
-}
-
-export async function closeOwnAvailability(userId: string) {
-  const user = await User.findById(userId);
-  if (!user) throw AppError.notFound('User not found');
-  if (!hasInternalAvailabilityRole(user.roles)) {
-    throw AppError.badRequest('Only internal staff can time out');
-  }
-
-  const session = await getOpenAvailabilitySession(user._id);
-  if (!session) {
-    throw AppError.badRequest('You are not currently timed in');
-  }
-
-  const now = new Date();
-  session.closedAt = now;
-  session.shiftEndAt = session.shiftEndAt || now;
-  session.updatedBy = user._id;
-  await session.save();
-
-  user.availabilityStatus = undefined;
-  user.availabilityNote = undefined;
-  user.availabilityUpdatedAt = now;
-  await user.save();
-
-  await AuditLog.create({
-    action: AuditAction.USER_UPDATED,
-    actorId: user._id,
-    targetType: 'user',
-    targetId: user._id,
-    details: { timeOut: true, closedSessionId: session._id.toString(), shiftEndAt: now.toISOString() },
-  });
-
-  return {
-    ...user.toObject(),
-    ...buildAvailabilityStateSummary(user, null),
-  };
 }
 
 export async function getSalesAvailability(salesStaffId: string) {

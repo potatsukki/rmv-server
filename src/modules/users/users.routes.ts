@@ -8,7 +8,6 @@ import {
   createUserSchema,
   updateUserSchema,
   updateProfileSchema,
-  updateOwnAvailabilitySchema,
   salesAvailabilitySchema,
   deleteAccountSchema,
   salesStaffLookupQuerySchema,
@@ -101,34 +100,6 @@ router.patch(
   usersController.updateProfile,
 );
 
-router.patch(
-  '/profile/availability',
-  authenticate,
-  authorize(
-    Role.SALES_STAFF,
-    Role.APPOINTMENT_AGENT,
-    Role.ENGINEER,
-    Role.CASHIER,
-    Role.ADMIN,
-    Role.FABRICATION_STAFF,
-  ),
-  validate(updateOwnAvailabilitySchema),
-  usersController.updateOwnAvailability,
-);
-
-router.post(
-  '/profile/availability/close',
-  authenticate,
-  authorize(
-    Role.SALES_STAFF,
-    Role.APPOINTMENT_AGENT,
-    Role.ENGINEER,
-    Role.CASHIER,
-    Role.ADMIN,
-    Role.FABRICATION_STAFF,
-  ),
-  usersController.closeOwnAvailability,
-);
 
 // ── E-Signature ──
 router.post(

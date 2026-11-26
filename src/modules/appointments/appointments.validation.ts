@@ -130,7 +130,8 @@ export const availableSlotsQuerySchema = z.object({
 
 export const appointmentQueueQuerySchema = z.object({
   status: z.string().max(120).trim().optional(),
-  statusGroup: z.enum(APPOINTMENT_STATUS_GROUPS).optional(),
+  statusGroup: z.enum([...APPOINTMENT_STATUS_GROUPS, 'assigned'])
+    .transform((value) => value === 'assigned' ? 'requested' : value).optional(),
   search: z.string().max(120).trim().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(120),
   excludeProjectOculars: z.enum(['true', 'false']).optional(),

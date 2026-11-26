@@ -1,7 +1,7 @@
 import type { Types } from 'mongoose';
 import { Appointment, Project } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { AppointmentStatus, AppointmentType, ProjectStatus } from '../../utils/constants.js';
+import { AppointmentAttendanceStatus, AppointmentStatus, AppointmentType, ProjectStatus } from '../../utils/constants.js';
 import { APPOINTMENT_SLOT_MINUTES, slotsOverlap } from '../users/availability-session.service.js';
 
 /**
@@ -17,6 +17,12 @@ export const CUSTOMER_TIME_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
 ];
+
+/**
+ * An office consultation closed as No Show is stored as completed with attendanceStatus no_show
+ * (an ocular visit uses status no_show), so it gives its time back too (user decision 2026-11-27).
+ */
+const OFFICE_NO_SHOW = { status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW };
 
 type ConflictingAppointment = {
   _id: Types.ObjectId;
@@ -61,26 +67,42 @@ function formatTimeRange(slotCode: string) {
 const kindLabel = (type?: AppointmentType | string) => (type === AppointmentType.OCULAR ? 'an ocular visit' : 'a consultation');
 
 /**
- * The customer's other appointment that overlaps this date and time slot, if any. An appointment
- * being moved is passed in `excludeAppointmentIds` so it is never compared with itself.
+ * Customer appointments that reserve time on this date. An appointment being moved is passed
+ * in `excludeAppointmentIds` so it is never compared with itself.
  */
-export async function findCustomerScheduleConflict(
+async function getCustomerAppointmentsOnDate(
   customerId: string,
   dateStr: string,
-  slotCode: string,
   excludeAppointmentIds: string[] = [],
-): Promise<ConflictingAppointment | null> {
+): Promise<ConflictingAppointment[]> {
   const filter: Record<string, unknown> = {
     customerId,
     date: dateStr,
     status: { $nin: CUSTOMER_TIME_FREEING_STATUSES },
+    $nor: [OFFICE_NO_SHOW],
   };
   if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
   const sameDay = await Appointment.find(filter)
     .select('appointmentNumber type date slotCode status')
     .sort({ slotCode: 1 })
     .lean();
-  return (sameDay as ConflictingAppointment[]).find((appointment) => slotsOverlap(appointment.slotCode, slotCode)) ?? null;
+  return sameDay as ConflictingAppointment[];
+}
+
+export async function findCustomerScheduleConflict(
+  customerId: string,
+  dateStr: string,
+  slotCode: string,
+  excludeAppointmentIds: string[] = [],
+): Promise<ConflictingAppointment | null> {
+  const sameDay = await getCustomerAppointmentsOnDate(customerId, dateStr, excludeAppointmentIds);
+  return sameDay.find((appointment) => slotsOverlap(appointment.slotCode, slotCode)) ?? null;
+}
+
+/** Marks the same overlaps the submission guard rejects, with one query for the entire day. */
+export async function getCustomerBookedSlots(customerId: string, dateStr: string, slotCodes: readonly string[]) {
+  const sameDay = await getCustomerAppointmentsOnDate(customerId, dateStr);
+  return new Set(slotCodes.filter((slotCode) => sameDay.some((appointment) => slotsOverlap(appointment.slotCode, slotCode))));
 }
 
 /**

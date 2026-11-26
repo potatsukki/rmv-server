@@ -2830,6 +2830,8 @@ export async function listProjects(
     search?: string;
     /** One of PROJECT_LISTING_STAGES; filtered before paging so every match can be listed. */
     stage?: string;
+    /** Initial-design review outcome, independent of the project's lifecycle stage. */
+    designReviewStatus?: 'declined';
     /** "relevant": only projects the Payments page lists, each with its paymentDue summary. */
     payment?: string;
     page?: string;
@@ -2863,6 +2865,7 @@ export async function listProjects(
   } else if (query.status) {
     filter.status = query.status;
   }
+  if (query.designReviewStatus === 'declined') filter.designReviewStatus = 'declined';
   if (query.customerId && !filter.customerId) filter.customerId = query.customerId;
   if (query.salesStaffId && !filter.salesStaffId) filter.salesStaffId = query.salesStaffId;
   if (query.engineerId && !filter.engineerIds) filter.engineerIds = query.engineerId;

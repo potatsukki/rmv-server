@@ -67,7 +67,7 @@ export const getAvailableSlots = asyncHandler(async (req: Request, res: Response
   // Only staff may look up one sales staff member's own free days.
   const isStaff = roles.some((role) => role !== Role.CUSTOMER);
   if (!isStaff || query.flow === 'customer_booking') delete query.salesStaffId;
-  const result = await appointmentsService.getAvailableSlots(query);
+  const result = await appointmentsService.getAvailableSlots(query, query.flow === 'customer_booking' ? req.userId : undefined);
   res.set('Cache-Control', 'no-store');
   res.json({ success: true, data: result });
 });

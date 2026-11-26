@@ -1,8 +1,8 @@
 import { AppointmentAttendanceStatus, AppointmentStatus } from '../../utils/constants.js';
 
-// The UI shows five appointment statuses; the database keeps the detailed ones.
+// The UI shows four appointment statuses; the database keeps the detailed ones.
 // Keep this mapping in sync with resolveAppointmentWorkflowStatus in rmv-web.
-export const APPOINTMENT_STATUS_GROUPS = ['requested', 'assigned', 'confirmed', 'completed', 'no_show'] as const;
+export const APPOINTMENT_STATUS_GROUPS = ['requested', 'confirmed', 'completed', 'no_show'] as const;
 export type AppointmentStatusGroup = (typeof APPOINTMENT_STATUS_GROUPS)[number];
 
 const NO_SALES_STAFF = { salesStaffId: null };
@@ -18,19 +18,16 @@ export function isHistoryStatusGroup(value: unknown): boolean {
 }
 
 export function buildAppointmentStatusGroupFilter(group: unknown): Record<string, unknown> | null {
+  // Keep older clients/links compatible with the merged Requested group.
+  if (group === 'assigned') group = 'requested';
   if (!isAppointmentStatusGroup(group)) return null;
 
   switch (group) {
     case 'requested':
       return {
-        status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.RESCHEDULE_REQUESTED] },
-        ...NO_SALES_STAFF,
-      };
-    case 'assigned':
-      return {
         $or: [
-          { status: AppointmentStatus.ASSIGNED },
-          { status: AppointmentStatus.REQUESTED, ...HAS_SALES_STAFF },
+          { status: { $in: [AppointmentStatus.REQUESTED, AppointmentStatus.ASSIGNED] } },
+          { status: AppointmentStatus.RESCHEDULE_REQUESTED, ...NO_SALES_STAFF },
         ],
       };
     case 'confirmed':
