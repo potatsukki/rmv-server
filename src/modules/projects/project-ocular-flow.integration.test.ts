@@ -179,29 +179,34 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('blocks the ocular visit only while its travel time and site visit overlap an active appointment; a completed one does not', async () => {
+  it('blocks the ocular visit while its busy time overlaps an appointment that still holds its time; completed early holds it, cancelled frees it', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
-    // Same sales staff on Nov 16: an active 9:00 consultation and a completed 13:00 one.
-    const active = await Appointment.create({
+    // Same sales staff on Nov 16: an active 9:00 consultation and a 13:00 one already marked
+    // completed although "now" is Nov 10 (completed early while the day check is bypassed).
+    await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
-    await Appointment.create({
+    const completedEarly = await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '13:00',
       status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
-    // The site is 5 km / 18 min away: the staff is away from 30 (rounded drive) + 60 min (traffic)
-    // before the visit until 1.5 hr + 90 min after it starts. So the active 9:00 consultation blocks 9:00 and 10:00.
+    // The site is 5 km / 18 min away: the staff is busy from 15 min prep + 30 (rounded drive) + 60 min
+    // (traffic) before the visit until 1.5 hr + 90 min after it starts. The active 9:00 consultation blocks 9:00 and 10:00.
     for (const slotCode of ['09:00', '10:00']) {
       await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode, ...SITE } as never, salesId, [Role.SALES_STAFF]))
-        .rejects.toThrow(/at this time|keeps (them away|the staff busy)/);
+        .rejects.toThrow(/at this time|keeps (them away|the staff busy)|No sales staff is free/);
     }
+    // 13:00 (busy 11:15 AM–4:00 PM) runs into the completed-early 13:00 consultation, whose time is still ahead.
+    await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
+      .rejects.toThrow(/at this time|keeps (them away|the staff busy)|No sales staff is free/);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
 
-    // 13:00 (away 11:30 AM–4:00 PM) fits around it, and the completed 13:00 consultation frees its time.
+    // Once that consultation is cancelled, its time is free and the 13:00 ocular visit fits around the 9:00 one.
+    await Appointment.updateOne({ _id: completedEarly._id }, { $set: { status: AppointmentStatus.CANCELLED } });
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
@@ -291,6 +296,12 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     // The project's own staff can open the visit; a sales staff member with no link to it cannot.
     await expect(appointments.getAppointmentById(ocularId, salesId, [Role.SALES_STAFF]))
       .resolves.toMatchObject({ linkedProject: { _id: projectId } });
+    // The visit page gets its prep / leave / back times from the server (Travel Time S2):
+    // 18 min → 30 min drive, 5 km → 1 hr traffic each way, 15 min prep.
+    const detail = await appointments.getAppointmentById(ocularId, otherSalesId, [Role.SALES_STAFF]);
+    expect(detail.ocularSchedule).toMatchObject({
+      travelMinutes: 18, roundedTravelMinutes: 30, travelLabel: '30 min', trafficMinutes: 60, prepMinutes: 15, siteMinutes: 90,
+    });
     await expect(appointments.getAppointmentById(ocularId, unrelatedSalesId, [Role.SALES_STAFF]))
       .rejects.toThrow('no longer assigned');
 
@@ -380,6 +391,19 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     // The engineering step can start.
     await projects.assignEngineers(projectId, { engineerIds: [engineerId] } as never, adminId);
     expect((await projects.getProjectById(projectId, engineerId, [Role.ENGINEER])).engineerIds).toHaveLength(1);
+  });
+
+  it('shows the customer their project before the signed contract is uploaded (user decision 2026-11-26)', async () => {
+    const { consultationId, reportId } = await completeConsultation();
+    const projectId = await createProjectWithContract(consultationId, reportId);
+    await runOcularVisit(projectId);
+    // Like a project made from an ocular visit booked on the consultation report: For Review, no contract yet.
+    await Project.updateOne({ _id: projectId }, { $set: { contractStatus: 'missing' }, $unset: { contractFileKey: 1 } });
+
+    const listed = await projects.listProjects({}, customerId, [Role.CUSTOMER]);
+    expect(listed.items.map((project: { _id: unknown }) => String(project._id))).toContain(projectId);
+    await expect(projects.getProjectById(projectId, customerId, [Role.CUSTOMER]))
+      .resolves.toMatchObject({ status: ProjectStatus.SUBMITTED, contractStatus: 'missing' });
   });
 
   it('refuses to create a project without a signed contract', async () => {

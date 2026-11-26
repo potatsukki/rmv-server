@@ -1,4 +1,4 @@
-import { AppointmentStatus, AppointmentType } from '../../utils/constants.js';
+import { AppointmentStatus, AppointmentType, SLOT_CODES } from '../../utils/constants.js';
 
 /**
  * Travel time and staff busy time — the single source of truth for RMV scheduling.
@@ -209,6 +209,19 @@ export function describeOcularSchedule(slotCode: string | null | undefined, rout
     backAt: formatMinutesLabel(back),
     endsAfterWorkday: back > WORKDAY_END_MINUTES,
   };
+}
+
+/**
+ * The schedule for every bookable slot (SLOT_CODES), for a route that has no slot yet: the
+ * Schedule Ocular dialog shows the one for the picked time instead of computing it on the web.
+ */
+export function describeOcularSchedulesBySlot(route: OcularRoute | null | undefined): Record<string, OcularSchedule> {
+  const schedules: Record<string, OcularSchedule> = {};
+  for (const slotCode of SLOT_CODES) {
+    const schedule = describeOcularSchedule(slotCode, route);
+    if (schedule) schedules[slotCode] = schedule;
+  }
+  return schedules;
 }
 
 /** Epoch ms of a Manila date (yyyy-MM-dd) + minutes of that day. */

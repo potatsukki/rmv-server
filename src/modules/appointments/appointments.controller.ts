@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import * as appointmentsService from './appointments.service.js';
+import type { AvailableSlotsQuery } from './appointments.validation.js';
 import { AppointmentStatus, Role } from '../../utils/constants.js';
 import { updateAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 
@@ -60,10 +61,12 @@ function formatAppointment(appt: any) {
 
 // ── Get Available Slots ──
 export const getAvailableSlots = asyncHandler(async (req: Request, res: Response) => {
-  const query = { ...(req.query as any) };
+  const query = { ...(req.query as unknown as AvailableSlotsQuery) };
+  const roles = req.userRoles ?? [];
+  if (!roles.includes(Role.CUSTOMER)) delete query.flow;
   // Only staff may look up one sales staff member's own free days.
-  const isStaff = (req.userRoles || []).some((role) => role !== Role.CUSTOMER);
-  if (!isStaff) delete query.salesStaffId;
+  const isStaff = roles.some((role) => role !== Role.CUSTOMER);
+  if (!isStaff || query.flow === 'customer_booking') delete query.salesStaffId;
   const result = await appointmentsService.getAvailableSlots(query);
   res.set('Cache-Control', 'no-store');
   res.json({ success: true, data: result });

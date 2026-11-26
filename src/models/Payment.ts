@@ -208,7 +208,7 @@ const paymentSchema = new Schema<IPayment>(
   { timestamps: true },
 );
 
-paymentPlanSchema.index({ projectId: 1 }, { unique: true, partialFilterExpression: { projectItemId: { $exists: false } } });
+paymentPlanSchema.index({ projectId: 1 }, { unique: true, partialFilterExpression: { projectItemId: null } });
 paymentPlanSchema.index({ projectItemId: 1 }, { unique: true, sparse: true });
 paymentSchema.index({ projectId: 1, stageId: 1 });
 paymentSchema.index({ projectItemId: 1, stageId: 1 });

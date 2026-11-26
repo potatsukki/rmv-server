@@ -7,7 +7,8 @@ import { getConfigValue } from '../config/config.service.js';
 import { validatePaymentImage } from '../uploads/upload.service.js';
 import { assertBookingReadyForGcashApproval, completePaidOcularBooking } from '../appointments/appointments.service.js';
 import { createAndSendNotification, notifyRole, emitRoleEvent, emitUserEvent } from '../notifications/socket.service.js';
-import { handleInitialFabricationPaymentVerified, issueGcashReceipt } from './payments.service.js';
+import { issueGcashReceipt } from './payments.service.js';
+import { handleInitialFabricationPaymentVerified } from '../projects/fabrication-start.js';
 import { completeDesignFeeOnlinePayment, DESIGN_FEE_STAGE_PREFIX } from '../projects/design-fee.service.js';
 import type { GcashTarget, SubmitGcashInput } from './gcash.validation.js';
 import { gcashSettingsSchema } from './gcash.validation.js';
@@ -308,9 +309,8 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
     if (reviewed!.stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX) && reviewed!.projectId) {
       await completeDesignFeeOnlinePayment(reviewed!.projectId, reviewed!, cashierId);
     } else if (reviewed!.projectId) {
-      const project = await Project.findById(reviewed!.projectId);
       const plan = await PaymentPlan.findOne({ 'stages.stageId': reviewed!.stageId });
-      if (project && plan) await handleInitialFabricationPaymentVerified(project, plan, reviewed!.projectItemId?.toString());
+      if (plan) await handleInitialFabricationPaymentVerified(reviewed!.projectId, plan);
     }
   }
   await createAndSendNotification(reviewed!.customerId!, NotificationCategory.PAYMENT,

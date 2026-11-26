@@ -598,7 +598,7 @@ describe('assertOcularWindowFree (a new site pin on a scheduled ocular visit)', 
     ]));
 
     await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 45, distanceKm: 18 }))
-      .rejects.toThrow('the visit would keep the sales staff away 11:00 AM–4:30 PM, which runs into their 3:00 PM appointment (APT-1)');
+      .rejects.toThrow('the visit would keep the sales staff away 10:45 AM–4:30 PM, which runs into their 3:00 PM appointment (APT-1)');
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
       salesStaffId: 'sales-a', date: '2026-09-10', _id: { $ne: 'ocular-1' },
     }));
@@ -609,7 +609,7 @@ describe('assertOcularWindowFree (a new site pin on a scheduled ocular visit)', 
       { appointmentNumber: 'APT-1', slotCode: '15:00', type: AppointmentType.OFFICE, status: AppointmentStatus.CONFIRMED },
     ]));
 
-    // 10 min (rounded to 30), 3 km: away 12:30–3:00 PM.
+    // 10 min (rounded to 30), 3 km: away 12:15 (15 min prep) – 3:00 PM.
     await expect(assertOcularWindowFree(ocular, { travelDurationMinutes: 10, distanceKm: 3 })).resolves.toBeUndefined();
   });
 
@@ -642,6 +642,37 @@ describe('sales staff availability per time slot', () => {
   const slotByCode = (slots: Array<{ slotCode: string; available: boolean; remaining: number }>, code: string) =>
     slots.find((slot) => slot.slotCode === code)!;
 
+  it('offers only upcoming slots for customer self-booking shortly before the cutoff', async () => {
+    twoAvailableStaff();
+    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const result = await getAvailableSlots({ date: '2026-11-26', type: AppointmentType.OFFICE, flow: 'customer_booking' });
+
+    expect(result.slots.filter((slot) => slot.available).map((slot) => slot.slotCode)).toEqual(['16:00']);
+    expect(slotByCode(result.slots, '15:00')).toMatchObject({ available: false, remaining: 0 });
+  });
+
+  it('closes today for customer self-booking at 4 PM while leaving tomorrow bookable', async () => {
+    twoAvailableStaff();
+    vi.setSystemTime(new Date('2026-11-26T16:00:00+08:00'));
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
+
+    const query = { date: '2026-11-26', type: AppointmentType.OFFICE, flow: 'customer_booking' } as const;
+    await expect(getAvailableSlots(query)).rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
+    const tomorrow = await getAvailableSlots({ ...query, date: '2026-11-27' });
+    expect(slotByCode(tomorrow.slots, '09:00')).toMatchObject({ available: true, remaining: 2 });
+  });
+
+  it('retains advance booking for shared slots outside customer office self-booking', async () => {
+    twoAvailableStaff();
+    vi.setSystemTime(new Date('2026-11-26T08:00:00+08:00'));
+    const date = '2026-11-26';
+
+    await expect(getAvailableSlots({ date, type: AppointmentType.OFFICE })).rejects.toThrow('in advance');
+    await expect(getAvailableSlots({ date, type: AppointmentType.OCULAR, flow: 'customer_booking' })).rejects.toThrow('in advance');
+  });
+
   it('takes a staff member out of only the slot of their consultation, not the whole day', async () => {
     twoAvailableStaff();
     // sales-a has an office consultation at 14:00 that day.
@@ -652,11 +683,23 @@ describe('sales staff availability per time slot', () => {
     expect(slotByCode(result.slots, '14:00')).toMatchObject({ available: true, remaining: 1 });
     expect(result.slots.filter((slot) => slot.slotCode !== '14:00')
       .every((slot) => slot.available && slot.remaining === 2)).toBe(true);
-    // Cancelled, completed and no-show appointments never take a slot.
+    // Cancelled and no-show appointments never take a slot; a completed one only until its time has passed.
     expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({
       date: '2026-09-10',
-      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW] },
+      status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
     }));
+  });
+
+  it('keeps the slot of an appointment completed early taken until its time has passed (QA double booking)', async () => {
+    twoAvailableStaff();
+    // "Now" is Sep 6; the 2 PM consultation on Sep 10 was already marked completed (day check bypassed).
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: 'sales-a', date: '2026-09-10', slotCode: '14:00', type: AppointmentType.OFFICE, status: AppointmentStatus.COMPLETED },
+    ]));
+
+    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
+
+    expect(slotByCode(result.slots, '14:00')).toMatchObject({ available: true, remaining: 1 });
   });
 
   it('takes a staff member with an ocular visit out of every consultation slot that day', async () => {
@@ -671,15 +714,16 @@ describe('sales staff availability per time slot', () => {
 
   it('with a pinned site, takes a staff member out only while away for the ocular visit', async () => {
     twoAvailableStaff();
-    // sales-a has a 1 PM ocular visit, 45 min drive (→ 1 hr), 18 km: away 11:00 AM–4:30 PM (1 hr traffic each way).
+    // sales-a has a 1 PM ocular visit, 45 min drive (→ 1 hr), 18 km: busy 10:45 AM (15 min prep) – 4:30 PM (1 hr traffic each way).
     mockAppointmentFind.mockImplementation(() => selectLeanResult([
       { salesStaffId: 'sales-a', slotCode: '13:00', type: AppointmentType.OCULAR, travelDurationMinutes: 45, distanceKm: 18 },
     ]));
 
     const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
 
-    for (const code of ['11:00', '13:00', '14:00', '15:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
-    for (const code of ['09:00', '10:00']) expect(slotByCode(result.slots, code).remaining).toBe(2);
+    // The 10:00 consultation would run until 11:00, into the 10:45 prep.
+    for (const code of ['10:00', '11:00', '13:00', '14:00', '15:00', '16:00']) expect(slotByCode(result.slots, code).remaining).toBe(1);
+    expect(slotByCode(result.slots, '09:00').remaining).toBe(2);
   });
 
   it('offers a pinned ocular visit wherever its travel time and site visit fit around a consultation', async () => {
@@ -863,10 +907,10 @@ describe('requestAppointment', () => {
   }
 
   /** A free 9:00 AM office slot on Sep 1, 2026, booked by a customer who holds `activeAppointments`. */
-  function mockBookableOfficeSlot(activeAppointments: Array<{ appointmentNumber: string }> = []) {
+  function mockBookableOfficeSlot(activeAppointments: Array<{ appointmentNumber: string }> = [], checkBlocked = async () => false) {
     mockActiveAppointments(activeAppointments);
     mockHolidayFindOne.mockResolvedValueOnce(null);
-    mockBlockedSlotExists.mockResolvedValueOnce(false);
+    mockBlockedSlotExists.mockImplementationOnce(checkBlocked);
     mockUserFind.mockReturnValueOnce(selectLeanResult([{
       _id: 'sales-1',
       roles: [Role.SALES_STAFF],
@@ -896,6 +940,41 @@ describe('requestAppointment', () => {
     slotCode: '09:00',
     serviceTypes: [ServiceType.RAILINGS],
   } as Parameters<typeof requestAppointment>[0];
+
+  it('accepts a same-day 4 PM request just before the Manila cutoff', async () => {
+    mockBookableOfficeSlot();
+    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
+      .resolves.toMatchObject({ date: '2026-11-26', slotCode: '16:00', status: AppointmentStatus.REQUESTED });
+  });
+
+  it.each([
+    ['09:00:00', '09:00'],
+    ['16:00:00', '16:00'],
+  ] as const)('rejects a stale booking at %s Manila time for %s', async (now, slotCode) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(`2026-11-26T${now}+08:00`));
+
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode }, 'customer-1', [Role.CUSTOMER]))
+      .rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
+    expect(mockAppointmentCreate).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the cutoff if the booking becomes stale while capacity is being checked', async () => {
+    mockBookableOfficeSlot([], async () => {
+      vi.setSystemTime(new Date('2026-11-26T16:00:00+08:00'));
+      return false;
+    });
+    vi.setSystemTime(new Date('2026-11-26T15:59:59+08:00'));
+
+    await expect(requestAppointment({ ...officeRequest, date: '2026-11-26', slotCode: '16:00' }, 'customer-1', [Role.CUSTOMER]))
+      .rejects.toMatchObject({ code: 'BOOKING_TIME_UNAVAILABLE' });
+    expect(mockAppointmentCreate).not.toHaveBeenCalled();
+    mockAppointmentCreate.mockReset();
+    mockAuditCreate.mockReset();
+    mockNotifyRole.mockReset();
+  });
 
   it('books another appointment while the customer already holds 2 active ones (each at its own date and time)', async () => {
     mockBookableOfficeSlot([{ appointmentNumber: 'APT-20261126-0001' }, { appointmentNumber: 'APT-20261127-0001' }]);
@@ -1436,6 +1515,36 @@ describe('processAutomaticConsultationNoShows', () => {
 
     expect(closed).toBe(0);
     expect(mockAppointmentFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  // QA 2026-11-26: a 9:00 AM consultation without a check-in is a No Show from 9:15 sharp (Manila).
+  const nineAm = { _id: 'appointment-9', date: '2026-11-25', slotCode: '09:00' };
+
+  it('keeps a 9:00 AM consultation open at 9:14:59', async () => {
+    mockCandidates([nineAm]);
+
+    const closed = await processAutomaticConsultationNoShows(new Date('2026-11-25T01:14:59.000Z'));
+
+    expect(closed).toBe(0);
+    expect(mockAppointmentFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('closes a 9:00 AM consultation without check-in at 9:15:00 and stamps that time', async () => {
+    mockCandidates([nineAm]);
+    mockAppointmentFindOneAndUpdate.mockResolvedValueOnce({ ...nineAm, customerId: 'customer-1', salesStaffId: 'sales-1' });
+    const at915 = new Date('2026-11-25T01:15:00.000Z');
+
+    const closed = await processAutomaticConsultationNoShows(at915);
+
+    expect(closed).toBe(1);
+    expect(mockAppointmentFind).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-25', actualArrivalAt: null }));
+    expect(mockAppointmentFindOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: 'appointment-9', actualArrivalAt: null }),
+      expect.objectContaining({
+        $set: expect.objectContaining({ attendanceUpdatedAt: at915, consultationCompletedAt: at915 }),
+      }),
+      { new: true },
+    );
   });
 
   it('leaves the appointment open when a check-in landed first', async () => {

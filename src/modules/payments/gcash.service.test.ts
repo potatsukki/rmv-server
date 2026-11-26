@@ -17,7 +17,8 @@ vi.mock('../../models/index.js', () => ({
 vi.mock('../config/config.service.js', () => ({ getConfigValue: db.config }));
 vi.mock('../uploads/upload.service.js', () => ({ validatePaymentImage: db.image }));
 vi.mock('../appointments/appointments.service.js', () => ({ assertBookingReadyForGcashApproval: db.ready, completePaidOcularBooking: vi.fn() }));
-vi.mock('./payments.service.js', () => ({ handleInitialFabricationPaymentVerified: vi.fn(), issueGcashReceipt: db.receipt }));
+vi.mock('./payments.service.js', () => ({ issueGcashReceipt: db.receipt }));
+vi.mock('../projects/fabrication-start.js', () => ({ handleInitialFabricationPaymentVerified: vi.fn() }));
 vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: vi.fn(), emitRoleEvent: vi.fn(), emitUserEvent: vi.fn(), notifyUsers: vi.fn() }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() } }));
 

@@ -4,7 +4,9 @@ const {
   mockPaymentFindById,
   mockPaymentFind,
   mockProjectFindById,
+  mockProjectFindOneAndUpdate,
   mockProjectItemUpdateMany,
+  mockProjectItemFind,
   mockPaymentPlanFindOne,
   mockPaymentCreate,
   mockUserFindById,
@@ -14,7 +16,9 @@ const {
   mockPaymentFindById: vi.fn(),
   mockPaymentFind: vi.fn(),
   mockProjectFindById: vi.fn(),
+  mockProjectFindOneAndUpdate: vi.fn(),
   mockProjectItemUpdateMany: vi.fn(),
+  mockProjectItemFind: vi.fn(),
   mockPaymentPlanFindOne: vi.fn(),
   mockPaymentCreate: vi.fn(),
   mockUserFindById: vi.fn(),
@@ -31,8 +35,10 @@ vi.mock('../../models/index.js', () => ({
   },
   Project: {
     findById: mockProjectFindById,
+    findOneAndUpdate: mockProjectFindOneAndUpdate,
   },
   ProjectItem: {
+    find: mockProjectItemFind,
     updateMany: mockProjectItemUpdateMany,
   },
   User: { findById: mockUserFindById },
@@ -40,10 +46,13 @@ vi.mock('../../models/index.js', () => ({
   ReceiptCounter: { findOneAndUpdate: mockReceiptCounterUpdate },
   Appointment: {},
 }));
+vi.mock('../../models/Payment.js', () => ({ PaymentPlan: { findOne: mockPaymentPlanFindOne } }));
 
 vi.mock('../notifications/socket.service.js', () => ({
   createAndSendNotification: vi.fn(),
   notifyRole: vi.fn(),
+  notifyUsers: vi.fn(),
+  emitUserEvent: vi.fn(),
   emitRoleEvent: vi.fn(),
 }));
 
@@ -84,8 +93,8 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
+import { reconcileFabricationStart } from '../projects/fabrication-start.js';
 import {
-  activateAssignedFabricationAfterInitialPayment,
   getPaymentEvidenceTrail,
   recordCashPayment,
   listPendingPayments,
@@ -190,6 +199,10 @@ describe('payments.service evidence trail access', () => {
 });
 
 describe('fabrication activation after initial payment', () => {
+  beforeEach(() => {
+    mockPaymentPlanFindOne.mockResolvedValue({ stages: [{ status: PaymentStageStatus.VERIFIED }] });
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
   });
@@ -199,15 +212,22 @@ describe('fabrication activation after initial payment', () => {
       _id: 'project-1',
       status: ProjectStatus.PAYMENT_PENDING,
       fabricationLeadId: 'fabricator-1',
-      save: vi.fn().mockResolvedValue(undefined),
+      engineerIds: [],
+      fabricationAssistantIds: [],
+      estimatedCompletionDate: new Date('2026-12-05T09:00:00Z'),
     };
+    mockProjectFindById.mockResolvedValue(project);
+    mockProjectFindOneAndUpdate.mockResolvedValue({ ...project, status: ProjectStatus.FABRICATION });
     mockProjectItemUpdateMany.mockResolvedValue({ modifiedCount: 2 });
 
-    const result = await activateAssignedFabricationAfterInitialPayment(project);
+    const result = await reconcileFabricationStart(project._id);
 
-    expect(result).toEqual({ parentReady: true, activated: true });
-    expect(project.status).toBe(ProjectStatus.FABRICATION);
-    expect(project.save).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ paymentReady: true, activated: true, project: { status: ProjectStatus.FABRICATION } });
+    expect(mockProjectFindOneAndUpdate).toHaveBeenCalledWith(
+      { _id: project._id, status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: { $ne: null } },
+      { $set: { status: ProjectStatus.FABRICATION } },
+      { returnDocument: 'after' },
+    );
     expect(mockProjectItemUpdateMany).toHaveBeenCalledWith(
       { projectId: 'project-1', status: ProjectStatus.PAYMENT_PENDING },
       { $set: { status: ProjectStatus.FABRICATION } },
@@ -219,14 +239,14 @@ describe('fabrication activation after initial payment', () => {
       _id: 'project-1',
       status: ProjectStatus.PAYMENT_PENDING,
       fabricationLeadId: null,
-      save: vi.fn(),
     };
+    mockProjectFindById.mockResolvedValue(project);
 
-    const result = await activateAssignedFabricationAfterInitialPayment(project);
+    const result = await reconcileFabricationStart(project._id);
 
-    expect(result).toEqual({ parentReady: true, activated: false });
+    expect(result).toEqual({ project, paymentReady: true, activated: false });
     expect(project.status).toBe(ProjectStatus.PAYMENT_PENDING);
-    expect(project.save).not.toHaveBeenCalled();
+    expect(mockProjectFindOneAndUpdate).not.toHaveBeenCalled();
     expect(mockProjectItemUpdateMany).not.toHaveBeenCalled();
   });
 });

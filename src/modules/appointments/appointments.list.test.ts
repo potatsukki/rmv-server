@@ -69,12 +69,34 @@ describe('listAppointments status groups', () => {
     mocks.appointmentCountDocuments.mockResolvedValue(0);
   });
 
-  it('lists the customer completed group, including cancelled visits', async () => {
+  it('lists the customer completed group, including cancelled visits but not no-shows', async () => {
     await listAppointments({ statusGroup: 'completed' }, 'customer-1', [Role.CUSTOMER]);
 
-    const filter = mocks.appointmentFind.mock.calls[0]![0];
-    expect(filter.customerId).toBe('customer-1');
-    expect(JSON.stringify(filter)).toContain('"$in":["completed","ready_for_ocular","cancelled","no_show"]');
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({
+      customerId: 'customer-1',
+      $and: [{
+        $or: [
+          { status: { $in: ['ready_for_ocular', 'cancelled'] } },
+          { status: 'completed', attendanceStatus: { $ne: 'no_show' } },
+        ],
+      }],
+    });
+  });
+
+  it('lists the customer no-show group newest first', async () => {
+    await listAppointments({ statusGroup: 'no_show' }, 'customer-1', [Role.CUSTOMER]);
+
+    expect(mocks.appointmentFind.mock.calls[0]![0]).toEqual({
+      customerId: 'customer-1',
+      $and: [{
+        $or: [
+          { status: 'no_show' },
+          { status: 'completed', attendanceStatus: 'no_show' },
+        ],
+      }],
+    });
+    const chain = mocks.appointmentFind.mock.results[0]!.value;
+    expect(chain.sort).toHaveBeenCalledWith({ date: -1, slotCode: -1, createdAt: -1 });
   });
 
   it('ignores an unknown status group', async () => {

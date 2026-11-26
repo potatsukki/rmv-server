@@ -16,6 +16,7 @@ import { getPaymentActivationConfig } from '../config/config.service.js';
 import { formatCurrency } from '../../utils/helpers.js';
 import { logger } from '../../utils/logger.js';
 import { assertFabricatorProjectAccess, isAssignedFabricationMember, usesFabricationProjectScope } from '../projects/projects.list-policy.js';
+import { hasRequiredInitialFabricationPayment, reconcileFabricationStart } from '../projects/fabrication-start.js';
 import type { CreateFabricationUpdateInput, UpdateFabricationUpdateInput } from './fabrication.validation.js';
 
 // ── Per-stage payment gating helpers ──
@@ -93,7 +94,7 @@ export async function createFabricationUpdate(
   ip?: string,
   ua?: string,
 ) {
-  const project = await Project.findById(input.projectId);
+  let project = await Project.findById(input.projectId);
   if (!project) throw AppError.notFound('Project not found');
 
   // Admins can post updates to any project. Engineers and the fabrication or delivery team must be assigned.
@@ -108,6 +109,12 @@ export async function createFabricationUpdate(
   if (input.projectItemId) {
     projectItem = await ProjectItem.findOne({ _id: input.projectItemId, projectId: project._id });
     if (!projectItem) throw AppError.notFound('Project item not found');
+  }
+
+  if (project.status === ProjectStatus.PAYMENT_PENDING && project.fabricationLeadId) {
+    // A normal update can resume a paid project stranded before the phase transition.
+    const { project: refreshed } = await reconcileFabricationStart(input.projectId);
+    project = refreshed ?? project;
   }
 
   const itemReadyForFabrication = Boolean(
@@ -650,13 +657,16 @@ export async function getLatestFabricationStatus(
 
   // Check payment gate — per-stage info
   const plan = await findScopedPaymentPlan(projectId, projectItemId);
-  const crewProject = await Project.findById(projectId).select('deliveryCrewIds deliverySchedule');
+  const crewProject = await Project.findById(projectId).select('deliveryCrewIds deliverySchedule status fabricationLeadId');
   const hasCrew = Boolean(crewProject?.deliveryCrewIds?.length);
   const hasDeliveryDate = Boolean(crewProject?.deliverySchedule?.date);
   const totalStages = plan ? plan.stages.length : 0;
   const paidCount = plan ? plan.stages.filter(s => s.status === PaymentStageStatus.VERIFIED).length : 0;
   const allPaid = totalStages > 0 && paidCount === totalStages;
   const unpaidCount = totalStages - paidCount;
+  const readyToStart = crewProject?.status === ProjectStatus.PAYMENT_PENDING
+    && Boolean(crewProject.fabricationLeadId)
+    && await hasRequiredInitialFabricationPayment(projectId);
 
   // Build per-transition gate requirements
   const currentStatus = normalizeFabricationStatus(latest?.status || FabricationStatus.QUEUED, deliveryType);
@@ -692,6 +702,7 @@ export async function getLatestFabricationStatus(
       crewRequired: deliveryType === DeliveryType.ON_SITE_INSTALLATION,
     },
     paymentGate: {
+      readyToStart,
       allPaid,
       unpaidCount,
       paidCount,

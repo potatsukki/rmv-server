@@ -13,7 +13,7 @@ import mongoose from 'mongoose';
 import { connectDB } from '../config/database.js';
 import { Appointment, BlockedSlot, Project, SalesAvailability, User } from '../models/index.js';
 import { AppointmentType, Role } from '../utils/constants.js';
-import { SALES_SLOT_FREEING_STATUSES } from '../modules/users/availability-session.service.js';
+import { formatOcularBusyWindow, holdsStaffTime } from '../modules/scheduling/travel-time.js';
 import { getAvailableSlots } from '../modules/appointments/appointments.service.js';
 
 type NameLike = { firstName?: string; lastName?: string } | null | undefined;
@@ -43,7 +43,7 @@ async function diagnoseSalesDay(date: string): Promise<void> {
   console.log(`\n== BLOCKED SLOTS ==\n${blocked.map((slot) => `- ${slot.slotCode} (${slot.type})`).join('\n') || '- none'}`);
 
   const appointments = await Appointment.find({ date })
-    .select('appointmentNumber type slotCode status salesStaffId customerId ocularFeeStatus')
+    .select('appointmentNumber date type slotCode status salesStaffId customerId ocularFeeStatus travelDurationMinutes distanceKm')
     .sort({ slotCode: 1 })
     .lean();
   const projects = await Project.find({ ocularAppointmentId: { $in: appointments.map((appointment) => appointment._id) } })
@@ -60,7 +60,8 @@ async function diagnoseSalesDay(date: string): Promise<void> {
   for (const appointment of appointments) {
     const project = projectByAppointmentId.get(appointment._id.toString());
     const staffMember = appointment.salesStaffId ? staffById.get(appointment.salesStaffId.toString()) : undefined;
-    const holdsSlot = !SALES_SLOT_FREEING_STATUSES.includes(appointment.status);
+    const holdsSlot = holdsStaffTime(appointment);
+    const away = formatOcularBusyWindow(appointment);
     const hiddenBecause: string[] = [];
     if (project) hiddenBecause.push(`project ocular ${project.projectNumber ?? project._id}`);
     if (appointment.type === AppointmentType.OCULAR && appointment.ocularFeeStatus === 'pending') {
@@ -73,8 +74,11 @@ async function diagnoseSalesDay(date: string): Promise<void> {
       appointment.status,
       `staff: ${appointment.salesStaffId ? (staffMember ? fullName(staffMember) : appointment.salesStaffId.toString()) : 'UNASSIGNED (uses one staff from the pool)'}`,
       `customer: ${fullName(customerById.get(appointment.customerId.toString()))}`,
-      // An ocular visit takes its sales staff member's whole day; a consultation only its slot.
-      !holdsSlot ? 'frees its time' : appointment.type === AppointmentType.OCULAR ? 'HOLDS THE WHOLE DAY' : 'HOLDS ITS SLOT',
+      // A consultation holds its slot; an ocular visit holds prep + travel + site time (no site pin: the
+      // whole day). A completed appointment holds its time until that time has passed.
+      !holdsSlot
+        ? 'frees its time'
+        : appointment.type !== AppointmentType.OCULAR ? 'HOLDS ITS SLOT' : away ? `HOLDS ${away} (prep + travel + site)` : 'HOLDS THE WHOLE DAY (no site pin)',
       hiddenBecause.length ? `HIDDEN on Appointments page: ${hiddenBecause.join('; ')}` : 'visible on Appointments page',
       `id: ${appointment._id}`,
     ].join(' | '));

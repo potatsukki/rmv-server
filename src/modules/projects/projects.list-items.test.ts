@@ -143,7 +143,7 @@ describe('listProjects project-item fallback', () => {
     expect(mocks.appointmentFind).toHaveBeenCalledWith({ _id: { $in: ['ocular-1', 'ocular-2'] } });
   });
 
-  it('lets a customer see their project that is still waiting on its ocular visit', async () => {
+  it('lists every project of the customer, with or without a signed contract (user decision 2026-11-26)', async () => {
     mocks.projectFind.mockReturnValue(queryChain([]));
     mocks.projectCountDocuments.mockResolvedValue(0);
     mocks.projectItemFind.mockReturnValue(queryChain([]));
@@ -152,12 +152,7 @@ describe('listProjects project-item fallback', () => {
 
     await listProjects({ status: 'draft' }, 'customer-1', [Role.CUSTOMER]);
 
-    expect(mocks.projectFind).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'customer-1',
-      status: 'draft',
-      $and: [{ $or: expect.arrayContaining([
-        { status: ProjectStatus.DRAFT, ocularAppointmentId: { $exists: true, $ne: null } },
-      ]) }],
-    }));
+    // Only "their own": no contract or ocular condition.
+    expect(mocks.projectFind).toHaveBeenCalledWith({ customerId: 'customer-1', status: 'draft' });
   });
 });

@@ -266,8 +266,9 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
    * appointment is normally always in the past and can never clash with a new booking. While
    * APPOINTMENT_DAY_CHECK_BYPASSED is on, staff can mark a visit Completed days early. Its record
    * still says "Nov 18, 9:00 AM", so that hour stays taken for the CUSTOMER: nothing else of theirs
-   * can be put on it (only Cancelled / No-show give it back). The staff rule is unchanged: a
-   * completed appointment still frees the STAFF member's time.
+   * can be put on it (only Cancelled / No-show give it back). Since the Travel Time fix (user decision
+   * 2026-11-26) the STAFF rule matches: a completed appointment holds the staff member's time until
+   * that time has passed (holdsStaffTime), so finishing early never reopens it.
    */
   describe('a future appointment marked Completed before its date', () => {
     it('ocular visit completed early (the live order): the customer cannot book a consultation on its time', async () => {
@@ -293,14 +294,15 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
       )).rejects.toMatchObject({ ...CONFLICT, message: expect.stringContaining('This customer already has an ocular visit on Nov 18, 2026, 9:00 AM to 10:00 AM') });
       expect(await heldOn('09:00')).toBe(1);
 
-      // Staff rule unchanged: Bugoy's completed ocular no longer holds HIS day, so another
-      // customer's 9:00 consultation that day can still be assigned to him.
+      // Staff rule: Bugoy's ocular was completed early (it is Nov 15), so its time is still ahead and
+      // still holds HIS day too: another customer's 9:00 consultation that day can't be assigned to him.
       const other = await Appointment.create({
         customerId: otherCustomerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00',
         status: AppointmentStatus.REQUESTED, bookedBy: otherCustomerId,
       });
-      await appointments.confirmAppointment(String(other._id), { salesStaffId: bugoyId } as never, agentId);
-      expect(String((await Appointment.findById(other._id).lean())!.salesStaffId)).toBe(bugoyId);
+      await expect(appointments.confirmAppointment(String(other._id), { salesStaffId: bugoyId } as never, agentId))
+        .rejects.toThrow('Already has an appointment at this time');
+      expect((await Appointment.findById(other._id).lean())!.salesStaffId).toBeFalsy();
     });
 
     it('consultation completed early: another project\'s ocular visit cannot be scheduled on its time', async () => {

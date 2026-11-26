@@ -65,6 +65,7 @@ import {
 } from './project-stage.js';
 import { getProjectPaymentDue, NO_PAYMENT_DUE, type ProjectPaymentDue } from '../payments/payment-due.js';
 import { applyTargetFinishDate } from './target-finish.js';
+import { enterPaymentPending, handleInitialFabricationPaymentVerified, reconcileFabricationStart } from './fabrication-start.js';
 import {
   ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree,
   deliveryDateUnlockStage, isDeliveryDateUnlocked, manilaToday, readableDay,
@@ -1895,28 +1896,6 @@ function itemScopedQuery(projectId: string, projectItemId?: string) {
     : { projectId, projectItemId: { $exists: false } };
 }
 
-async function hasRequiredInitialFabricationPayment(projectId: string) {
-  const items = await ProjectItem.find({ projectId }).select('_id');
-
-  if (!items.length) {
-    const plan = await PaymentPlan.findOne(itemScopedQuery(projectId));
-    return Boolean(plan?.stages[0]?.status === PaymentStageStatus.VERIFIED);
-  }
-
-  // A combined project-level plan covers every item at once.
-  const combinedPlan = await PaymentPlan.findOne(itemScopedQuery(projectId));
-  if (combinedPlan) return combinedPlan.stages[0]?.status === PaymentStageStatus.VERIFIED;
-
-  const plans = await PaymentPlan.find({
-    projectId,
-    projectItemId: { $in: items.map((item) => item._id) },
-  });
-
-  if (plans.length < items.length) return false;
-
-  return plans.every((plan) => plan.stages[0]?.status === PaymentStageStatus.VERIFIED);
-}
-
 type BuiltPaymentStages = Awaited<ReturnType<typeof buildPaymentStages>>;
 
 async function getActiveProjectItems(projectId: string) {
@@ -2183,19 +2162,18 @@ export async function selectPaymentPlan(
     })));
   const plans = await PaymentPlan.insertMany(planDocs);
 
-  if (project.status === ProjectStatus.APPROVED) {
-    projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
-    project.status = ProjectStatus.PAYMENT_PENDING;
-  }
-  await project.save();
   const itemIds = paymentTargets
     .map((target) => target.projectItemId)
     .filter((projectItemId): projectItemId is string => Boolean(projectItemId));
   if (itemIds.length) {
-    await ProjectItem.updateMany({ _id: { $in: itemIds } }, { $set: { status: ProjectStatus.PAYMENT_PENDING } });
+    await ProjectItem.updateMany(
+      { _id: { $in: itemIds }, status: ProjectStatus.APPROVED },
+      { $set: { status: ProjectStatus.PAYMENT_PENDING } },
+    );
   }
 
-  if ([ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED].includes(project.status)) {
+  if (project.status === ProjectStatus.APPROVED) await enterPaymentPending(project);
+  if (project.status === ProjectStatus.BLUEPRINT) {
     const activeItems = await getActiveProjectItems(projectId);
     const paymentReadyStatuses = new Set([
       ProjectStatus.PAYMENT_PENDING,
@@ -2205,11 +2183,14 @@ export async function selectPaymentPlan(
     const allItemsPaymentReady = activeItems.length > 0
       && activeItems.every((item) => paymentReadyStatuses.has(item.status));
 
-    if (allItemsPaymentReady && project.status !== ProjectStatus.PAYMENT_PENDING) {
-      projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
-      project.status = ProjectStatus.PAYMENT_PENDING;
-      await project.save();
-    }
+    if (allItemsPaymentReady) await enterPaymentPending(project);
+  }
+
+  const firstPlan = plans[0];
+  const refreshed = firstPlan && await handleInitialFabricationPaymentVerified(project._id, firstPlan);
+  if (refreshed) {
+    project.status = refreshed.status;
+    project.estimatedCompletionDate = refreshed.estimatedCompletionDate;
   }
 
   await AuditLog.create({
@@ -2232,7 +2213,9 @@ export async function selectPaymentPlan(
     actorId,
     NotificationCategory.PAYMENT,
     'Payment Plan Created',
-    `Your ${input.paymentType === 'full' ? 'full payment' : 'installment'} plan for "${project.title}" is ready. You can now continue to payments.`,
+    firstPlan?.stages.every((stage) => stage.status === PaymentStageStatus.VERIFIED)
+      ? `Your payment plan for "${project.title}" is settled. There is no project payment due.`
+      : `Your ${input.paymentType === 'full' ? 'full payment' : 'installment'} plan for "${project.title}" is ready. You can now continue to payments.`,
     buildProjectItemLink(project._id.toString(), 'payments', paymentTargets[0]?.projectItemId),
   );
 
@@ -2275,8 +2258,6 @@ async function assignFabricationStaffLocked(
     throw AppError.badRequest('Fabrication team can only be assigned after the quotation is sent to the customer');
   }
 
-  const initialPaymentVerified = await hasRequiredInitialFabricationPayment(projectId);
-
   // Verify lead is fabrication staff
   const lead = await User.findOne({
     _id: input.fabricationLeadId,
@@ -2312,28 +2293,15 @@ async function assignFabricationStaffLocked(
   project.fabricationLeadId = input.fabricationLeadId as unknown as Types.ObjectId;
   project.fabricationAssistantIds = input.fabricationAssistantIds as unknown as Types.ObjectId[];
 
-  if ([ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED].includes(project.status)) {
-    projectStateMachine.assertTransition(project.status, ProjectStatus.PAYMENT_PENDING);
-    project.status = ProjectStatus.PAYMENT_PENDING;
-  }
-
-  if (project.status === ProjectStatus.PAYMENT_PENDING) {
-    if (initialPaymentVerified) {
-      projectStateMachine.assertTransition(project.status, ProjectStatus.FABRICATION);
-      project.status = ProjectStatus.FABRICATION;
-      await applyTargetFinishDate(project);
-    }
-  }
-
   await project.save();
+  if ([ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED].includes(project.status)) await enterPaymentPending(project);
 
-  const fabricationUpdatesUnlocked = project.status === ProjectStatus.FABRICATION;
-  if (fabricationUpdatesUnlocked) {
-    await ProjectItem.updateMany(
-      { projectId: project._id, status: ProjectStatus.PAYMENT_PENDING },
-      { $set: { status: ProjectStatus.FABRICATION } },
-    );
+  const { project: refreshed } = await reconcileFabricationStart(projectId);
+  if (refreshed) {
+    project.status = refreshed.status;
+    project.estimatedCompletionDate = refreshed.estimatedCompletionDate;
   }
+  const fabricationUpdatesUnlocked = project.status === ProjectStatus.FABRICATION;
 
   try {
     await seedFabricationItems(project._id.toString());
@@ -2810,7 +2778,7 @@ export async function getProjectById(
     }
   }
 
-  // Customers can only see their own
+  // Customers can only see their own, with or without a signed contract (user decision 2026-11-26).
   if (
     actorRoles.includes(Role.CUSTOMER) &&
     !usesFabricationProjectScope(actorRoles) &&
@@ -2818,9 +2786,6 @@ export async function getProjectById(
   ) {
     if (project.customerId._id?.toString() !== actorId) {
       throw AppError.forbidden('Access denied');
-    }
-    if (project.status === ProjectStatus.DRAFT && project.contractStatus !== ContractStatus.UPLOADED && !project.ocularAppointmentId) {
-      throw AppError.notFound('Project not found');
     }
   }
 

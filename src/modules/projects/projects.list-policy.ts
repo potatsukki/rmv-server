@@ -1,25 +1,13 @@
 import { AppError } from '../../utils/appError.js';
-import { ContractStatus, ProjectStatus, Role } from '../../utils/constants.js';
+import { ProjectStatus, Role } from '../../utils/constants.js';
 
 /**
- * Projects a customer may see: the contract is uploaded, a legacy project has no contract
- * status, or a draft is waiting on its ocular visit. The project list and the customer
+ * Projects a customer may see: every project of theirs, with or without a signed contract
+ * (user decision 2026-11-26; it used to wait for the contract). The project list and the customer
  * dashboard counts both use this, so the numbers match what the customer can open.
  */
-export function customerVisibleProjectsFilter(customerId: string) {
-  return {
-    customerId,
-    $and: [
-      {
-        $or: [
-          { contractStatus: ContractStatus.UPLOADED },
-          { contractStatus: { $exists: false }, status: { $ne: ProjectStatus.DRAFT } },
-          // A project waiting on its ocular visit has no contract yet, but the customer can see it.
-          { status: ProjectStatus.DRAFT, ocularAppointmentId: { $exists: true, $ne: null } },
-        ],
-      },
-    ] as Record<string, unknown>[],
-  };
+export function customerVisibleProjectsFilter(customerId: string): Record<string, unknown> {
+  return { customerId };
 }
 
 export function usesFabricationProjectScope(roles: readonly string[]) {
