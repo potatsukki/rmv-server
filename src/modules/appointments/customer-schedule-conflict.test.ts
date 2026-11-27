@@ -3,11 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   appointmentFind: vi.fn(),
   projectFindOne: vi.fn(),
+  projectFind: vi.fn(),
 }));
 
 vi.mock('../../models/index.js', () => ({
   Appointment: { find: mocks.appointmentFind },
-  Project: { findOne: mocks.projectFindOne },
+  Project: { findOne: mocks.projectFindOne, find: mocks.projectFind },
   AvailabilitySession: {},
   SalesAvailability: {},
 }));
@@ -21,6 +22,7 @@ type Row = { _id: string; appointmentNumber?: string; type: AppointmentType; dat
 function customerHas(rows: Row[], projectNumber?: string) {
   mocks.appointmentFind.mockReturnValue({ select: () => ({ sort: () => ({ lean: async () => rows }) }) });
   mocks.projectFindOne.mockReturnValue({ select: () => ({ lean: async () => (projectNumber ? { projectNumber } : null) }) });
+  mocks.projectFind.mockReturnValue({ select: () => ({ lean: async () => (projectNumber && rows[0] ? [{ projectNumber, ocularAppointmentId: rows[0]._id }] : []) }) });
 }
 
 const consultation: Row = {
@@ -121,7 +123,7 @@ describe('customer schedule conflict', () => {
   it('marks exact and partial overlaps once per customer/date, while leaving adjacent slots free', async () => {
     customerHas([{ ...consultation, slotCode: '09:30', status: AppointmentStatus.REQUESTED }]);
     const booked = await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00', '11:00']);
-    expect([...booked]).toEqual(['09:00', '10:00']);
+    expect([...booked.keys()]).toEqual(['09:00', '10:00']);
     expect(mocks.appointmentFind).toHaveBeenCalledExactlyOnceWith({
       customerId: 'customer-1', date: '2026-11-18',
       ...freedTimeFilter,
@@ -131,8 +133,20 @@ describe('customer schedule conflict', () => {
 
   it('keeps completed reservations blocked and frees the next non-overlapping hour', async () => {
     customerHas([ocular]);
-    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00']))]).toEqual(['09:00']);
+    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00'])).keys()]).toEqual(['09:00']);
     customerHas([]);
-    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-19', ['09:00', '10:00']))]).toEqual([]);
+    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-19', ['09:00', '10:00'])).keys()]).toEqual([]);
+  });
+
+  // User request 2026-11-27: the customer can click their own "Already booked" slot and see it.
+  it("names the customer's own appointment (and its project) behind each booked slot", async () => {
+    customerHas([{ ...ocular, status: AppointmentStatus.CONFIRMED }], 'PRJ-2026-00101');
+    const booked = await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00']);
+    expect(booked.get('09:00')).toEqual({
+      appointmentId: 'ocular-1', appointmentNumber: 'APT-20261118-0002', type: AppointmentType.OCULAR,
+      date: '2026-11-18', slotCode: '09:00', status: AppointmentStatus.CONFIRMED, attendanceStatus: undefined,
+      salesStaffAssigned: false, projectNumber: 'PRJ-2026-00101',
+    });
+    expect(booked.has('10:00')).toBe(false);
   });
 });

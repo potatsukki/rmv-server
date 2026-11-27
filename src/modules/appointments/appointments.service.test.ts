@@ -27,7 +27,7 @@ const {
   // The customer overlap rule has its own tests (customer-schedule-conflict*.test.ts); here it
   // passes unless a test makes it reject.
   mockAssertCustomerScheduleFree: vi.fn(),
-  mockGetCustomerBookedSlots: vi.fn().mockResolvedValue(new Set<string>()),
+  mockGetCustomerBookedSlots: vi.fn().mockResolvedValue(new Map()),
   mockAppointmentFindById: vi.fn(),
   mockAppointmentFindOne: vi.fn(),
   mockAppointmentFind: vi.fn(),
@@ -671,11 +671,12 @@ describe('sales staff availability per time slot', () => {
     twoAvailableStaff();
     vi.setSystemTime(new Date('2026-11-26T20:00:00+08:00'));
     mockAppointmentFind.mockImplementation(() => selectLeanResult([]));
-    mockGetCustomerBookedSlots.mockResolvedValueOnce(new Set(['09:00']));
+    const booking = { appointmentId: 'appt-1', appointmentNumber: 'APT-20261127-0001', type: 'office', date: '2026-11-27', slotCode: '09:00', status: 'confirmed', salesStaffAssigned: true };
+    mockGetCustomerBookedSlots.mockResolvedValueOnce(new Map([['09:00', booking]]));
 
     const result = await getAvailableSlots({ date: '2026-11-27', type: AppointmentType.OFFICE, flow: 'customer_booking' }, 'customer-1');
     expect(mockGetCustomerBookedSlots).toHaveBeenCalledExactlyOnceWith('customer-1', '2026-11-27', expect.arrayContaining(['09:00', '10:00']));
-    expect(slotByCode(result.slots, '09:00')).toMatchObject({ customerBooked: true, available: false, remaining: 0 });
+    expect(slotByCode(result.slots, '09:00')).toMatchObject({ customerBooked: true, available: false, remaining: 0, customerBooking: booking });
     expect(slotByCode(result.slots, '10:00')).toMatchObject({ available: true, remaining: 2 });
   });
 

@@ -4,9 +4,23 @@ import {
   activeProjectStatusesForRoles,
   canViewProjectTotalCost,
   customerVisibleProjectsFilter,
+  engineerVisibleProjectsFilter,
   maskProjectTotalCostForActor,
 } from './projects.list-policy.js';
 import { ProjectStatus, Role } from '../../utils/constants.js';
+
+describe('engineerVisibleProjectsFilter', () => {
+  // User decision 2026-11-27: a For Review project without a signed contract can't be picked up,
+  // so it is not in the engineer's open pool (PRJ-2026-00094 showed up but had no Work on this Project).
+  it('lists own projects plus unassigned For Review projects that have a signed contract', () => {
+    expect(engineerVisibleProjectsFilter('engineer-1')).toEqual({
+      $or: [
+        { engineerIds: 'engineer-1' },
+        { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 }, contractStatus: 'uploaded' },
+      ],
+    });
+  });
+});
 
 describe('customerVisibleProjectsFilter', () => {
   it('lets a customer see all of their own projects, signed contract or not (user decision 2026-11-26)', () => {

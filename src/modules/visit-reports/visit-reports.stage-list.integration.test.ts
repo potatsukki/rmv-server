@@ -1,6 +1,7 @@
 /**
- * Visit report lists split by stage, against a REAL, throwaway MongoDB database:
- * Appointments → Visit Reports (stage=appointment) vs Projects → Visit Reports (stage=project).
+ * Visit report lists split by visit type (user decision 2026-11-27), against a REAL, throwaway
+ * MongoDB database: Appointments → Visit Reports (stage=appointment) = consultation reports,
+ * Projects → Visit Reports (stage=project) = ocular reports.
  *
  * Skipped unless RMV_MONGO_TEST_URI points at a local database, e.g.
  *   RMV_MONGO_TEST_URI=mongodb://127.0.0.1:27017/rmv_repro_stage npx vitest run visit-reports.stage-list
@@ -54,11 +55,11 @@ describe.runIf(Boolean(MONGO_URI))('visit report lists by stage on a real databa
       status: 'submitted', visitType: 'ocular', serviceType: 'railings', updatedAt: new Date(), ...extra,
     });
     await VisitReport.collection.insertMany([
-      report(ids.noProject, { status: 'draft' }),
-      report(ids.draftProject, { linkedProjectId: forOcular }),
-      report(ids.createdProject, { linkedProjectId: submitted, status: 'returned' }),
-      report(ids.legacyCreated, {}),
-      report(ids.cancelledDraft, { status: 'draft', appointmentId: cancelledAppointment }),
+      report(ids.noProject, { status: 'draft', visitType: 'consultation' }),
+      report(ids.draftProject, { linkedProjectId: forOcular, visitType: 'consultation' }),
+      report(ids.createdProject, { linkedProjectId: submitted, status: 'returned', visitType: 'ocular' }),
+      report(ids.legacyCreated, { visitType: 'ocular' }),
+      report(ids.cancelledDraft, { status: 'draft', visitType: 'consultation', appointmentId: cancelledAppointment }),
     ]);
   }, 60_000);
 
@@ -75,14 +76,14 @@ describe.runIf(Boolean(MONGO_URI))('visit report lists by stage on a real databa
   it.each([
     ['admin', () => visitReports.listAll({ stage: 'appointment' })],
     ['sales staff', () => visitReports.listForSalesStaff(String(salesId), { stage: 'appointment' })],
-  ])('%s: appointment stage keeps reports with no project or a draft (For Ocular) project', async (_role, list) => {
+  ])('%s: Appointments lists consultation reports only', async (_role, list) => {
     expect(listed(await list())).toEqual(expected('noProject', 'draftProject'));
   });
 
   it.each([
     ['admin', () => visitReports.listAll({ stage: 'project' })],
     ['sales staff', () => visitReports.listForSalesStaff(String(salesId), { stage: 'project' })],
-  ])('%s: project stage lists reports of created projects, linked or legacy', async (_role, list) => {
+  ])('%s: Projects lists ocular reports only', async (_role, list) => {
     expect(listed(await list())).toEqual(expected('createdProject', 'legacyCreated'));
   });
 

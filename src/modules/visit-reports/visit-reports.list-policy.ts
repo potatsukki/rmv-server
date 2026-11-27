@@ -12,8 +12,9 @@ export function visitReportStatusCondition(status?: string) {
 }
 
 /**
- * Where a visit report is listed: Appointments → Visit Reports ("appointment") until its project
- * goes through Create Project, then Projects → Visit Reports ("project").
+ * Where a visit report is listed (user decision 2026-11-27): Appointments → Visit Reports
+ * ("appointment") shows consultation reports, Projects → Visit Reports ("project") shows ocular
+ * reports. A consultation report that moves on to its ocular visit becomes visitType ocular.
  */
 export type VisitReportStage = 'appointment' | 'project';
 
@@ -21,18 +22,6 @@ export function normalizeVisitReportStage(value?: unknown): VisitReportStage | u
   return value === 'appointment' || value === 'project' ? value : undefined;
 }
 
-/**
- * Filter for one stage. `createdProjectIds` are projects past Create Project (status is not draft);
- * `createdProjectReportIds` are their legacy `visitReportId`s, for reports saved before linkedProjectId.
- */
-export function visitReportStageCondition(
-  stage: VisitReportStage,
-  createdProjectIds: unknown[],
-  createdProjectReportIds: unknown[],
-) {
-  const inCreatedProject = [
-    { linkedProjectId: { $in: createdProjectIds } },
-    { _id: { $in: createdProjectReportIds } },
-  ];
-  return stage === 'project' ? { $or: inCreatedProject } : { $nor: inCreatedProject };
+export function visitReportStageCondition(stage: VisitReportStage) {
+  return { visitType: stage === 'project' ? 'ocular' : 'consultation' };
 }

@@ -1,5 +1,20 @@
 import { AppError } from '../../utils/appError.js';
-import { ProjectStatus, Role } from '../../utils/constants.js';
+import { ContractStatus, ProjectStatus, Role } from '../../utils/constants.js';
+
+/**
+ * Projects an engineer (without Admin/Sales Staff roles) sees: their own, plus the open pool of
+ * For Review projects with no engineer yet. The pool only lists projects with a signed contract,
+ * because an engineer can only pick one up after the contract is uploaded (user decision
+ * 2026-11-27: a no-contract project used to show up but could not be picked up).
+ */
+export function engineerVisibleProjectsFilter(engineerId: string): Record<string, unknown> {
+  return {
+    $or: [
+      { engineerIds: engineerId },
+      { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 }, contractStatus: ContractStatus.UPLOADED },
+    ],
+  };
+}
 
 /**
  * Projects a customer may see: every project of theirs, with or without a signed contract

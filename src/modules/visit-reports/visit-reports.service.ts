@@ -1552,18 +1552,11 @@ interface VisitReportListQuery {
   limit?: string;
 }
 
-/** Narrows a list filter to one stage; a project counts once it is past Create Project (not draft). */
+/** Narrows a list filter to one list: consultation reports (Appointments) or ocular reports (Projects). */
 async function withStageFilter(filter: Record<string, unknown>, stageValue?: string) {
   const stage = normalizeVisitReportStage(stageValue);
   if (!stage) return filter;
-  const createdProjects = await Project.find({ status: { $ne: ProjectStatus.DRAFT } })
-    .select('_id visitReportId').lean();
-  const condition = visitReportStageCondition(
-    stage,
-    createdProjects.map((project) => project._id),
-    createdProjects.map((project) => project.visitReportId).filter(Boolean),
-  );
-  return { $and: [filter, condition] };
+  return { $and: [filter, visitReportStageCondition(stage)] };
 }
 
 export async function listForSalesStaff(salesStaffId: string, query: VisitReportListQuery) {
