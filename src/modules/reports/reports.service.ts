@@ -726,6 +726,21 @@ function manilaToday() {
 }
 
 /**
+ * Today's Schedule: appointments on this Manila date that are still to happen or under way (the
+ * Requested and Appointed groups, in-progress visits included). Finished ones (completed, Customer
+ * Declined, No Show, cancelled) are not counted (user decision 2026-11-27). A Sales Staff card
+ * counts only their own appointments ("assigned to you"); Agent and Admin see the whole operation.
+ */
+export function todayScheduleFilter(today: string, userId?: string, userRoles: readonly string[] = []) {
+  const isSalesOnly = userRoles.includes(Role.SALES_STAFF) && !userRoles.includes(Role.ADMIN);
+  return {
+    date: today,
+    ...(isSalesOnly && userId ? { salesStaffId: userId } : {}),
+    $or: [buildAppointmentStatusGroupFilter('requested')!, buildAppointmentStatusGroupFilter('confirmed')!],
+  };
+}
+
+/**
  * Customer dashboard numbers, counted with the same rules as the lists each card opens:
  * - projects: the customer visibility rule and the Projects page listing stages
  * - Pending Visits: the Requested + Assigned appointment status groups
@@ -831,7 +846,6 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       return userId ? await getFabricatorDashboardSummary(userId, startOfToday) : { ...EMPTY_DASHBOARD_SUMMARY };
     }
 
-    const todayStr = now.toISOString().split('T')[0];
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     // Determine if the caller is a pure customer (no staff/admin roles)
@@ -895,8 +909,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
       }).exec(),
       Appointment.countDocuments({
         ...appointmentBaseFilter,
-        date: todayStr,
-        status: { $in: [AppointmentStatus.CONFIRMED, AppointmentStatus.ASSIGNED, AppointmentStatus.REQUESTED] },
+        ...todayScheduleFilter(manilaToday(), userId, userRoles),
       }).exec(),
       customerCounts ? Promise.resolve(customerCounts.fabricationInProgress) : Project.countDocuments({
         deletedAt: null,

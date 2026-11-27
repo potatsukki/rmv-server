@@ -1614,10 +1614,41 @@ async function buildSalesStaffReportFilter(salesStaffId: string, status?: string
   return filter;
 }
 
+/**
+ * Appointments that ended without a report: cancelled, No Show (an ocular as status no_show, an
+ * office consultation as attendance no_show), Customer Declined or Rescheduled. submitReport refuses
+ * these ("Save notes only"), so their drafts are never pending work.
+ */
+export function closedWithoutReportFilter(): Record<string, unknown> {
+  return {
+    $or: [
+      { status: { $in: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] } },
+      {
+        attendanceStatus: {
+          $in: [
+            AppointmentAttendanceStatus.NO_SHOW,
+            AppointmentAttendanceStatus.CUSTOMER_DECLINED,
+            AppointmentAttendanceStatus.RESCHEDULED,
+          ],
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * The Sales Staff dashboard's Pending Reports: visits with a draft or returned report that can still
+ * be completed. Drafts of appointments that ended without a report are left out (user decision
+ * 2026-11-27: finished appointments are not counted on the dashboard).
+ */
 export async function countPendingReportGroupsForSalesStaff(salesStaffId: string) {
   const filter = await buildSalesStaffReportFilter(salesStaffId, 'pending');
   const appointmentIds = await VisitReport.distinct('appointmentId', filter).exec();
-  return appointmentIds.length;
+  if (!appointmentIds.length) return 0;
+  return Appointment.countDocuments({
+    _id: { $in: appointmentIds },
+    $nor: [closedWithoutReportFilter()],
+  }).exec();
 }
 
 async function repairPromotableOcularReportsForSalesStaff(salesStaffId: string) {
