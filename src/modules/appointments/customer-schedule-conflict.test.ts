@@ -13,7 +13,7 @@ vi.mock('../../models/index.js', () => ({
   SalesAvailability: {},
 }));
 
-import { AppointmentAttendanceStatus, AppointmentStatus, AppointmentType } from '../../utils/constants.js';
+import { AppointmentStatus, AppointmentType } from '../../utils/constants.js';
 import { assertCustomerScheduleFree, findCustomerScheduleConflict, getCustomerBookedSlots } from './customer-schedule-conflict.js';
 
 type Row = { _id: string; appointmentNumber?: string; type: AppointmentType; date: string; slotCode: string; status: AppointmentStatus };
@@ -88,14 +88,14 @@ describe('customer schedule conflict', () => {
     await expect(findCustomerScheduleConflict('customer-1', '2026-11-18', '10:00')).resolves.toBeNull();
   });
 
-  // Both No Show forms give the time back: an ocular visit closes as status no_show, an office
-  // consultation as completed + attendanceStatus no_show (user decision 2026-11-27).
+  // A finished appointment gives the time back (user decision 2026-11-27, "kung declined or completed
+  // dapat balik na to sa vacant"): cancelled, no-show, completed (incl. Customer Declined and an
+  // office No Show, both stored as completed) and a consultation finished as Ready for Ocular.
   const freedTimeFilter = {
-    status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
-    $nor: [{ status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW }],
+    status: { $nin: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW, AppointmentStatus.COMPLETED, AppointmentStatus.READY_FOR_OCULAR] },
   };
 
-  it('only looks at this customer on this date; cancelled and no-show appointments (both forms) never block', async () => {
+  it('only looks at this customer on this date; cancelled, no-show and finished appointments never block', async () => {
     customerHas([]);
 
     await expect(assertCustomerScheduleFree({
@@ -131,11 +131,16 @@ describe('customer schedule conflict', () => {
     expect(mocks.projectFindOne).not.toHaveBeenCalled();
   });
 
-  it('keeps completed reservations blocked and frees the next non-overlapping hour', async () => {
-    customerHas([ocular]);
-    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00'])).keys()]).toEqual(['09:00']);
+  it('leaves finished appointments out of the query, so their hours are vacant again', async () => {
     customerHas([]);
-    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-19', ['09:00', '10:00'])).keys()]).toEqual([]);
+    expect([...(await getCustomerBookedSlots('customer-1', '2026-11-18', ['09:00', '10:00'])).keys()]).toEqual([]);
+    const filter = mocks.appointmentFind.mock.calls[0]![0] as { status: { $nin: string[] } };
+    for (const finished of [AppointmentStatus.COMPLETED, AppointmentStatus.READY_FOR_OCULAR]) {
+      expect(filter.status.$nin).toContain(finished);
+    }
+    for (const upcoming of [AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED, AppointmentStatus.IN_PROGRESS]) {
+      expect(filter.status.$nin).not.toContain(upcoming);
+    }
   });
 
   // User request 2026-11-27: the customer can click their own "Already booked" slot and see it.

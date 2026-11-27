@@ -706,16 +706,22 @@ describe('sales staff availability per time slot', () => {
     }));
   });
 
-  it('keeps the slot of an appointment completed early taken until its time has passed (QA double booking)', async () => {
+  // User decision 2026-11-27 ("kung declined or completed dapat balik na to sa vacant"): a consultation
+  // closed early gives its staff back; a completed ocular still holds its staff until the trip back.
+  it('frees the staff of a consultation completed early; a completed ocular keeps its staff away until back', async () => {
     twoAvailableStaff();
-    // "Now" is Sep 6; the 2 PM consultation on Sep 10 was already marked completed (day check bypassed).
+    // "Now" is Sep 6; the 2 PM consultation on Sep 10 was already closed (e.g. Customer Declined).
     mockAppointmentFind.mockImplementation(() => selectLeanResult([
       { salesStaffId: 'sales-a', date: '2026-09-10', slotCode: '14:00', type: AppointmentType.OFFICE, status: AppointmentStatus.COMPLETED },
     ]));
+    expect(slotByCode((await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE })).slots, '14:00'))
+      .toMatchObject({ available: true, remaining: 2 });
 
-    const result = await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE });
-
-    expect(slotByCode(result.slots, '14:00')).toMatchObject({ available: true, remaining: 1 });
+    mockAppointmentFind.mockImplementation(() => selectLeanResult([
+      { salesStaffId: 'sales-a', date: '2026-09-10', slotCode: '14:00', type: AppointmentType.OCULAR, status: AppointmentStatus.COMPLETED, travelDurationMinutes: 45, distanceKm: 18 },
+    ]));
+    expect(slotByCode((await getAvailableSlots({ date: '2026-09-10', type: AppointmentType.OFFICE })).slots, '14:00'))
+      .toMatchObject({ available: true, remaining: 1 });
   });
 
   it('takes a staff member with an ocular visit out of every consultation slot that day', async () => {

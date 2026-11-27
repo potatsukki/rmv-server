@@ -34,7 +34,10 @@ export const WORKDAY_END_MINUTES = 17 * 60;
 /** Asia/Manila is UTC+8 all year (no daylight saving). */
 const MANILA_OFFSET_MINUTES = 8 * 60;
 
-/** Statuses that give the staff's time back at once. A completed appointment frees it only once its time has passed (holdsStaffTime). */
+/**
+ * Statuses that give the staff's time back at once in the database queries. A finished appointment
+ * is decided by holdsStaffTime: a consultation frees it at once, an ocular visit once the trip back ends.
+ */
 export const SALES_SLOT_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
@@ -231,17 +234,22 @@ function manilaTimestamp(date: string, minutesOfDay: number): number | undefined
   return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) + (minutesOfDay - MANILA_OFFSET_MINUTES) * 60_000;
 }
 
+/** A visit that has happened: completed (incl. Customer Declined / office No Show) or a consultation finished as Ready for Ocular. */
+const FINISHED_STATUSES: AppointmentStatus[] = [AppointmentStatus.COMPLETED, AppointmentStatus.READY_FOR_OCULAR];
+
 /**
  * True when the appointment still takes its sales staff's time. Cancelled and no-show give it back
- * at once. A completed appointment keeps it until its busy time has passed (it can be completed
- * early while the day check is bypassed, and its time must not be booked again).
+ * at once. A finished consultation does too, so a consultation closed early (e.g. Customer
+ * Declined) makes its hour vacant again (user decision 2026-11-27). A finished ocular visit keeps
+ * the staff busy until the trip back ends, because they are still on the road.
  */
 export function holdsStaffTime(
   appointment: ScheduledVisit & { status?: AppointmentStatus | string | null; date?: string | null },
   now: Date = new Date(),
 ): boolean {
   if (SALES_SLOT_FREEING_STATUSES.includes(appointment.status as AppointmentStatus)) return false;
-  if (appointment.status !== AppointmentStatus.COMPLETED) return true;
+  if (!FINISHED_STATUSES.includes(appointment.status as AppointmentStatus)) return true;
+  if (appointment.type !== AppointmentType.OCULAR) return false;
   const end = staffBusyWindow(appointment)?.end ?? 24 * 60;
   const endsAt = appointment.date ? manilaTimestamp(appointment.date, end) : undefined;
   return endsAt !== undefined && endsAt > now.getTime();

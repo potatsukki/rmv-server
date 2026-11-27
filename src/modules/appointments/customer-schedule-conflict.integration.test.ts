@@ -262,41 +262,26 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
   });
 
   /**
-   * A future appointment marked Completed early (the live case). Lifecycle rule: a visit is completed
-   * on its own day (assertAppointmentDayReached), and a booking needs 3 days' notice, so a Completed
-   * appointment is normally always in the past and can never clash with a new booking. While
-   * APPOINTMENT_DAY_CHECK_BYPASSED is on, staff can mark a visit Completed days early. Its record
-   * still says "Nov 18, 9:00 AM", so that hour stays taken for the CUSTOMER: nothing else of theirs
-   * can be put on it (only Cancelled / No-show give it back). Since the Travel Time fix (user decision
-   * 2026-11-26) the STAFF rule matches: a completed appointment holds the staff member's time until
-   * that time has passed (holdsStaffTime), so finishing early never reopens it.
+   * A future appointment marked Completed early (the live case: consultations closed as Customer
+   * Declined before their 1 PM / 3 PM hour). User decision 2026-11-27, "kung declined or completed
+   * dapat balik na to sa vacant": a finished appointment gives the CUSTOMER's hour back at once.
+   * STAFF rule: a finished consultation frees its sales staff too, but a finished ocular visit keeps
+   * its staff away until the trip back ends (holdsStaffTime).
    */
   describe('a future appointment marked Completed before its date', () => {
-    it('ocular visit completed early (the live order): the customer cannot book a consultation on its time', async () => {
+    it('ocular visit completed early: the customer can book a consultation on its time; its staff stays away until back', async () => {
       // PRJ ocular Nov 18 9:00 with Bugoy, marked Completed on Nov 15.
       const projectId = await projectWaitingForOcular();
       await scheduleOcular(projectId, '09:00');
-      const ocularId = await finishOcular(projectId);
-      const ocular = await Appointment.findById(ocularId).lean();
-      const projectNumber = (await Project.findById(projectId).lean())!.projectNumber;
+      await finishOcular(projectId);
 
-      await expect(appointments.requestAppointment(
-        { type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00', serviceTypes: ['railings'] } as never, customerId, [Role.CUSTOMER],
-      )).rejects.toMatchObject({
-        ...CONFLICT,
-        message: `You already have an ocular visit on Nov 18, 2026, 9:00 AM to 10:00 AM (${ocular!.appointmentNumber} · Completed · ${projectNumber}). `
-          + 'A consultation on Nov 18, 2026 at 9:00 AM would overlap it. Please choose a different date or time.',
-        details: expect.objectContaining({
-          conflictAppointmentId: ocularId, conflictDate: DAY, conflictSlotCode: '09:00', requestedDate: DAY, requestedSlotCode: '09:00',
-        }),
-      });
-      await expect(appointments.agentCreateAppointment(
-        { customerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00' } as never, agentId,
-      )).rejects.toMatchObject({ ...CONFLICT, message: expect.stringContaining('This customer already has an ocular visit on Nov 18, 2026, 9:00 AM to 10:00 AM') });
-      expect(await heldOn('09:00')).toBe(1);
+      expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00'])).keys()]).toEqual([]);
+      const consultationId = await bookConsultation('09:00');
+      expect(await Appointment.findById(consultationId).lean()).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
+      expect(String((await Appointment.findById(consultationId).lean())!.salesStaffId)).toBe(charlieId);
 
-      // Staff rule: Bugoy's ocular was completed early (it is Nov 15), so its time is still ahead and
-      // still holds HIS day too: another customer's 9:00 consultation that day can't be assigned to him.
+      // Staff rule: Bugoy's ocular is completed but its trip is still ahead (it is Nov 15), so
+      // another customer's 9:00 consultation that day can't be assigned to him.
       const other = await Appointment.create({
         customerId: otherCustomerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00',
         status: AppointmentStatus.REQUESTED, bookedBy: otherCustomerId,
@@ -306,30 +291,30 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
       expect((await Appointment.findById(other._id).lean())!.salesStaffId).toBeFalsy();
     });
 
-    it('consultation completed early: another project\'s ocular visit cannot be scheduled on its time', async () => {
+    it("consultation completed early: another project's ocular visit can be scheduled on its time, and its staff is free", async () => {
       const projectId = await projectWaitingForOcular();
       const consultationId = await bookConsultation('09:00');
       await finishConsultation(consultationId, charlieId);
       expect((await Appointment.findById(consultationId).lean())?.status).toBe(AppointmentStatus.COMPLETED);
 
-      await expect(scheduleOcular(projectId, '09:00')).rejects.toMatchObject({
-        ...CONFLICT,
-        message: expect.stringMatching(/^This customer already has a consultation on Nov 18, 2026, 9:00 AM to 10:00 AM \(APT-20261118-\d+ · Completed\)\. An ocular visit on Nov 18, 2026 at 9:00 AM would overlap it\. Choose a different date or time\.$/),
-      });
-      expect(await heldOn('09:00')).toBe(1);
-      expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OCULAR })).toBe(0);
+      await scheduleOcular(projectId, '09:00');
+      expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OCULAR, date: DAY, slotCode: '09:00' })).toBe(1);
 
-      // The next hour is free for the customer, and Bugoy has nothing else that day.
-      await scheduleOcular(projectId, '10:00');
-      expect(await Appointment.countDocuments({ customerId, type: AppointmentType.OCULAR, date: DAY, slotCode: '10:00' })).toBe(1);
+      // Charlie's consultation is over, so another customer's 9:00 consultation can be his.
+      const other = await Appointment.create({
+        customerId: otherCustomerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00',
+        status: AppointmentStatus.REQUESTED, bookedBy: otherCustomerId,
+      });
+      await appointments.confirmAppointment(String(other._id), { salesStaffId: charlieId } as never, agentId);
+      expect(String((await Appointment.findById(other._id).lean())!.salesStaffId)).toBe(charlieId);
     });
   });
 
   it('blocks a partial overlap and accepts the next free slot the same day', async () => {
-    // An ocular visit recorded at 9:30 (runs to 10:30), already marked Completed.
+    // An upcoming ocular visit recorded at 9:30 (runs to 10:30).
     await Appointment.create({
       customerId, type: AppointmentType.OCULAR, date: DAY, slotCode: '09:30',
-      status: AppointmentStatus.COMPLETED, salesStaffId: bugoyId, bookedBy: bugoyId,
+      status: AppointmentStatus.CONFIRMED, salesStaffId: bugoyId, bookedBy: bugoyId,
     });
     const book = (slotCode: string) => appointments.requestAppointment(
       { type: AppointmentType.OFFICE, date: DAY, slotCode, serviceTypes: ['railings'] } as never, customerId, [Role.CUSTOMER],
@@ -369,7 +354,7 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
   });
 
-  it('a consultation closed as No Show gives its time back; one the customer attended keeps it (user decision 2026-11-27)', async () => {
+  it('a consultation closed as No Show or Customer Declined gives its time back (user decisions 2026-11-27)', async () => {
     // An office No Show is stored as completed + attendanceStatus no_show (an ocular No Show as status no_show).
     await Appointment.create({
       customerId, type: AppointmentType.OFFICE, date: DAY, slotCode: '09:00',
@@ -383,16 +368,16 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     });
 
     // The booking page's "Already booked" marks and the submission check use the same rule.
-    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00', '11:00'])).keys()]).toEqual(['10:00']);
-    const consultationId = await bookConsultation('09:00');
-    expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
-    await expect(bookConsultation('10:00')).rejects.toMatchObject(CONFLICT);
+    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00', '11:00'])).keys()]).toEqual([]);
+    for (const slotCode of ['09:00', '10:00']) {
+      const consultationId = await bookConsultation(slotCode);
+      expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode, status: AppointmentStatus.CONFIRMED });
+    }
   });
 
   it('reschedule: refuses a move onto the customer\'s other appointment, and never compares an appointment with itself', async () => {
     const projectId = await projectWaitingForOcular();
     await scheduleOcular(projectId, '09:00');
-    await finishOcular(projectId);
     const consultationId = await bookConsultation('10:00', '2026-11-19');
     const reschedule = (newDate: string, newSlotCode: string) => appointments.requestReschedule(
       consultationId, { newDate, newSlotCode, reason: 'Customer asked to move it' } as never, agentId, [Role.APPOINTMENT_AGENT],
@@ -416,13 +401,15 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     await expect(appointments.completeReschedule(consultationId, { date: DAY, slotCode: '09:00' } as never, agentId))
       .rejects.toMatchObject(CONFLICT);
     expect(await Appointment.findById(consultationId).lean()).toMatchObject({ date: DAY, slotCode: '10:00' });
+
+    // Once the ocular visit is finished, its hour is vacant again for the customer (user decision 2026-11-27).
+    await finishOcular(projectId);
+    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00'])).keys()]).toEqual([]);
   });
 
   it('reschedule: refuses moving an ocular visit onto the customer\'s consultation time', async () => {
-    // The consultation was completed early, so the customer can hold an active ocular visit too.
     const projectId = await projectWaitingForOcular();
     const consultationId = await bookConsultation('09:00');
-    await finishConsultation(consultationId, charlieId);
     await scheduleOcular(projectId, '09:00', '2026-11-19');
     const ocularId = String((await Project.findById(projectId).lean())!.ocularAppointmentId);
 
@@ -433,6 +420,13 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
       message: expect.stringContaining('This customer already has a consultation on Nov 18, 2026, 9:00 AM to 10:00 AM'),
     });
     expect(await Appointment.findById(ocularId).lean()).toMatchObject({ date: '2026-11-19', slotCode: '09:00' });
+
+    // Once the consultation is finished (e.g. Customer Declined), its hour no longer blocks the move.
+    await finishConsultation(consultationId, charlieId);
+    await appointments.requestReschedule(
+      ocularId, { newDate: DAY, newSlotCode: '09:00', reason: 'Site not ready' } as never, agentId, [Role.APPOINTMENT_AGENT],
+    );
+    expect(await Appointment.findById(ocularId).lean()).toMatchObject({ date: DAY, slotCode: '09:00' });
   });
 
   it('two requests at the same moment: only one of a consultation booking and an ocular visit is saved', async () => {

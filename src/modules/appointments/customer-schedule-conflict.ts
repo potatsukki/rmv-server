@@ -1,7 +1,7 @@
 import type { Types } from 'mongoose';
 import { Appointment, Project } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { AppointmentAttendanceStatus, AppointmentStatus, AppointmentType, ProjectStatus } from '../../utils/constants.js';
+import { AppointmentStatus, AppointmentType, ProjectStatus } from '../../utils/constants.js';
 import { APPOINTMENT_SLOT_MINUTES, slotsOverlap } from '../users/availability-session.service.js';
 
 /**
@@ -10,19 +10,17 @@ import { APPOINTMENT_SLOT_MINUTES, slotsOverlap } from '../users/availability-se
  * takes the STAFF member's whole day (travel), but the customer only has to be there for the
  * visit's own time slot (APPOINTMENT_SLOT_MINUTES from its start, on its Asia/Manila date).
  *
- * Only a cancelled or no-show appointment gives its time back. A completed one keeps its slot, so
- * completing early still prevents the customer from double-booking that time.
+ * A finished appointment gives its time back: cancelled, no-show, completed (including Customer
+ * Declined and an office No Show, both stored as completed) and a consultation finished as Ready
+ * for Ocular. Only appointments still to happen keep the customer's time (user decision
+ * 2026-11-27: "kung declined or completed dapat balik na to sa vacant").
  */
 export const CUSTOMER_TIME_FREEING_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.CANCELLED,
   AppointmentStatus.NO_SHOW,
+  AppointmentStatus.COMPLETED,
+  AppointmentStatus.READY_FOR_OCULAR,
 ];
-
-/**
- * An office consultation closed as No Show is stored as completed with attendanceStatus no_show
- * (an ocular visit uses status no_show), so it gives its time back too (user decision 2026-11-27).
- */
-const OFFICE_NO_SHOW = { status: AppointmentStatus.COMPLETED, attendanceStatus: AppointmentAttendanceStatus.NO_SHOW };
 
 type ConflictingAppointment = {
   _id: Types.ObjectId;
@@ -94,7 +92,6 @@ async function getCustomerAppointmentsOnDate(
     customerId,
     date: dateStr,
     status: { $nin: CUSTOMER_TIME_FREEING_STATUSES },
-    $nor: [OFFICE_NO_SHOW],
   };
   if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
   const sameDay = await Appointment.find(filter)
