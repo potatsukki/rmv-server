@@ -8,7 +8,7 @@ import {
 } from '../../utils/constants.js';
 import type { Types } from 'mongoose';
 import {
-  activeProjectStatusesForRoles, assignedFabricationProjectsFilter, customerVisibleProjectsFilter, usesFabricationProjectScope,
+  activeProjectStatusesForRoles, assignedFabricationProjectsFilter, customerVisibleProjectsFilter, engineerVisibleProjectsFilter, usesFabricationProjectScope,
 } from '../projects/projects.list-policy.js';
 import { matchesListingStage, resolveProjectStages } from '../projects/project-stage.js';
 import { getProjectPaymentDue } from '../payments/payment-due.js';
@@ -869,7 +869,7 @@ export async function getDashboardSummary(userId?: string, userRoles?: string[])
           ? { $in: activeProjectStatusesForRoles(userRoles as Role[]) }
           : { $nin: [ProjectStatus.COMPLETED, ProjectStatus.CANCELLED] },
         ...(userRoles?.includes(Role.ENGINEER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r as Role))
-          ? { $or: [{ engineerIds: userId }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } }] }
+          ? engineerVisibleProjectsFilter(String(userId))
           : userRoles?.includes(Role.SALES_STAFF) && !userRoles?.includes(Role.ADMIN)
             ? { salesStaffId: userId }
             : userRoles?.includes(Role.CUSTOMER) && !userRoles?.some(r => [Role.ADMIN, Role.SALES_STAFF, Role.ENGINEER].includes(r as Role))

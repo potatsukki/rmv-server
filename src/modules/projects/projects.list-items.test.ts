@@ -61,7 +61,7 @@ describe('listProjects project-item fallback', () => {
 
     const filter = {
       ...(role === Role.SALES_STAFF ? { salesStaffId: 'actor-1' } : role === Role.ENGINEER ? {
-        $or: [{ engineerIds: 'actor-1' }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } }],
+        $or: [{ engineerIds: 'actor-1' }, { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 }, contractStatus: 'uploaded' }],
       } : {}),
       designReviewStatus: 'declined',
     };

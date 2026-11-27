@@ -15,16 +15,10 @@ describe('visit report stage', () => {
     expect(normalizeVisitReportStage(undefined)).toBeUndefined();
   });
 
-  it('lists reports of created projects (linked or legacy visitReportId) under project', () => {
-    expect(visitReportStageCondition('project', ['p1'], ['r1'])).toEqual({
-      $or: [{ linkedProjectId: { $in: ['p1'] } }, { _id: { $in: ['r1'] } }],
-    });
-  });
-
-  it('lists everything else, including reports of draft projects, under appointment', () => {
-    expect(visitReportStageCondition('appointment', ['p1'], ['r1'])).toEqual({
-      $nor: [{ linkedProjectId: { $in: ['p1'] } }, { _id: { $in: ['r1'] } }],
-    });
+  // User decision 2026-11-27: Appointments lists consultation reports, Projects lists ocular reports.
+  it('lists ocular reports under project and consultation reports under appointment', () => {
+    expect(visitReportStageCondition('project')).toEqual({ visitType: 'ocular' });
+    expect(visitReportStageCondition('appointment')).toEqual({ visitType: 'consultation' });
   });
 });
 

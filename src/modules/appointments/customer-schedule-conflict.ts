@@ -31,7 +31,22 @@ type ConflictingAppointment = {
   date: string;
   slotCode: string;
   status?: AppointmentStatus | string;
+  attendanceStatus?: string;
+  salesStaffId?: Types.ObjectId | null;
 };
+
+/** The customer's own appointment behind an "Already booked" slot (shown when they click it). */
+export interface CustomerSlotBooking {
+  appointmentId: string;
+  appointmentNumber?: string;
+  type?: string;
+  date: string;
+  slotCode: string;
+  status?: string;
+  attendanceStatus?: string;
+  salesStaffAssigned: boolean;
+  projectNumber?: string;
+}
 
 function formatDay(dateStr: string) {
   const [year = 0, month = 1, day = 1] = dateStr.slice(0, 10).split('-').map(Number);
@@ -83,7 +98,7 @@ async function getCustomerAppointmentsOnDate(
   };
   if (excludeAppointmentIds.length) filter._id = { $nin: excludeAppointmentIds };
   const sameDay = await Appointment.find(filter)
-    .select('appointmentNumber type date slotCode status')
+    .select('appointmentNumber type date slotCode status attendanceStatus salesStaffId')
     .sort({ slotCode: 1 })
     .lean();
   return sameDay as ConflictingAppointment[];
@@ -99,10 +114,44 @@ export async function findCustomerScheduleConflict(
   return sameDay.find((appointment) => slotsOverlap(appointment.slotCode, slotCode)) ?? null;
 }
 
-/** Marks the same overlaps the submission guard rejects, with one query for the entire day. */
-export async function getCustomerBookedSlots(customerId: string, dateStr: string, slotCodes: readonly string[]) {
+/**
+ * Marks the same overlaps the submission guard rejects, with one query for the entire day, and
+ * names the customer's appointment behind each marked slot (so they can open it).
+ */
+export async function getCustomerBookedSlots(
+  customerId: string,
+  dateStr: string,
+  slotCodes: readonly string[],
+): Promise<Map<string, CustomerSlotBooking>> {
   const sameDay = await getCustomerAppointmentsOnDate(customerId, dateStr);
-  return new Set(slotCodes.filter((slotCode) => sameDay.some((appointment) => slotsOverlap(appointment.slotCode, slotCode))));
+  const booked = new Map<string, CustomerSlotBooking>();
+  if (!sameDay.length) return booked;
+
+  // A project's ocular visit is not on the Appointments list, so name its project too.
+  const projects = await Project.find({
+    $or: [{ ocularAppointmentId: { $in: sameDay.map((a) => a._id) } }, { appointmentId: { $in: sameDay.map((a) => a._id) } }],
+    status: { $ne: ProjectStatus.CANCELLED },
+  }).select('projectNumber ocularAppointmentId appointmentId').lean();
+  const projectNumberFor = (id: Types.ObjectId) => projects.find((project) => (
+    String(project.ocularAppointmentId) === String(id) || String(project.appointmentId) === String(id)
+  ))?.projectNumber;
+
+  for (const slotCode of slotCodes) {
+    const appointment = sameDay.find((entry) => slotsOverlap(entry.slotCode, slotCode));
+    if (!appointment) continue;
+    booked.set(slotCode, {
+      appointmentId: String(appointment._id),
+      appointmentNumber: appointment.appointmentNumber,
+      type: appointment.type,
+      date: appointment.date,
+      slotCode: appointment.slotCode,
+      status: appointment.status,
+      attendanceStatus: appointment.attendanceStatus,
+      salesStaffAssigned: Boolean(appointment.salesStaffId),
+      projectNumber: projectNumberFor(appointment._id) || undefined,
+    });
+  }
+  return booked;
 }
 
 /**

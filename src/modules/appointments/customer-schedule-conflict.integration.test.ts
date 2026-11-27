@@ -383,7 +383,7 @@ describe.runIf(Boolean(MONGO_URI))('same customer, different sales staff: consul
     });
 
     // The booking page's "Already booked" marks and the submission check use the same rule.
-    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00', '11:00']))]).toEqual(['10:00']);
+    expect([...(await getCustomerBookedSlots(customerId, DAY, ['09:00', '10:00', '11:00'])).keys()]).toEqual(['10:00']);
     const consultationId = await bookConsultation('09:00');
     expect((await Appointment.findById(consultationId).lean())).toMatchObject({ date: DAY, slotCode: '09:00', status: AppointmentStatus.CONFIRMED });
     await expect(bookConsultation('10:00')).rejects.toMatchObject(CONFLICT);

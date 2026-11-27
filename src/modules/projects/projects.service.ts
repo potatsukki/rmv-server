@@ -54,6 +54,7 @@ import {
   assertFabricatorProjectAccess,
   assignedFabricationProjectsFilter,
   customerVisibleProjectsFilter,
+  engineerVisibleProjectsFilter,
   maskProjectTotalCostForActor,
   usesFabricationProjectScope,
 } from './projects.list-policy.js';
@@ -2854,10 +2855,7 @@ export async function listProjects(
   } else if (actorRoles.includes(Role.SALES_STAFF) && !actorRoles.some(r => [Role.ADMIN].includes(r))) {
     filter.salesStaffId = actorId;
   } else if (actorRoles.includes(Role.ENGINEER) && !actorRoles.some(r => [Role.ADMIN, Role.SALES_STAFF].includes(r))) {
-    filter.$or = [
-      { engineerIds: actorId },
-      { status: ProjectStatus.SUBMITTED, engineerIds: { $size: 0 } },
-    ];
+    Object.assign(filter, engineerVisibleProjectsFilter(actorId));
   }
 
   if (query.status === 'active') {
