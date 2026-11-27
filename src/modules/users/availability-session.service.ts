@@ -60,9 +60,9 @@ export const SALES_ACTIVE_ASSIGNMENT_STATUSES: AppointmentStatus[] = [
 
 /**
  * The staff member's other appointment on this date (YYYY-MM-DD) that clashes with a new one of
- * this type at this slot, if any (see appointmentsConflict). Cancelled and no-show appointments
- * don't count; a completed one counts until its busy time has passed (holdsStaffTime), so finishing
- * early never reopens a time already booked. A same-time clash is reported before an ocular travel-time one.
+ * this type at this slot, if any (see appointmentsConflict). Cancelled, no-show and finished
+ * consultations don't count; a finished ocular visit counts until the trip back ends (holdsStaffTime).
+ * A same-time clash is reported before an ocular travel-time one.
  * For a new ocular visit, pass its route (travel minutes, km) so only its busy time counts.
  */
 export async function findActiveSalesAssignment(

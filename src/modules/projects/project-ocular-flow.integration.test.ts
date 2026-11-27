@@ -179,19 +179,19 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });
 
-  it('blocks the ocular visit while its busy time overlaps an appointment that still holds its time; completed early holds it, cancelled frees it', async () => {
+  // User decision 2026-11-27: a consultation closed early (Completed / Customer Declined) frees its staff's time.
+  it('blocks the ocular visit while its busy time overlaps an active appointment; a consultation completed early frees it', async () => {
     const { consultationId, reportId } = await completeConsultation();
     const projectId = await createProjectWithContract(consultationId, reportId);
     const otherCustomer = await createUser('customer02@example.test', [Role.CUSTOMER]);
-    // Same sales staff on Nov 16: an active 9:00 consultation and a 13:00 one already marked
-    // completed although "now" is Nov 10 (completed early while the day check is bypassed).
+    // Same sales staff on Nov 16: an active 9:00 consultation and an active 13:00 one.
     await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '09:00',
       status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
-    const completedEarly = await Appointment.create({
+    const afternoon = await Appointment.create({
       customerId: otherCustomer._id, type: AppointmentType.OFFICE, date: '2026-11-16', slotCode: '13:00',
-      status: AppointmentStatus.COMPLETED, salesStaffId: salesId, bookedBy: otherCustomer._id,
+      status: AppointmentStatus.CONFIRMED, salesStaffId: salesId, bookedBy: otherCustomer._id,
     });
 
     // The site is 5 km / 18 min away: the staff is busy from 15 min prep + 30 (rounded drive) + 60 min
@@ -200,13 +200,14 @@ describe.runIf(Boolean(MONGO_URI))('project ocular flow on a real database (PRJ-
       await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode, ...SITE } as never, salesId, [Role.SALES_STAFF]))
         .rejects.toThrow(/at this time|keeps (them away|the staff busy)|No sales staff is free/);
     }
-    // 13:00 (busy 11:15 AM–4:00 PM) runs into the completed-early 13:00 consultation, whose time is still ahead.
+    // 13:00 (busy 11:15 AM–4:00 PM) runs into the active 13:00 consultation.
     await expect(projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]))
       .rejects.toThrow(/at this time|keeps (them away|the staff busy)|No sales staff is free/);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(0);
 
-    // Once that consultation is cancelled, its time is free and the 13:00 ocular visit fits around the 9:00 one.
-    await Appointment.updateOne({ _id: completedEarly._id }, { $set: { status: AppointmentStatus.CANCELLED } });
+    // That consultation is closed early (Customer Declined, although "now" is Nov 10): its time is
+    // free again and the 13:00 ocular visit fits around the 9:00 one.
+    await Appointment.updateOne({ _id: afternoon._id }, { $set: { status: AppointmentStatus.COMPLETED, attendanceStatus: 'customer_declined' } });
     await projects.scheduleProjectOcular(projectId, { date: '2026-11-16', slotCode: '13:00', ...SITE } as never, salesId, [Role.SALES_STAFF]);
     expect(await Appointment.countDocuments({ type: AppointmentType.OCULAR })).toBe(1);
   });

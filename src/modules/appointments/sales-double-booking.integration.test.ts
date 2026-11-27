@@ -128,10 +128,19 @@ describe.runIf(Boolean(MONGO_URI))('customer booking vs the sales staff schedule
     await expect(book(0, '10:00')).resolves.toBeDefined();
   });
 
-  // The QA bug: it failed before the Travel Time S4 fix (holdsStaffTime).
-  it('an appointment completed early (before its time) still holds that time', async () => {
-    // Completed on Nov 26 (day check bypassed) although it is scheduled for Nov 28 at 10:00.
-    await staffAppointment({ status: AppointmentStatus.COMPLETED });
+  // User decision 2026-11-27 ("kung declined or completed dapat balik na to sa vacant"): a consultation
+  // closed early gives its hour back; a completed ocular keeps its staff until the trip back ends.
+  it('a consultation completed early (e.g. Customer Declined) makes its hour vacant again', async () => {
+    // Closed on Nov 26 although it is scheduled for Nov 28 at 10:00.
+    await staffAppointment({ status: AppointmentStatus.COMPLETED, attendanceStatus: 'customer_declined' });
+
+    expect(await freeSlots()).toContain('10:00');
+    await expect(book(0, '10:00')).resolves.toBeDefined();
+  });
+
+  it('an ocular visit completed early still keeps its staff away until the trip back ends', async () => {
+    // A 10:00 ocular 45 min away (18 km) keeps staff A busy 6:45 AM – 3:30 PM on Nov 28.
+    await staffAppointment({ type: AppointmentType.OCULAR, status: AppointmentStatus.COMPLETED, travelDurationMinutes: 45, distanceKm: 18 });
 
     expect(await freeSlots()).not.toContain('10:00');
     await expect(book(0, '10:00')).rejects.toThrow('No sales staff is available');

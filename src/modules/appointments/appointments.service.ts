@@ -682,9 +682,9 @@ async function getSlotAvailability(
   // A sales staff member is taken when one of their appointments on this date clashes with the
   // new one (appointmentsConflict): their busy times overlap. An ocular visit keeps its staff away
   // from preparing at the shop until getting back (prep + travel + traffic allowance + 1.5 hr on
-  // site), or the whole day when it has no route yet. Cancelled and no-show appointments free their
-  // time; a completed one keeps it until that time has passed (holdsStaffTime), because it can be
-  // completed early. Unassigned requests that clash will need staff of their own, so they use some up too.
+  // site), or the whole day when it has no route yet. Cancelled, no-show and finished consultations
+  // free their time; a finished ocular visit keeps it until the trip back ends (holdsStaffTime).
+  // Unassigned requests that clash will need staff of their own, so they use some up too.
   const appointmentFilter: Record<string, unknown> = {
     date: dateStr,
     status: { $nin: SALES_SLOT_FREEING_STATUSES },
