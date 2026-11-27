@@ -77,6 +77,11 @@ export const assignFabricationStaff = asyncHandler(async (req: Request, res: Res
   res.json({ success: true, data: serializeProjectForActor(project, req) });
 });
 
+export const updateFabricationAssistants = asyncHandler(async (req: Request, res: Response) => {
+  const project = await projectsService.updateFabricationAssistants((req.params.id as string), req.body, req.userId!, req.ip, req.get('user-agent'));
+  res.json({ success: true, data: serializeProjectForActor(project, req) });
+});
+
 export const listFabricationStaffWorkload = asyncHandler(async (_req: Request, res: Response) => {
   const staff = await projectsService.listFabricationStaffWorkload();
   res.json({ success: true, data: staff });

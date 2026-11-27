@@ -2,6 +2,7 @@ import type { Types } from 'mongoose';
 import { PaymentPlan } from '../../models/Payment.js';
 import { Project, ProjectItem } from '../../models/index.js';
 import { NotificationCategory, PaymentStageStatus, ProjectStatus } from '../../utils/constants.js';
+import { logger } from '../../utils/logger.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, emitUserEvent, notifyUsers } from '../notifications/socket.service.js';
 import { applyTargetFinishDate } from './target-finish.js';
@@ -89,12 +90,25 @@ export async function handleInitialFabricationPaymentVerified(
       link,
     );
   } else if (project.status === ProjectStatus.PAYMENT_PENDING && plan.stages[0]?.status === PaymentStageStatus.VERIFIED) {
+    if (paymentReady && !project.fabricationLeadId) {
+      // Paid and waiting for a team: the system assigns the next free fabricator, or the one whose
+      // project reached Quality Check (panel note 2026-11-27). The assignment sends its own notices.
+      // Loaded lazily because projects.service imports this file.
+      try {
+        const { autoAssignWaitingFabricationProjects } = await import('./fabrication-auto-assign.js');
+        await autoAssignWaitingFabricationProjects('payment_verified');
+      } catch (error) {
+        logger.error(`Fabrication auto-assign after payment failed for project ${project._id}`, error);
+      }
+      const latest = await Project.findById(project._id);
+      if (latest?.fabricationLeadId) return latest;
+    }
     await createAndSendNotification(
       project.customerId,
       NotificationCategory.SYSTEM,
       paymentReady ? 'Fabrication Team Assignment Pending' : 'Item Payment Verified',
       paymentReady
-        ? `The required payment for "${project.title}" is verified. The engineer can now assign the fabrication team.`
+        ? `The required payment for "${project.title}" is verified. Your project is next in line for a fabricator, who is assigned as soon as one is available.`
         : `Payment for one item in "${project.title}" has been verified. Other items still need their required first payment.`,
       link,
     );
@@ -102,8 +116,8 @@ export async function handleInitialFabricationPaymentVerified(
       await notifyUsers(
         project.engineerIds,
         NotificationCategory.FABRICATION,
-        'Assign Fabrication Team',
-        `The required payment for "${project.title}" is verified. Assign the fabrication team to start fabrication.`,
+        'Waiting for a Fabricator',
+        `The required payment for "${project.title}" is verified, but no fabricator is free yet. The system assigns a lead automatically when a fabricator is free or their project reaches Quality Check. You can also assign the team now.`,
         link,
       );
     }

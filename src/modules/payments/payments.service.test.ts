@@ -93,6 +93,10 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
+vi.mock('../projects/fabrication-auto-assign.js', () => ({
+  autoAssignWaitingFabricationProjects: vi.fn().mockResolvedValue(0),
+}));
+
 import { reconcileFabricationStart } from '../projects/fabrication-start.js';
 import {
   getPaymentEvidenceTrail,

@@ -12,7 +12,7 @@ vi.mock('../../services/receipt.service.js', () => ({ generateReceiptPdf: vi.fn(
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
 import { Blueprint, Payment, PaymentPlan, Project, ProjectItem, SlotLock, User } from '../../models/index.js';
-import { DeliveryType, FabricationStatus, PaymentStageStatus, ProjectStatus, Role } from '../../utils/constants.js';
+import { DeliveryType, FabricationStatus, PaymentStageStatus, ProjectStatus, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 import { createFabricationUpdate, getLatestFabricationStatus } from '../fabrication/fabrication.service.js';
 import { emitUserEvent, notifyUsers } from '../notifications/socket.service.js';
 import { recordCashPayment } from '../payments/payments.service.js';
@@ -115,8 +115,13 @@ describe.runIf(Boolean(uri))('fabrication start after verified project payment',
     await expect(post(projectId, itemId!, FabricationStatus.CUTTING, leadId, Role.FABRICATION_STAFF)).resolves.toBeDefined();
   });
 
+  // A free fabricator would now be assigned automatically once the plan is settled (see
+  // fabrication-auto-assign.integration.test.ts); on leave, the engineer's own assignment is tested.
+  const keepLeadOffAutoAssign = () => User.updateOne({ _id: leadId }, { $set: { availabilityStatus: StaffAvailabilityStatus.ON_LEAVE } });
+
   it('starts every item on team assignment when a combined plan is already settled', async () => {
     const { projectId } = await approvedProject([1, 2]);
+    await keepLeadOffAutoAssign();
     const result = await selectPaymentPlan(projectId, { paymentType: 'full' }, customerId);
     expect(result.paymentPlan?.totalAmount).toBe(0);
     expect(result.project.status).toBe(ProjectStatus.PAYMENT_PENDING);
@@ -142,6 +147,7 @@ describe.runIf(Boolean(uri))('fabrication start after verified project payment',
 
   it('activates once across simultaneous attempts and brings pending items forward on retry', async () => {
     const { projectId, itemIds: [itemId] } = await approvedProject([1]);
+    await keepLeadOffAutoAssign();
     await selectPaymentPlan(projectId, { paymentType: 'full' }, customerId);
     await Project.updateOne({ _id: projectId }, { $set: { fabricationLeadId: leadId } });
 

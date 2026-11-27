@@ -1,14 +1,93 @@
 import { format, parse } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
-import { FabricationUpdate, Holiday, Project, User } from '../../models/index.js';
+import type { Types } from 'mongoose';
+import { FabricationUpdate, Holiday, Project, ProjectItem, User } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import { FabricationStatus, ProjectStatus } from '../../utils/constants.js';
-import { fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
+import { fabricationProgress, fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
 
 const TZ = 'Asia/Manila';
 
-/** A project keeps its people occupied from team assignment until fabrication is done. */
+/** A project keeps its people on its team from team assignment until fabrication is done. */
 export const ACTIVE_FABRICATION_STATUSES = [ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION];
+
+/**
+ * Quality Check is the last workshop stage (on-site: QC → Installation → Done; shop: QC → Ready
+ * for Delivery → Done). Once every part of a project has reached it, the project is "near
+ * completion" and its fabricators can take the next project (panel note 2026-11-27). It is the
+ * same stage that opens the delivery / installation date, on purpose.
+ */
+export const NEAR_COMPLETION_STAGE = FabricationStatus.QUALITY_CHECK;
+
+/** True when the stage is Quality Check or later (legacy on-site history is normalized first). */
+export function stageIsNearCompletion(status: string | null | undefined, deliveryType?: string) {
+  if (!status) return false;
+  const order = fabricationStageOrder(deliveryType);
+  const reached = order.indexOf(normalizeFabricationStatus(status as FabricationStatus, deliveryType));
+  return reached >= 0 && reached >= order.indexOf(NEAR_COMPLETION_STAGE);
+}
+
+export interface FabricationTrackProgress {
+  /** Every track (each project item, or the project itself) reached Quality Check or later. */
+  nearCompletion: boolean;
+  /** Stage of the slowest track. */
+  currentStage: FabricationStatus | null;
+  stageIndex: number;
+  stageCount: number;
+  progressPercent: number;
+}
+
+type TrackedProject = { _id: unknown; status?: string; deliveryType?: string };
+
+/**
+ * Fabrication progress of each project by its SLOWEST track. Each project item has its own
+ * lifecycle; a project without items uses the project-level track, and an item without an update
+ * of its own falls back to the project-level update. Before fabrication starts nothing counts.
+ */
+export async function fabricationTrackProgress(projects: TrackedProject[]): Promise<Map<string, FabricationTrackProgress>> {
+  const started = projects.filter((project) => project.status === ProjectStatus.FABRICATION);
+  const ids = started.map((project) => project._id) as Types.ObjectId[];
+  const [latest, items] = ids.length
+    ? await Promise.all([
+      FabricationUpdate.aggregate<{ _id: { projectId: unknown; projectItemId: unknown }; status: string }>([
+        { $match: { projectId: { $in: ids } } },
+        { $sort: { createdAt: -1 } },
+        { $group: { _id: { projectId: '$projectId', projectItemId: { $ifNull: ['$projectItemId', null] } }, status: { $first: '$status' } } },
+      ]),
+      ProjectItem.find({ projectId: { $in: ids }, status: { $ne: ProjectStatus.CANCELLED } }).select('_id projectId').lean(),
+    ])
+    : [[], []];
+
+  const trackKey = (projectId: unknown, itemId?: unknown) => `${String(projectId)}:${itemId ? String(itemId) : ''}`;
+  const latestByTrack = new Map((latest || []).map((row) => [trackKey(row._id.projectId, row._id.projectItemId), row.status]));
+  const itemsByProject = new Map<string, string[]>();
+  for (const item of items || []) {
+    const projectId = String(item.projectId);
+    itemsByProject.set(projectId, [...(itemsByProject.get(projectId) || []), String(item._id)]);
+  }
+
+  const result = new Map<string, FabricationTrackProgress>();
+  for (const project of projects) {
+    const projectId = String(project._id);
+    if (project.status !== ProjectStatus.FABRICATION) {
+      result.set(projectId, { nearCompletion: false, ...fabricationProgress(undefined, project.deliveryType) });
+      continue;
+    }
+    const projectLevel = latestByTrack.get(trackKey(projectId));
+    const itemIds = itemsByProject.get(projectId) || [];
+    const statuses = itemIds.length
+      ? itemIds.map((itemId) => latestByTrack.get(trackKey(projectId, itemId)) ?? projectLevel)
+      : [projectLevel];
+    const slowest = statuses
+      .map((status) => fabricationProgress(status, project.deliveryType))
+      .reduce((low, next) => (next.stageIndex < low.stageIndex ? next : low));
+    result.set(projectId, {
+      ...slowest,
+      nearCompletion: statuses.every((status) => stageIsNearCompletion(status, project.deliveryType)),
+    });
+  }
+  return result;
+}
 
 export function manilaToday(now = new Date()) {
   return formatInTimeZone(now, TZ, 'yyyy-MM-dd');
@@ -24,31 +103,36 @@ async function staffNames(ids: string[]) {
 }
 
 /**
- * A fabricator (lead or assistant) works on one active project at a time. Being on another
+ * A fabricator (lead or assistant) works on one project in the workshop at a time: another
+ * project blocks them until it reaches Quality Check (see NEAR_COMPLETION_STAGE). Being on another
  * project's delivery crew does not count; neither does this project itself.
  */
 export async function assertFabricatorsFree(projectId: string, staffIds: string[]) {
-  const ids = [...new Set(staffIds.filter(Boolean))];
+  const ids = [...new Set(staffIds.filter(Boolean).map(String))];
   if (!ids.length) return;
 
   const others = await Project.find({
     _id: { $ne: projectId },
     status: { $in: ACTIVE_FABRICATION_STATUSES },
     $or: [{ fabricationLeadId: { $in: ids } }, { fabricationAssistantIds: { $in: ids } }],
-  }).select('projectNumber title fabricationLeadId fabricationAssistantIds').lean();
+  }).select('projectNumber title status deliveryType fabricationLeadId fabricationAssistantIds').lean();
   if (!others.length) return;
 
+  const progress = await fabricationTrackProgress(others);
+  const inWorkshop = others.filter((project) => !progress.get(String(project._id))?.nearCompletion);
+  if (!inWorkshop.length) return;
+
   const names = await staffNames(ids);
-  const conflicts = ids.flatMap((id) => others.flatMap((project) => {
+  const conflicts = ids.flatMap((id) => inWorkshop.flatMap((project) => {
     const role = String(project.fabricationLeadId) === id
       ? 'Lead'
       : (project.fabricationAssistantIds || []).some((assistant) => String(assistant) === id) ? 'Assistant' : null;
-    return role ? [`${names.get(id) ?? 'A fabricator'} is already on ${project.projectNumber || project.title} (${role})`] : [];
+    return role ? [`${names.get(id) ?? 'A fabricator'} is still on ${project.projectNumber || project.title} (${role})`] : [];
   }));
   if (!conflicts.length) return;
 
   throw AppError.badRequest(
-    `${conflicts.join('; ')}. A fabricator can work on one active project at a time.`,
+    `${conflicts.join('; ')}. A fabricator can take a new project once their current one reaches Quality Check.`,
     ErrorCode.FABRICATOR_ALREADY_ASSIGNED,
   );
 }

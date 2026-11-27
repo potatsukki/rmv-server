@@ -12,6 +12,7 @@ import {
   assignEngineersSchema,
   reassignProjectSalesSchema,
   assignFabricationSchema,
+  updateFabricationAssistantsSchema,
   assignDeliveryCrewSchema,
   transitionProjectSchema,
   uploadSignedContractSchema,
@@ -115,11 +116,20 @@ router.post(
   ctrl.assignFabricationStaff,
 );
 
-// Who is free: fabrication staff with the projects they are on (team and delivery crew pickers).
+// The lead fabricator chooses their own assistants (the service checks they lead this project).
+router.put(
+  '/:id/fabrication-assistants',
+  authenticate,
+  authorize(Role.FABRICATION_STAFF),
+  validate(updateFabricationAssistantsSchema),
+  ctrl.updateFabricationAssistants,
+);
+
+// Who is free: fabrication staff with the projects they are on (team, assistants and delivery crew pickers).
 router.get(
   '/fabrication-staff/workload',
   authenticate,
-  authorize(Role.ENGINEER, Role.ADMIN),
+  authorize(Role.ENGINEER, Role.ADMIN, Role.FABRICATION_STAFF),
   ctrl.listFabricationStaffWorkload,
 );
 

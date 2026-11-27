@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../models/index.js', () => ({ FabricationUpdate: {}, Holiday: {}, Project: {}, User: {} }));
+vi.mock('../../models/index.js', () => ({ FabricationUpdate: {}, Holiday: {}, Project: {}, ProjectItem: {}, User: {} }));
 
 import { deliveryDateUnlockStage, stageReachesDeliveryUnlock } from './fabrication-scheduling.js';
 import { DeliveryType, FabricationStatus } from '../../utils/constants.js';

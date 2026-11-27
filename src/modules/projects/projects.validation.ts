@@ -129,6 +129,11 @@ export const assignFabricationSchema = z.object({
   fabricationAssistantIds: z.array(z.string().min(1)).default([]),
 });
 
+/** The lead fabricator's own assistants (the full list: checking adds, unchecking removes). */
+export const updateFabricationAssistantsSchema = z.object({
+  fabricationAssistantIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).max(10, 'Choose up to 10 assistants').default([]),
+});
+
 export const assignDeliveryCrewSchema = z.object({
   /** Installation crew; required for on-site installation only (delivery uses a third-party courier). */
   deliveryCrewIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).max(20).default([]),
@@ -211,6 +216,7 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 export type AssignEngineersInput = z.infer<typeof assignEngineersSchema>;
 export type ReassignProjectSalesInput = z.infer<typeof reassignProjectSalesSchema>;
 export type AssignFabricationInput = z.infer<typeof assignFabricationSchema>;
+export type UpdateFabricationAssistantsInput = z.infer<typeof updateFabricationAssistantsSchema>;
 export type AssignDeliveryCrewInput = z.infer<typeof assignDeliveryCrewSchema>;
 export type TransitionProjectInput = z.infer<typeof transitionProjectSchema>;
 export type SignContractInput = z.infer<typeof signContractSchema>;
