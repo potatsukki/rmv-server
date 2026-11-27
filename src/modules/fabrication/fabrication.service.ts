@@ -17,6 +17,7 @@ import { formatCurrency } from '../../utils/helpers.js';
 import { logger } from '../../utils/logger.js';
 import { assertFabricatorProjectAccess, isAssignedFabricationMember, usesFabricationProjectScope } from '../projects/projects.list-policy.js';
 import { hasRequiredInitialFabricationPayment, reconcileFabricationStart } from '../projects/fabrication-start.js';
+import { stageIsNearCompletion } from '../projects/fabrication-scheduling.js';
 import type { CreateFabricationUpdateInput, UpdateFabricationUpdateInput } from './fabrication.validation.js';
 
 // ── Per-stage payment gating helpers ──
@@ -445,6 +446,18 @@ export async function createFabricationUpdate(
     `/projects/${project._id}/fabrication`,
     { excludeUserId: actorId },
   );
+
+  // Quality Check or later can free this team for the next paid project waiting for a fabricator
+  // (panel note 2026-11-27). Loaded lazily because projects.service imports this file; a failure
+  // is logged and never undoes the update.
+  if (stageIsNearCompletion(input.status, deliveryType)) {
+    try {
+      const { autoAssignWaitingFabricationProjects } = await import('../projects/fabrication-auto-assign.js');
+      await autoAssignWaitingFabricationProjects('fabrication_update');
+    } catch (error) {
+      logger.error(`Fabrication auto-assign after an update of project ${project._id} failed`, error);
+    }
+  }
 
   return update;
 }

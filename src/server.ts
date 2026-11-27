@@ -8,6 +8,7 @@ import { processPaymentReminders } from './jobs/paymentReminders.js';
 import { processContractExpiries } from './jobs/contractExpiry.js';
 import { processAutomatedConsultationAttendance } from './modules/appointments/consultation-attendance-automation.js';
 import { processAutomaticConsultationNoShows } from './modules/appointments/appointments.service.js';
+import { autoAssignWaitingFabricationProjects } from './modules/projects/fabrication-auto-assign.js';
 import { scheduleEveryMinute } from './jobs/minuteSchedule.js';
 import { seedDefaultConfigs } from './modules/config/config.service.js';
 import { backfillPublicIdentifiers } from './services/publicIdentifierBackfill.js';
@@ -27,6 +28,8 @@ let paymentReminderInterval: NodeJS.Timeout;
 let contractExpiryInterval: NodeJS.Timeout;
 // ── Consultation attendance automation (every minute, 2 s after the minute starts) ──
 let stopConsultationAttendanceJobs: (() => void) | undefined;
+// ── Fabrication auto-assign safety sweep (every minute) ──
+let stopFabricationAutoAssignJob: (() => void) | undefined;
 
 async function startServer(): Promise<void> {
   try {
@@ -96,6 +99,12 @@ async function startServer(): Promise<void> {
       }
     });
 
+    // Payments and Quality Check updates assign waiting projects right away; this catches the rest
+    // (a cancelled project, a fabricator back from leave, a team change). Idle when nothing waits.
+    stopFabricationAutoAssignJob = scheduleEveryMinute(async () => {
+      await autoAssignWaitingFabricationProjects('sweep');
+    }, 30_000);
+
     // Run contract check once on startup
     processContractExpiries().catch(err =>
       logger.error('Initial contract expiry check failed:', err)
@@ -141,6 +150,9 @@ function gracefulShutdown(signal: string): void {
     }
     if (stopConsultationAttendanceJobs) {
       stopConsultationAttendanceJobs();
+    }
+    if (stopFabricationAutoAssignJob) {
+      stopFabricationAutoAssignJob();
     }
 
     // Close MongoDB connection

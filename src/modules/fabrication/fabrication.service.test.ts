@@ -102,7 +102,12 @@ vi.mock('../../utils/logger.js', () => ({
   },
 }));
 
+vi.mock('../projects/fabrication-auto-assign.js', () => ({
+  autoAssignWaitingFabricationProjects: vi.fn().mockResolvedValue(0),
+}));
+
 import { createFabricationUpdate, deleteFabricationUpdate, updateFabricationUpdate, getLatestFabricationStatus, listFabricationUpdates, getFabricationUpdateById, seedFabricationItems } from './fabrication.service.js';
+import { autoAssignWaitingFabricationProjects } from '../projects/fabrication-auto-assign.js';
 import { getPaymentActivationConfig } from '../config/config.service.js';
 import { createAndSendNotification } from '../notifications/socket.service.js';
 import { sendFabricationUpdateEmail, sendProjectCompletedEmail, sendReadyForDeliveryEmail } from '../notifications/email.service.js';
@@ -224,6 +229,44 @@ describe('createFabricationUpdate', () => {
 
     expect(mockFabricationUpdateCreate).toHaveBeenCalled();
     expect(project.save).toHaveBeenCalled();
+  });
+
+  // Panel note 2026-11-27: a team whose project reached Quality Check takes the next waiting project.
+  it('looks for the next waiting project once the update reaches Quality Check', async () => {
+    mockProjectFindById.mockResolvedValue(shopDeliveryProject());
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.FINISHING }) });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.QUALITY_CHECK, notes: 'Checked.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+
+    expect(mockFabricationUpdateCreate).toHaveBeenCalled();
+    expect(autoAssignWaitingFabricationProjects).toHaveBeenCalledWith('fabrication_update');
+    // It runs after the update was saved.
+    expect(vi.mocked(autoAssignWaitingFabricationProjects).mock.invocationCallOrder[0])
+      .toBeGreaterThan(mockFabricationUpdateCreate.mock.invocationCallOrder[0]!);
+  });
+
+  it('does not look for the next project before Quality Check, and a failed look-up keeps the update', async () => {
+    mockProjectFindById.mockResolvedValue(shopDeliveryProject());
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.CUTTING }) });
+
+    await createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.WELDING, notes: 'Welding.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    );
+    expect(autoAssignWaitingFabricationProjects).not.toHaveBeenCalled();
+
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.FINISHING }) });
+    vi.mocked(autoAssignWaitingFabricationProjects).mockRejectedValueOnce(new Error('database down'));
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', status: FabricationStatus.QUALITY_CHECK, notes: 'Checked.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).resolves.toEqual({ _id: 'update-1' });
   });
 
   it('asks the customer to confirm receipt when a delivery is ready', async () => {

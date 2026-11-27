@@ -91,9 +91,9 @@ vi.mock('./fabrication-scheduling.js', async (importActual) => ({
 }));
 vi.mock('../maps/maps.service.js', () => ({ computeRoute: scheduling.computeRoute }));
 
-import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoSendOcularProjectForReview, confirmInstallation, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, uploadSignedContract, updateProject } from './projects.service.js';
+import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoAssignFabricationLead, autoSendOcularProjectForReview, confirmInstallation, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, updateFabricationAssistants, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
-import { createAndSendNotification } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyUsers } from '../notifications/socket.service.js';
 import { AppointmentStatus, AuditAction, ContractStatus, DeliveryType, ProjectStatus, Role, StaffAvailabilityStatus } from '../../utils/constants.js';
 
 const customerId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -996,7 +996,11 @@ describe('assignFabricationStaff', () => {
       status: ProjectStatus.PAYMENT_PENDING,
       fabricationLeadId: leadId,
       fabricationAssistantIds: assistantIds,
+      // A person chose this team, so it no longer shows as the system's pick.
+      fabricationAutoAssignedAt: null,
     });
+    expect(mocks.auditCreate.mock.calls[0]![0]).toMatchObject({ actorId, details: { fabricationLeadId: leadId } });
+    expect(mocks.auditCreate.mock.calls[0]![0].details).not.toHaveProperty('automatic');
     expect(save).toHaveBeenCalledOnce();
     expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
     const busyMessage = 'Another team assignment for this fabricator is being saved right now. Please try again in a moment.';
@@ -1015,6 +1019,150 @@ describe('assignFabricationStaff', () => {
     await expect(assignFabricationStaff('project-1', { fabricationLeadId: 'fabricator-1', fabricationAssistantIds: [] }, actorId))
       .rejects.toThrow('already on PRJ-2026-00051');
     expect(save).not.toHaveBeenCalled();
+  });
+});
+
+// Panel note 2026-11-27: the system gives a paid project waiting for a team its lead.
+describe('autoAssignFabricationLead (system assignment)', () => {
+  const leadId = 'eeeeeeeeeeeeeeeeeeeeeeee';
+  const waitingRow = { _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING };
+  const savedProject = () => ({
+    _id: { toString: () => 'project-1' },
+    projectNumber: 'PRJ-2026-00090',
+    title: 'Railings',
+    customerId: { toString: () => 'customer-1' },
+    engineerIds: ['engineer-1'],
+    status: ProjectStatus.PAYMENT_PENDING,
+    fabricationAssistantIds: [],
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.projectItemFind.mockReturnValue({ select: vi.fn().mockResolvedValue([]) });
+    mocks.paymentPlanFindOne.mockResolvedValue(null);
+    mocks.blueprintFindOne.mockReturnValue({ sort: vi.fn().mockReturnValue({ select: vi.fn().mockResolvedValue({ status: 'approved' }) }) });
+    mocks.auditCreate.mockResolvedValue({});
+    mocks.projectFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue(waitingRow) });
+    mocks.userFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue({ _id: leadId, firstName: 'Lance', lastName: 'Zelot' }) });
+  });
+
+  it('fills an empty lead atomically, records it as System and tells the lead, engineers and customer', async () => {
+    const project = savedProject();
+    mocks.projectFindOneAndUpdate.mockResolvedValue(project);
+    mocks.projectFindById.mockResolvedValue(project);
+
+    const result = await autoAssignFabricationLead('project-1', leadId, {
+      kind: 'nearest_completion',
+      fromProject: { _id: 'p-51', projectNumber: 'PRJ-2026-00051', stage: 'quality_check' },
+    });
+
+    expect(result).toBe(project);
+    const [filter, update] = mocks.projectFindOneAndUpdate.mock.calls[0]!;
+    expect(filter).toEqual({ _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: null });
+    expect(update.$set).toMatchObject({ fabricationLeadId: leadId, fabricationAssistantIds: [], fabricationAutoAssignedAt: expect.any(Date) });
+    expect(scheduling.acquireStaffLock).toHaveBeenCalledWith(
+      { held: [] }, { staffId: leadId, date: 'all-dates', slot: 'fabricator-team' }, leadId, expect.any(String),
+    );
+    expect(scheduling.assertFabricatorsFree).toHaveBeenCalledWith('project-1', [leadId]);
+    // On leave / unavailable fabricators are never picked.
+    expect(mocks.userFindOne.mock.calls[0]![0]).toMatchObject({
+      _id: leadId, availabilityStatus: { $nin: [StaffAvailabilityStatus.ON_LEAVE, StaffAvailabilityStatus.UNAVAILABLE] },
+    });
+
+    const audit = mocks.auditCreate.mock.calls[0]![0];
+    expect(audit).not.toHaveProperty('actorId');
+    expect(audit.details).toMatchObject({ automatic: true, reason: 'nearest_completion', fromProjectNumber: 'PRJ-2026-00051', fabricationLeadId: leadId });
+
+    const leadNotice = vi.mocked(createAndSendNotification).mock.calls.find(([userId]) => userId === leadId)!;
+    expect(leadNotice[2]).toBe('Auto-assigned as Lead');
+    expect(leadNotice[3]).toContain('because PRJ-2026-00051 reached Quality Check');
+    expect(leadNotice[3]).toContain('Add your assistants in the project.');
+    const engineerNotice = vi.mocked(notifyUsers).mock.calls[0]!;
+    expect(engineerNotice[0]).toEqual(['engineer-1']);
+    expect(engineerNotice[3]).toBe('Lance Zelot was assigned automatically as lead for PRJ-2026-00090 "Railings" (PRJ-2026-00051 reached Quality Check). You can change the team in the project.');
+    expect(vi.mocked(createAndSendNotification).mock.calls.some(([userId]) => userId === 'customer-1')).toBe(true);
+  });
+
+  it('leaves a project that got its lead meanwhile, or a fabricator no longer free, untouched', async () => {
+    mocks.projectFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue(null) });
+    await expect(autoAssignFabricationLead('project-1', leadId, { kind: 'free' })).resolves.toBeNull();
+
+    mocks.projectFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue(waitingRow) });
+    scheduling.assertFabricatorsFree.mockRejectedValueOnce(new Error('still on PRJ-2026-00051'));
+    await expect(autoAssignFabricationLead('project-1', leadId, { kind: 'free' })).resolves.toBeNull();
+
+    mocks.userFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue(null) }); // on leave by now
+    await expect(autoAssignFabricationLead('project-1', leadId, { kind: 'free' })).resolves.toBeNull();
+
+    mocks.userFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue({ _id: leadId, firstName: 'Lance', lastName: 'Zelot' }) });
+    mocks.projectFindOneAndUpdate.mockResolvedValue(null); // an engineer saved a team first
+    await expect(autoAssignFabricationLead('project-1', leadId, { kind: 'free' })).resolves.toBeNull();
+
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+    expect(createAndSendNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateFabricationAssistants (the lead picks assistants)', () => {
+  const leadId = 'eeeeeeeeeeeeeeeeeeeeeeee';
+  const ana = 'ffffffffffffffffffffffff';
+  const ben = 'dddddddddddddddddddddddd';
+  let project: Record<string, any>;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    project = {
+      _id: 'project-1',
+      title: 'Railings',
+      status: ProjectStatus.FABRICATION,
+      fabricationLeadId: { toString: () => leadId },
+      fabricationAssistantIds: [ben],
+      engineerIds: ['engineer-1'],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+    mocks.userFind.mockReturnValue({ select: vi.fn().mockResolvedValue([{ _id: ana }]) });
+    mocks.userFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue({ firstName: 'Lance', lastName: 'Zelot' }) });
+    mocks.auditCreate.mockResolvedValue({});
+  });
+
+  it('lets the lead add and remove assistants, checking only the people joining', async () => {
+    await updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, leadId);
+
+    expect(project.fabricationAssistantIds).toEqual([ana]);
+    expect(project.save).toHaveBeenCalledOnce();
+    expect(scheduling.acquireStaffLock).toHaveBeenCalledTimes(1);
+    expect(scheduling.assertFabricatorsFree).toHaveBeenCalledWith('project-1', [ana]);
+    expect(mocks.auditCreate.mock.calls[0]![0]).toMatchObject({ actorId: leadId, details: { change: 'assistants', added: [ana], removed: [ben] } });
+    const notices = vi.mocked(createAndSendNotification).mock.calls.map(([userId, , title, message]) => [userId, title, message]);
+    expect(notices).toEqual([
+      [ana, 'Fabrication Assignment', 'Lance Zelot added you as an assistant for project "Railings".'],
+      [ben, 'Fabrication Assignment Changed', 'Lance Zelot removed you from the assistants of project "Railings".'],
+    ]);
+    expect(vi.mocked(notifyUsers).mock.calls[0]![0]).toEqual(['engineer-1']);
+    expect(vi.mocked(notifyUsers).mock.calls[0]![5]).toEqual({ excludeUserId: leadId });
+  });
+
+  it('allows only the lead of this project, while it is waiting for payment or in fabrication', async () => {
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, 'cccccccccccccccccccccccc'))
+      .rejects.toMatchObject({ statusCode: 403 });
+    project.status = ProjectStatus.COMPLETED;
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, leadId))
+      .rejects.toThrow('waiting for payment or in fabrication');
+    expect(project.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects the lead as an assistant, unknown staff, and anyone still on another workshop project', async () => {
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [leadId] }, leadId))
+      .rejects.toThrow('cannot also be an assistant');
+    mocks.userFind.mockReturnValue({ select: vi.fn().mockResolvedValue([]) });
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, leadId))
+      .rejects.toThrow('invalid');
+    mocks.userFind.mockReturnValue({ select: vi.fn().mockResolvedValue([{ _id: ben }, { _id: ana }]) });
+    scheduling.assertFabricatorsFree.mockRejectedValueOnce(new Error('Ana Reyes is still on PRJ-2026-00051 (Lead)'));
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ben, ana] }, leadId))
+      .rejects.toThrow('still on PRJ-2026-00051');
+    expect(project.save).not.toHaveBeenCalled();
   });
 });
 
@@ -1400,8 +1548,12 @@ describe('listFabricationStaffWorkload', () => {
     select: vi.fn().mockReturnValue({ sort: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue(rows) }) }),
   });
 
+  const latestUpdate = (projectId: string, status: string) => ({ _id: { projectId, projectItemId: null }, status });
+
   beforeEach(() => {
     vi.resetAllMocks();
+    // Projects without items use their project-level fabrication track.
+    mocks.projectItemFind.mockReturnValue({ select: vi.fn().mockReturnValue({ lean: vi.fn().mockResolvedValue([]) }) });
   });
 
   it('marks each fabricator available, busy, or on leave with the projects they are on', async () => {
@@ -1443,15 +1595,39 @@ describe('listFabricationStaffWorkload', () => {
       { _id: 'p-nodate', projectNumber: 'PRJ-3', status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: 'cy', fabricationAssistantIds: [], deliveryCrewIds: [] },
       { _id: 'p-crew', projectNumber: 'PRJ-4', status: ProjectStatus.FABRICATION, fabricationLeadId: 'x', fabricationAssistantIds: [], deliveryCrewIds: ['dee'] },
     ]));
-    fabUpdateAggregate.mockResolvedValue([{ _id: 'p-soon', status: 'quality_check' }, { _id: 'p-late', status: 'cutting' }]);
+    fabUpdateAggregate.mockResolvedValue([latestUpdate('p-soon', 'quality_check'), latestUpdate('p-late', 'cutting')]);
 
     const staff = await listFabricationStaffWorkload();
 
-    // Free for workshop work (Dee is only on a delivery crew, Eve has nothing), then soonest finish, then no date.
+    // Free for workshop work (Dee is only on a delivery crew, Eve has nothing), then Ben whose
+    // project reached Quality Check, then the busy ones by soonest finish, then no date.
     expect(staff.map((member) => member._id)).toEqual(['dee', 'eve', 'ben', 'ana', 'cy']);
-    expect(staff[2]!.activeProjects[0]).toMatchObject({ currentStage: 'quality_check', stageIndex: 6, stageCount: 8, progressPercent: 75 });
+    expect(staff.map((member) => member.teamStatus)).toEqual(['free', 'free', 'finishing', 'busy', 'busy']);
+    expect(staff[2]!.activeProjects[0]).toMatchObject({ currentStage: 'quality_check', stageIndex: 6, stageCount: 8, progressPercent: 75, nearCompletion: true });
+    expect(staff[3]!.activeProjects[0]).toMatchObject({ currentStage: 'cutting', nearCompletion: false });
     expect(staff[2]!.freeAt).toEqual(new Date('2026-11-22'));
     expect(staff[4]!.freeAt).toBeNull();
+  });
+
+  it('lists the ones nearest completion furthest along first, even with a later target finish', async () => {
+    mocks.userFind.mockReturnValue(leanChain([
+      { _id: 'qc', firstName: 'Ana', lastName: 'QC' },
+      { _id: 'rfd', firstName: 'Ben', lastName: 'Delivery' },
+      { _id: 'weld', firstName: 'Cy', lastName: 'Welding' },
+    ]));
+    const shop = { status: ProjectStatus.FABRICATION, deliveryType: DeliveryType.SHOP_FABRICATED, fabricationAssistantIds: [], deliveryCrewIds: [] };
+    mocks.projectFind.mockReturnValue(leanChain([
+      { _id: 'p-qc', projectNumber: 'PRJ-1', ...shop, fabricationLeadId: 'qc', estimatedCompletionDate: new Date('2026-11-29') },
+      { _id: 'p-rfd', projectNumber: 'PRJ-2', ...shop, fabricationLeadId: 'rfd', estimatedCompletionDate: new Date('2026-12-05') },
+      { _id: 'p-weld', projectNumber: 'PRJ-3', ...shop, fabricationLeadId: 'weld', estimatedCompletionDate: new Date('2026-11-28') },
+    ]));
+    fabUpdateAggregate.mockResolvedValue([
+      latestUpdate('p-qc', 'quality_check'), latestUpdate('p-rfd', 'ready_for_delivery'), latestUpdate('p-weld', 'welding'),
+    ]);
+
+    const staff = await listFabricationStaffWorkload();
+
+    expect(staff.map((member) => [member._id, member.teamStatus])).toEqual([['rfd', 'finishing'], ['qc', 'finishing'], ['weld', 'busy']]);
   });
 
   it('returns an empty list when there is no fabrication staff', async () => {

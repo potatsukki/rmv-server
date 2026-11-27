@@ -10,7 +10,7 @@ import {
 } from '../../utils/constants.js';
 import { VisitReportStatus } from '../../models/VisitReport.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
-import { createAndSendNotification, notifyBookingAgents, notifyRole, notifyRoleExcept } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyBookingAgents, notifyRole, notifyRoleExcept, notifyUsers } from '../notifications/socket.service.js';
 import { formatNotificationDate } from '../../utils/notification-format.js';
 import { generateAndUploadContract, type ContractData } from '../../services/contract.service.js';
 import { generateDownloadUrl, verifyFileExists } from '../uploads/upload.service.js';
@@ -24,6 +24,7 @@ import type {
   AssignEngineersInput,
   ReassignProjectSalesInput,
   AssignFabricationInput,
+  UpdateFabricationAssistantsInput,
   AssignDeliveryCrewInput,
   TransitionProjectInput,
   SignContractInput,
@@ -36,7 +37,8 @@ import type {
   SubmitProjectReviewInput,
   SkipProjectReviewInput,
 } from './projects.validation.js';
-import type { Types } from 'mongoose';
+import type { HydratedDocument, Types } from 'mongoose';
+import type { IProject } from '../../models/Project.js';
 import type { SlotCode } from '../../utils/constants.js';
 import { v4 as uuidv4 } from 'uuid';
 import { PaymentStageStatus } from '../../utils/constants.js';
@@ -69,7 +71,7 @@ import { applyTargetFinishDate } from './target-finish.js';
 import { enterPaymentPending, handleInitialFabricationPaymentVerified, reconcileFabricationStart } from './fabrication-start.js';
 import {
   ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree,
-  deliveryDateUnlockStage, isDeliveryDateUnlocked, manilaToday, readableDay,
+  deliveryDateUnlockStage, fabricationTrackProgress, isDeliveryDateUnlocked, manilaToday, readableDay,
 } from './fabrication-scheduling.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
@@ -2245,19 +2247,7 @@ async function assignFabricationStaffLocked(
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
-
-  if (![ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED, ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION, ProjectStatus.COMPLETED].includes(project.status)) {
-    throw AppError.badRequest('Fabrication team can only be assigned after the blueprint has been approved');
-  }
-
-  const latestBlueprint = await Blueprint.findOne({ projectId }).sort({ version: -1 }).select('status');
-  if (!latestBlueprint) {
-    throw AppError.badRequest('Fabrication team cannot be assigned until a blueprint exists');
-  }
-
-  if (latestBlueprint.status !== 'approved') {
-    throw AppError.badRequest('Fabrication team can only be assigned after the quotation is sent to the customer');
-  }
+  await assertFabricationTeamAssignable(project);
 
   // Verify lead is fabrication staff
   const lead = await User.findOne({
@@ -2279,25 +2269,85 @@ async function assignFabricationStaffLocked(
     }
   }
 
-  // One active project at a time for each lead and assistant.
+  // One project in the workshop at a time for each lead and assistant.
   const fabricatorIds = [input.fabricationLeadId, ...input.fabricationAssistantIds];
-  for (const staffId of [...new Set(fabricatorIds.map((id) => id.toLowerCase()))].sort()) {
-    await acquireStaffLock(
-      locks,
-      { staffId, date: 'all-dates', slot: 'fabricator-team' },
-      actorId,
-      'Another team assignment for this fabricator is being saved right now. Please try again in a moment.',
-    );
-  }
+  await lockFabricators(locks, fabricatorIds, actorId);
   await assertFabricatorsFree(projectId, fabricatorIds);
 
   project.fabricationLeadId = input.fabricationLeadId as unknown as Types.ObjectId;
   project.fabricationAssistantIds = input.fabricationAssistantIds as unknown as Types.ObjectId[];
+  // A person chose this team, so it is no longer the system's pick.
+  project.fabricationAutoAssignedAt = null;
 
   await project.save();
+  return finishFabricationTeamAssignment(project, {
+    actorId,
+    leadId: input.fabricationLeadId,
+    assistantIds: input.fabricationAssistantIds,
+    ip,
+    ua,
+  });
+}
+
+/** Status and quotation checks shared by the engineer's assignment and the system's. */
+async function assertFabricationTeamAssignable(project: { _id: Types.ObjectId; status: ProjectStatus }) {
+  if (![ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED, ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION, ProjectStatus.COMPLETED].includes(project.status)) {
+    throw AppError.badRequest('Fabrication team can only be assigned after the blueprint has been approved');
+  }
+
+  const latestBlueprint = await Blueprint.findOne({ projectId: project._id }).sort({ version: -1 }).select('status');
+  if (!latestBlueprint) {
+    throw AppError.badRequest('Fabrication team cannot be assigned until a blueprint exists');
+  }
+
+  if (latestBlueprint.status !== 'approved') {
+    throw AppError.badRequest('Fabrication team can only be assigned after the quotation is sent to the customer');
+  }
+}
+
+/** Serializes team changes per fabricator, so two saves can't put one person on two workshop projects. */
+async function lockFabricators(locks: SalesDayLocks, staffIds: string[], lockedBy: string) {
+  for (const staffId of [...new Set(staffIds.map((id) => String(id).toLowerCase()))].sort()) {
+    await acquireStaffLock(
+      locks,
+      { staffId, date: 'all-dates', slot: 'fabricator-team' },
+      lockedBy,
+      'Another team assignment for this fabricator is being saved right now. Please try again in a moment.',
+    );
+  }
+}
+
+/** Why the system picked this lead: free now, or their project reached Quality Check first. */
+export type FabricationAutoAssignReason =
+  | { kind: 'free' }
+  | { kind: 'nearest_completion'; fromProject: { _id: string; projectNumber?: string; title?: string; stage?: string | null } };
+
+const stageText = (stage?: string | null) => (stage ? stage.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) : 'Quality Check');
+
+function autoAssignReasonText(reason: FabricationAutoAssignReason) {
+  if (reason.kind === 'free') return 'they were free';
+  const from = reason.fromProject;
+  return `${from.projectNumber || from.title || 'their current project'} reached ${stageText(from.stage)}`;
+}
+
+type ProjectDocument = HydratedDocument<IProject>;
+
+/** After a team is saved: payment phase, fabrication start, work items, audit and notices. */
+async function finishFabricationTeamAssignment(
+  project: ProjectDocument,
+  options: {
+    /** Left out when the system assigned the lead; the audit entry then shows as System. */
+    actorId?: string;
+    leadId: string;
+    assistantIds: string[];
+    automatic?: FabricationAutoAssignReason & { leadName: string };
+    ip?: string;
+    ua?: string;
+  },
+) {
   if ([ProjectStatus.BLUEPRINT, ProjectStatus.APPROVED].includes(project.status)) await enterPaymentPending(project);
 
-  const { project: refreshed } = await reconcileFabricationStart(projectId);
+  const { project: refreshed } = await reconcileFabricationStart(project._id);
   if (refreshed) {
     project.status = refreshed.status;
     project.estimatedCompletionDate = refreshed.estimatedCompletionDate;
@@ -2310,30 +2360,58 @@ async function assignFabricationStaffLocked(
     logger.error(`Failed to seed fabrication items for project ${project._id}`, err);
   }
 
+  const automatic = options.automatic;
   await AuditLog.create({
     action: AuditAction.FABRICATION_ASSIGNED,
-    actorId,
+    ...(options.actorId ? { actorId: options.actorId } : {}),
     targetType: 'project',
     targetId: project._id,
     details: {
-      fabricationLeadId: input.fabricationLeadId,
-      assistantIds: input.fabricationAssistantIds,
+      fabricationLeadId: options.leadId,
+      assistantIds: options.assistantIds,
       fabricationUpdatesUnlocked,
+      ...(automatic ? {
+        automatic: true,
+        reason: automatic.kind,
+        ...(automatic.kind === 'nearest_completion' ? {
+          fromProjectId: automatic.fromProject._id,
+          fromProjectNumber: automatic.fromProject.projectNumber,
+          fromStage: automatic.fromProject.stage,
+        } : {}),
+      } : {}),
     },
-    ipAddress: ip,
-    userAgent: ua,
+    ipAddress: options.ip,
+    userAgent: options.ua,
   });
+
+  const link = `/projects/${project._id}`;
+  const projectLabel = `${project.projectNumber ? `${project.projectNumber} ` : ''}"${project.title}"`;
+  const updatesText = fabricationUpdatesUnlocked
+    ? 'Fabrication updates are now available.'
+    : 'Fabrication updates will unlock after the required customer downpayment or full payment is verified.';
 
   // Notify fabrication staff
   await createAndSendNotification(
-    input.fabricationLeadId,
+    options.leadId,
     NotificationCategory.FABRICATION,
-    'Fabrication Assignment',
-    fabricationUpdatesUnlocked
-      ? `You have been assigned as lead for project "${project.title}". Fabrication updates are now available.`
-      : `You have been assigned as lead for project "${project.title}". Fabrication updates will unlock after the required customer downpayment or full payment is verified.`,
-    `/projects/${project._id}`,
+    automatic ? 'Auto-assigned as Lead' : 'Fabrication Assignment',
+    automatic
+      ? automatic.kind === 'nearest_completion'
+        ? `You were assigned automatically as lead for ${projectLabel}, because ${autoAssignReasonText(automatic)}. Finish that project as usual, then start this one. Add your assistants in the project. ${updatesText}`
+        : `You were assigned automatically as lead for ${projectLabel}. Add your assistants in the project. ${updatesText}`
+      : `You have been assigned as lead for project "${project.title}". ${updatesText}`,
+    link,
   );
+
+  if (automatic) {
+    await notifyUsers(
+      project.engineerIds || [],
+      NotificationCategory.FABRICATION,
+      'Fabrication Team Assigned Automatically',
+      `${automatic.leadName} was assigned automatically as lead for ${projectLabel} (${autoAssignReasonText(automatic)}). You can change the team in the project.`,
+      link,
+    );
+  }
 
   await createAndSendNotification(
     project.customerId.toString(),
@@ -2342,10 +2420,132 @@ async function assignFabricationStaffLocked(
     fabricationUpdatesUnlocked
       ? `The fabrication team has been assigned for "${project.title}". Fabrication can now begin.`
       : `The fabrication team has been assigned for "${project.title}". Work updates will begin after your required downpayment or full payment is verified.`,
-    `/projects/${project._id}`,
+    link,
   );
 
   return project;
+}
+
+/**
+ * The system's own assignment for a paid project waiting for a team: the lead only (the lead adds
+ * assistants). Returns null when the project no longer waits or the fabricator is no longer free,
+ * so a person's assignment made a moment earlier always wins.
+ */
+export async function autoAssignFabricationLead(projectId: string, leadId: string, reason: FabricationAutoAssignReason) {
+  return withSalesDayLocks(async (locks) => {
+    // SlotLock needs a user id; the fabricator being assigned holds their own lock.
+    await lockFabricators(locks, [leadId], leadId);
+
+    const waiting = await Project.findOne({ _id: projectId, status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: null })
+      .select('_id status');
+    if (!waiting) return null;
+    await assertFabricationTeamAssignable(waiting);
+
+    const lead = await User.findOne({
+      _id: leadId,
+      roles: Role.FABRICATION_STAFF,
+      isActive: true,
+      availabilityStatus: { $nin: [StaffAvailabilityStatus.ON_LEAVE, StaffAvailabilityStatus.UNAVAILABLE] },
+    }).select('firstName lastName');
+    if (!lead) return null;
+    try {
+      await assertFabricatorsFree(projectId, [leadId]);
+    } catch {
+      return null;
+    }
+
+    const project = await Project.findOneAndUpdate(
+      { _id: projectId, status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: null },
+      { $set: { fabricationLeadId: leadId, fabricationAssistantIds: [], fabricationAutoAssignedAt: new Date() } },
+      { returnDocument: 'after' },
+    );
+    if (!project) return null;
+    const leadName = `${lead.firstName ?? ''} ${lead.lastName ?? ''}`.trim() || 'A fabricator';
+    return finishFabricationTeamAssignment(project, { leadId, assistantIds: [], automatic: { ...reason, leadName } });
+  });
+}
+
+/**
+ * The lead fabricator picks the assistants of their own project (checking adds, unchecking
+ * removes). Someone joining must not be on another project still in the workshop.
+ */
+export async function updateFabricationAssistants(
+  projectId: string,
+  input: UpdateFabricationAssistantsInput,
+  actorId: string,
+  ip?: string,
+  ua?: string,
+) {
+  return withSalesDayLocks(async (locks) => {
+    const project = await Project.findById(projectId);
+    if (!project) throw AppError.notFound('Project not found');
+    if (!project.fabricationLeadId || String(project.fabricationLeadId) !== actorId) {
+      throw AppError.forbidden('Only the lead fabricator of this project can choose the assistants');
+    }
+    if (![ProjectStatus.PAYMENT_PENDING, ProjectStatus.FABRICATION].includes(project.status)) {
+      throw AppError.badRequest('Assistants can be changed while the project is waiting for payment or in fabrication');
+    }
+
+    const assistantIds = [...new Set(input.fabricationAssistantIds.map(String))];
+    if (assistantIds.includes(actorId)) throw AppError.badRequest('The lead cannot also be an assistant');
+    if (assistantIds.length) {
+      const valid = await User.find({ _id: { $in: assistantIds }, roles: Role.FABRICATION_STAFF, isActive: true }).select('_id');
+      if (valid.length !== assistantIds.length) throw AppError.badRequest('One or more assistant IDs are invalid');
+    }
+
+    const previous = (project.fabricationAssistantIds || []).map(String);
+    const added = assistantIds.filter((id) => !previous.includes(id));
+    const removed = previous.filter((id) => !assistantIds.includes(id));
+    if (!added.length && !removed.length) return project;
+
+    await lockFabricators(locks, added, actorId);
+    await assertFabricatorsFree(projectId, added);
+
+    project.fabricationAssistantIds = assistantIds as unknown as Types.ObjectId[];
+    await project.save();
+
+    await AuditLog.create({
+      action: AuditAction.FABRICATION_ASSIGNED,
+      actorId,
+      targetType: 'project',
+      targetId: project._id,
+      details: { change: 'assistants', fabricationLeadId: actorId, assistantIds, added, removed },
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    const lead = await User.findOne({ _id: actorId }).select('firstName lastName');
+    const leadName = `${lead?.firstName ?? ''} ${lead?.lastName ?? ''}`.trim() || 'The lead fabricator';
+    const link = `/projects/${project._id}`;
+    for (const assistantId of added) {
+      await createAndSendNotification(
+        assistantId,
+        NotificationCategory.FABRICATION,
+        'Fabrication Assignment',
+        `${leadName} added you as an assistant for project "${project.title}".`,
+        link,
+      );
+    }
+    for (const assistantId of removed) {
+      await createAndSendNotification(
+        assistantId,
+        NotificationCategory.FABRICATION,
+        'Fabrication Assignment Changed',
+        `${leadName} removed you from the assistants of project "${project.title}".`,
+        link,
+      );
+    }
+    await notifyUsers(
+      project.engineerIds || [],
+      NotificationCategory.FABRICATION,
+      'Fabrication Assistants Updated',
+      `${leadName} updated the assistants of "${project.title}" (${assistantIds.length} assistant${assistantIds.length === 1 ? '' : 's'}).`,
+      link,
+      { excludeUserId: actorId },
+    );
+
+    return project;
+  });
 }
 
 // ── Fabrication staff workload (shown while the engineer picks a team or a delivery crew) ──
@@ -2354,10 +2554,15 @@ const FABRICATION_WORKLOAD_STATUSES = ACTIVE_FABRICATION_STATUSES;
 
 export type FabricationWorkloadStatus = 'available' | 'busy' | 'on_leave' | 'unavailable';
 export type FabricationWorkloadRole = 'lead' | 'assistant' | 'delivery_crew';
+/**
+ * Workshop load from lead / assistant work only: free (no team project), finishing (every team
+ * project reached Quality Check, so they can take the next project) or busy.
+ */
+export type FabricationTeamStatus = 'free' | 'finishing' | 'busy';
 
 /**
- * Every active fabrication staff member with the projects they are currently on. Display only:
- * a busy person can still be assigned, the engineer just sees the load first.
+ * Every active fabrication staff member with the projects they are currently on, listed in the
+ * order the next project should go to them: free first, then the ones nearest completion.
  */
 export async function listFabricationStaffWorkload() {
   const staff = await User.find({ roles: Role.FABRICATION_STAFF, isActive: true })
@@ -2379,15 +2584,8 @@ export async function listFabricationStaffWorkload() {
       .lean()
     : [];
 
-  // Latest fabrication stage of each active project, to show who finishes soonest.
-  const latestStages = projects.length
-    ? await FabricationUpdate.aggregate<{ _id: unknown; status: string }>([
-      { $match: { projectId: { $in: projects.map((project) => project._id) } } },
-      { $sort: { createdAt: -1 } },
-      { $group: { _id: '$projectId', status: { $first: '$status' } } },
-    ])
-    : [];
-  const stageByProject = new Map((latestStages || []).map((row) => [String(row._id), row.status]));
+  // Stage of each active project's slowest part, and whether all of it reached Quality Check.
+  const progressByProject = await fabricationTrackProgress(projects);
 
   const members = staff.map((member) => {
     const memberId = member._id.toString();
@@ -2399,10 +2597,8 @@ export async function listFabricationStaffWorkload() {
       if (includesMember(project.deliveryCrewIds)) roles.push('delivery_crew');
       if (!roles.length) return [];
       // Before fabrication starts (payment pending) nothing is done yet.
-      const progress = fabricationProgress(
-        project.status === ProjectStatus.FABRICATION ? stageByProject.get(String(project._id)) : undefined,
-        project.deliveryType,
-      );
+      const { nearCompletion, ...progress } = progressByProject.get(String(project._id))
+        ?? { nearCompletion: false, ...fabricationProgress(undefined, project.deliveryType) };
       return [{
         _id: project._id.toString(),
         projectNumber: project.projectNumber,
@@ -2410,11 +2606,15 @@ export async function listFabricationStaffWorkload() {
         status: project.status,
         roles,
         ...progress,
+        nearCompletion,
         estimatedCompletionDate: project.estimatedCompletionDate ?? null,
       }];
     });
     // When this person is free of workshop work: their lead / assistant projects finishing.
     const teamProjects = activeProjects.filter((project) => project.roles.some((role) => role !== 'delivery_crew'));
+    const teamStatus: FabricationTeamStatus = !teamProjects.length
+      ? 'free'
+      : teamProjects.every((project) => project.nearCompletion) ? 'finishing' : 'busy';
     const finishDates = teamProjects.map((project) => project.estimatedCompletionDate);
     const freeAt = teamProjects.length && finishDates.every(Boolean)
       ? new Date(Math.max(...finishDates.map((date) => new Date(date!).getTime())))
@@ -2450,23 +2650,29 @@ export async function listFabricationStaffWorkload() {
       freeAt,
       lowestProgressPercent: lowestProgress,
       hasTeamProject: teamProjects.length > 0,
+      teamStatus,
     };
   });
 
-  // Free for workshop work first, then the busy ones who finish soonest (by target finish, then
-  // furthest along), and people on leave / unavailable last. Names stay in order within a group.
-  const group = (member: typeof members[number]) => (
-    member.workloadStatus === 'on_leave' || member.workloadStatus === 'unavailable' ? 2 : member.hasTeamProject ? 1 : 0
-  );
+  // Free for workshop work first; then the ones whose projects all reached Quality Check, nearest
+  // completion first (furthest along, then earliest target finish); then the busy ones who finish
+  // soonest (target finish, then furthest along); people on leave / unavailable last. Names stay in
+  // order within a group.
+  const group = (member: typeof members[number]) => {
+    if (member.workloadStatus === 'on_leave' || member.workloadStatus === 'unavailable') return 3;
+    return member.teamStatus === 'free' ? 0 : member.teamStatus === 'finishing' ? 1 : 2;
+  };
+  const freeTime = (member: typeof members[number]) => (member.freeAt ? member.freeAt.getTime() : Number.POSITIVE_INFINITY);
   return members
     .map((member, index) => ({ member, index }))
     .sort((a, b) => {
       const byGroup = group(a.member) - group(b.member);
-      if (byGroup || group(a.member) !== 1) return byGroup || a.index - b.index;
-      const aFree = a.member.freeAt ? a.member.freeAt.getTime() : Number.POSITIVE_INFINITY;
-      const bFree = b.member.freeAt ? b.member.freeAt.getTime() : Number.POSITIVE_INFINITY;
-      if (aFree !== bFree) return aFree - bFree;
-      return (b.member.lowestProgressPercent - a.member.lowestProgressPercent) || a.index - b.index;
+      if (byGroup) return byGroup;
+      const byProgress = b.member.lowestProgressPercent - a.member.lowestProgressPercent;
+      const byFinish = freeTime(a.member) - freeTime(b.member);
+      if (group(a.member) === 1) return byProgress || byFinish || a.index - b.index;
+      if (group(a.member) === 2) return byFinish || byProgress || a.index - b.index;
+      return a.index - b.index;
     })
     .map(({ member }) => member);
 }
