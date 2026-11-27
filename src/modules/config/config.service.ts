@@ -35,7 +35,8 @@ const DAHLIA_EXT_PLUS_CODE_COORDS = {
 // and the final payment before Done, matching the fabrication payment gates.
 const INSTALLMENT_STAGE_LABELS = ['Down Payment', 'During Installation', 'Upon Completion'];
 const INSTALLMENT_STAGE_DESCRIPTIONS = ['Initial payment before fabrication', 'Due before installation starts', 'Due before the project is marked done'];
-// `assembly` maps to Welding / Assembly for on-site work, the step right before Installation.
+// `assembly` maps to Welding / Assembly for on-site work (the 2nd payment is then due; it is
+// required before Installation, which comes after Quality Check).
 const PAYMENT_ACTIVATION_MAP = [null, 'assembly', 'quality_check'];
 const PAYMENT_HEADSUP_MAP = [null, 'material_prep', 'finishing'];
 

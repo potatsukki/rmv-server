@@ -293,7 +293,7 @@ describe('createFabricationUpdate', () => {
   it.each([
     [null, FabricationStatus.FABRICATION],
     [FabricationStatus.FABRICATION, FabricationStatus.WELDING_ASSEMBLY],
-    [FabricationStatus.INSTALLATION, FabricationStatus.FINISHING],
+    [FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.FINISHING],
     [FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK],
   ])('lets a fully paid on-site project advance from %s to %s before confirmation', async (currentStatus, targetStatus) => {
     setUpOnSiteProject(currentStatus);
@@ -319,7 +319,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('keeps an on-site project out of Installation until the customer confirms the schedule', async () => {
-    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
 
     await expect(createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
@@ -333,7 +333,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('moves an on-site project to Installation once the customer confirmed the schedule', async () => {
-    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, true);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
     mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
     await createFabricationUpdate(
@@ -346,7 +346,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('requires a delivery / installation crew before Installation, but not for workshop stages', async () => {
-    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, false, false);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, false, false);
     await expect(createFabricationUpdate(
       { projectId: 'project-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
       'lead-1',
@@ -389,7 +389,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('also requires the delivery date, not just the crew', async () => {
-    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
     mockProjectFindById.mockResolvedValue({
       _id: 'project-1', customerId: 'customer-1', title: 'Installation Project', status: ProjectStatus.FABRICATION,
       deliveryType: DeliveryType.ON_SITE_INSTALLATION, fabricationLeadId: { toString: () => 'lead-1' },
@@ -422,7 +422,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('gates an item on the combined project plan when the item has no plan of its own', async () => {
-    setUpOnSiteProject(FabricationStatus.FINISHING);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
     mockProjectItemFindOne.mockResolvedValue({
       _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
     });
@@ -435,7 +435,7 @@ describe('createFabricationUpdate', () => {
       ] });
 
     await expect(createFabricationUpdate(
-      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.QUALITY_CHECK, notes: 'Checking.' },
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.INSTALLATION, notes: 'Installing.' },
       'lead-1',
       [Role.FABRICATION_STAFF],
     )).rejects.toMatchObject({ code: ErrorCode.FABRICATION_PAYMENT_GATE });
@@ -443,7 +443,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('requires the selected item to be confirmed before Installation even if its parent is confirmed', async () => {
-    setUpOnSiteProject(FabricationStatus.WELDING_ASSEMBLY, true);
+    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
     mockProjectItemFindOne.mockResolvedValue({
       _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: null,
     });
@@ -474,7 +474,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('no longer asks for confirmation again at Done once the on-site work is installed', async () => {
-    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK);
+    setUpOnSiteProject(FabricationStatus.INSTALLATION);
     mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
     await createFabricationUpdate(
@@ -487,7 +487,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it('lets a fully paid on-site project finish once installation is confirmed', async () => {
-    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+    setUpOnSiteProject(FabricationStatus.INSTALLATION, true);
     mockUserFindById.mockResolvedValue({ email: 'customer@example.com' });
 
     await createFabricationUpdate(
@@ -542,7 +542,7 @@ describe('createFabricationUpdate', () => {
 
     expect(result.confirmationGateStatus).toBe(FabricationStatus.INSTALLATION);
     expect(result.currentStatus).toBe(FabricationStatus.QUEUED);
-    expect(result.lifecycleStatuses).toEqual(['fabrication', 'welding_assembly', 'installation', 'finishing', 'quality_check', 'done']);
+    expect(result.lifecycleStatuses).toEqual(['fabrication', 'welding_assembly', 'finishing', 'quality_check', 'installation', 'done']);
     expect(result.allowedTransitions).toEqual([FabricationStatus.FABRICATION]);
     expect(result.paymentGate.allPaid).toBe(true);
     expect(result.paymentGate.stageGates[FabricationStatus.FABRICATION].blocked).toBe(false);
@@ -585,7 +585,7 @@ describe('createFabricationUpdate', () => {
   });
 
   it.each([0, 1])('completes an on-site item with %s other unfinished items', async (remainingItems) => {
-    setUpOnSiteProject(FabricationStatus.QUALITY_CHECK, true);
+    setUpOnSiteProject(FabricationStatus.INSTALLATION, true);
     mockProjectItemFindOne.mockResolvedValue({ _id: 'item-1', status: ProjectStatus.FABRICATION, installationConfirmedAt: new Date() });
     mockProjectItemCount.mockResolvedValue(remainingItems);
     await createFabricationUpdate(
@@ -601,9 +601,10 @@ describe('createFabricationUpdate', () => {
   // for shop work), and the final payment gates Done.
   it.each([
     [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.FABRICATION, FabricationStatus.WELDING_ASSEMBLY, 1, false, 1],
-    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.INSTALLATION, 1, true, 2],
-    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK, 2, false, 2],
-    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.QUALITY_CHECK, FabricationStatus.DONE, 2, true, 3],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.WELDING_ASSEMBLY, FabricationStatus.FINISHING, 1, false, 1],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.FINISHING, FabricationStatus.QUALITY_CHECK, 1, false, 1],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.QUALITY_CHECK, FabricationStatus.INSTALLATION, 1, true, 2],
+    [DeliveryType.ON_SITE_INSTALLATION, FabricationStatus.INSTALLATION, FabricationStatus.DONE, 2, true, 3],
     [DeliveryType.SHOP_FABRICATED, FabricationStatus.CUTTING, FabricationStatus.WELDING, 1, false, 1],
     [DeliveryType.SHOP_FABRICATED, FabricationStatus.QUALITY_CHECK, FabricationStatus.READY_FOR_DELIVERY, 1, true, 2],
     [DeliveryType.SHOP_FABRICATED, FabricationStatus.READY_FOR_DELIVERY, FabricationStatus.DONE, 2, true, 3],
@@ -640,8 +641,9 @@ describe('existing on-site fabrication tracking', () => {
     [FabricationStatus.MEASUREMENT_LAYOUT, 'fabrication', ['welding_assembly']],
     [FabricationStatus.MATERIAL_PREP, 'fabrication', ['welding_assembly']],
     [FabricationStatus.FABRICATION_INSTALLATION, 'fabrication', ['welding_assembly']],
-    [FabricationStatus.WELDING_ASSEMBLY, 'welding_assembly', ['installation']],
+    [FabricationStatus.WELDING_ASSEMBLY, 'welding_assembly', ['finishing']],
     [FabricationStatus.FINISHING, 'finishing', ['quality_check']],
+    [FabricationStatus.QUALITY_CHECK, 'quality_check', ['installation']],
     [FabricationStatus.TURNOVER, 'done', []],
   ])('maps stored %s in status, history, and detail without rewriting it', async (oldStatus, expectedStatus, next) => {
     const record = { _id: 'update-1', projectId: 'project-1', status: oldStatus, notes: 'Original notes', photoKeys: ['proof.png'], createdAt: new Date('2026-01-01'), updatedBy: 'lead-1' };
@@ -665,8 +667,8 @@ describe('existing on-site fabrication tracking', () => {
     mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockReturnValue({ populate: vi.fn().mockResolvedValue({ status: FabricationStatus.INSTALLATION }) }) });
     mockPaymentPlanFindOne.mockResolvedValue(null);
     const result = await getLatestFabricationStatus('project-1', 'actor-1', [role]);
-    expect(result.lifecycleStatuses).toEqual(['fabrication', 'welding_assembly', 'installation', 'finishing', 'quality_check', 'done']);
-    expect(result.allowedTransitions).toEqual(['finishing']);
+    expect(result.lifecycleStatuses).toEqual(['fabrication', 'welding_assembly', 'finishing', 'quality_check', 'installation', 'done']);
+    expect(result.allowedTransitions).toEqual(['done']);
   });
 
   it('lets a cashier read the updates timeline of any project (QA: "Failed to load updates")', async () => {

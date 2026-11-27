@@ -60,7 +60,7 @@ export const CREW_GATED_STATUSES: FabricationStatus[] = [
 /** Only installation stages need RMV's own crew; Ready for Delivery goes out with a third-party courier. */
 /**
  * The stage that waits for the customer's confirmation: Installation for on-site work (they confirm
- * the installation schedule), Done for a delivery (they confirm the order was received) and for
+ * the installation schedule; Installation follows Quality Check, so the banner only shows there), Done for a delivery (they confirm the order was received) and for
  * legacy projects without a delivery type.
  */
 export function customerConfirmationGateStatus(deliveryType?: string): FabricationStatus {
