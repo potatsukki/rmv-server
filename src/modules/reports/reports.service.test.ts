@@ -61,6 +61,7 @@ import {
   acknowledgeLifecycleMismatchHotspot,
   getLifecycleMismatchHotspots,
   getDashboardSummary,
+  todayScheduleFilter,
 } from './reports.service.js';
 import { buildAppointmentStatusGroupFilter } from '../appointments/appointment-status-groups.js';
 
@@ -296,6 +297,41 @@ describe('dashboard pending payment projects', () => {
       const summary = await getDashboardSummary('cashier-1', ['cashier']);
       expect(summary.pendingPayments).toBe(4);
       expect(dashboardMocks.paymentCount).toHaveBeenCalledWith({ status: 'proof_submitted' });
+    });
+  });
+
+  // User decision 2026-11-27: finished appointments (Completed, Customer Declined, No Show,
+  // cancelled) are not counted in Today's Schedule; Sales Staff count only their own.
+  describe("today's schedule", () => {
+    const notFinished = [buildAppointmentStatusGroupFilter('requested'), buildAppointmentStatusGroupFilter('confirmed')];
+
+    it('uses the Manila date and only appointments still to happen or under way', () => {
+      expect(todayScheduleFilter('2026-11-27')).toEqual({ date: '2026-11-27', $or: notFinished });
+      const statuses = JSON.stringify(notFinished);
+      for (const finished of ['completed', 'ready_for_ocular', 'cancelled', 'no_show']) {
+        expect(statuses).not.toContain(`"${finished}"`);
+      }
+      for (const ongoing of ['requested', 'confirmed', 'on_the_way', 'in_progress']) {
+        expect(statuses).toContain(`"${ongoing}"`);
+      }
+    });
+
+    it('counts only the sales staff own appointments, and the whole operation for agent and admin', () => {
+      expect(todayScheduleFilter('2026-11-27', 'sales-1', ['sales_staff'])).toMatchObject({ salesStaffId: 'sales-1' });
+      expect(todayScheduleFilter('2026-11-27', 'agent-1', ['appointment_agent'])).not.toHaveProperty('salesStaffId');
+      expect(todayScheduleFilter('2026-11-27', 'admin-1', ['admin', 'sales_staff'])).not.toHaveProperty('salesStaffId');
+    });
+
+    it('asks the database with that filter for the sales staff dashboard', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      // 7:30 AM Manila on Nov 27 is still Nov 26 in UTC.
+      vi.setSystemTime(new Date('2026-11-26T23:30:00Z'));
+      try {
+        await getDashboardSummary('sales-1', ['sales_staff']);
+        expect(dashboardMocks.appointmentCount).toHaveBeenCalledWith(todayScheduleFilter('2026-11-27', 'sales-1', ['sales_staff']));
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
