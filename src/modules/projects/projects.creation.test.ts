@@ -1267,7 +1267,7 @@ describe('assignDeliveryCrew', () => {
   it('keeps the date locked until fabrication reaches the unlock stage', async () => {
     scheduling.isDeliveryDateUnlocked.mockResolvedValue(false);
     await expect(assignDeliveryCrew('project-1', { deliveryCrewIds: crewIds, deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]))
-      .rejects.toThrow('opens once fabrication reaches Welding / Assembly');
+      .rejects.toThrow('opens once fabrication reaches Quality Check');
     expect(project.save).not.toHaveBeenCalled();
 
     project.deliveryType = DeliveryType.SHOP_FABRICATED;

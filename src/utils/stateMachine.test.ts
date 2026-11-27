@@ -132,7 +132,8 @@ describe('delivery-type fabrication lifecycles', () => {
 
   it('enforces only the six on-site stages in order, including the first update', () => {
     const machine = getFabricationStateMachine(DeliveryType.ON_SITE_INSTALLATION);
-    const stages = ['fabrication', 'welding_assembly', 'installation', 'finishing', 'quality_check', 'done'] as FabricationStatus[];
+    // Installation comes after Quality Check (user decision 2026-11-27).
+    const stages = ['fabrication', 'welding_assembly', 'finishing', 'quality_check', 'installation', 'done'] as FabricationStatus[];
     expect(machine.getAllowed(FabricationStatus.QUEUED)).toEqual([stages[0]]);
     for (const [index, stage] of stages.entries()) {
       expect(machine.getAllowed(stage)).toEqual(stages.slice(index + 1, index + 2));

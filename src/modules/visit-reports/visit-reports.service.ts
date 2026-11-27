@@ -25,7 +25,7 @@ import { synchronizeConsultationAttendanceByTime } from '../appointments/consult
 import type { ICustomerSiteDetails } from '../../models/Appointment.js';
 import type { UserAddressInput } from '../../utils/userAddresses.js';
 import { normalizeUserAddress, requirePinnedAddress } from '../../utils/userAddresses.js';
-import { visitReportStatusCondition } from './visit-reports.list-policy.js';
+import { normalizeVisitReportStage, visitReportStageCondition, visitReportStatusCondition } from './visit-reports.list-policy.js';
 import { syncAppointmentSalesNotes } from '../../services/sales-notes.service.js';
 import { cleanSalesNotes } from '../../utils/salesNotes.js';
 import { generateProjectNumber } from '../../utils/projectNumber.js';
@@ -1546,13 +1546,29 @@ export async function getByAppointment(appointmentId: string) {
 
 interface VisitReportListQuery {
   status?: string;
+  /** "appointment" (before Create Project) or "project" (after); omitted = every report. */
+  stage?: string;
   page?: string;
   limit?: string;
 }
 
+/** Narrows a list filter to one stage; a project counts once it is past Create Project (not draft). */
+async function withStageFilter(filter: Record<string, unknown>, stageValue?: string) {
+  const stage = normalizeVisitReportStage(stageValue);
+  if (!stage) return filter;
+  const createdProjects = await Project.find({ status: { $ne: ProjectStatus.DRAFT } })
+    .select('_id visitReportId').lean();
+  const condition = visitReportStageCondition(
+    stage,
+    createdProjects.map((project) => project._id),
+    createdProjects.map((project) => project.visitReportId).filter(Boolean),
+  );
+  return { $and: [filter, condition] };
+}
+
 export async function listForSalesStaff(salesStaffId: string, query: VisitReportListQuery) {
   const filter = await buildSalesStaffReportFilter(salesStaffId, query.status);
-  return listVisitReportsMatching(filter, query);
+  return listVisitReportsMatching(await withStageFilter(filter, query.stage), query);
 }
 
 export async function listForFabricationStaff(fabricatorId: string, query: VisitReportListQuery) {
@@ -1657,15 +1673,17 @@ export async function listSubmitted(query: {
 
 export async function listAll(query: {
   status?: string;
+  stage?: string;
   salesStaffId?: string;
   page?: string;
   limit?: string;
 }) {
   const page = parseInt(query.page || '1');
   const limit = Math.min(parseInt(query.limit || '20'), 100);
-  const filter: Record<string, unknown> = { ...(await excludeCancelledDrafts()) };
-  if (query.status) filter.status = query.status;
-  if (query.salesStaffId) filter.salesStaffId = query.salesStaffId;
+  const baseFilter: Record<string, unknown> = { ...(await excludeCancelledDrafts()) };
+  if (query.status) baseFilter.status = query.status;
+  if (query.salesStaffId) baseFilter.salesStaffId = query.salesStaffId;
+  const filter = await withStageFilter(baseFilter, query.stage);
 
   const [reports, total] = await Promise.all([
     VisitReport.find(filter)

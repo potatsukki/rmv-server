@@ -2,7 +2,7 @@ import { format, parse } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
 import { FabricationUpdate, Holiday, Project, User } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
-import { DeliveryType, FabricationStatus, ProjectStatus } from '../../utils/constants.js';
+import { FabricationStatus, ProjectStatus } from '../../utils/constants.js';
 import { fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
 
 const TZ = 'Asia/Manila';
@@ -102,14 +102,12 @@ const STAGE_LABELS: Partial<Record<FabricationStatus, string>> = {
 };
 
 /**
- * The stage that opens the delivery / installation date: the last workshop stage before the work
- * leaves the shop (on-site: Welding / Assembly before Installation; shop: Quality Check before
- * Ready for Delivery).
+ * The stage that opens the delivery / installation date: Quality Check, the last workshop stage
+ * before the work leaves the shop (on-site: before Installation; shop: before Ready for Delivery).
+ * Before it, neither the date nor the customer's confirmation banner is shown.
  */
-export function deliveryDateUnlockStage(deliveryType?: string) {
-  const stage = deliveryType === DeliveryType.ON_SITE_INSTALLATION
-    ? FabricationStatus.WELDING_ASSEMBLY
-    : FabricationStatus.QUALITY_CHECK;
+export function deliveryDateUnlockStage(_deliveryType?: string) {
+  const stage = FabricationStatus.QUALITY_CHECK;
   return { stage, label: STAGE_LABELS[stage] ?? stage };
 }
 

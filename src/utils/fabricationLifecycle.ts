@@ -1,11 +1,13 @@
 import { DeliveryType, FabricationStatus } from './constants.js';
 
+// Installation is the last workshop-to-site step: the work is finished and checked in the shop
+// first, then installed (user decision 2026-11-27, QA "pa-ayos").
 export const ON_SITE_FABRICATION_STAGES = [
   FabricationStatus.FABRICATION,
   FabricationStatus.WELDING_ASSEMBLY,
-  FabricationStatus.INSTALLATION,
   FabricationStatus.FINISHING,
   FabricationStatus.QUALITY_CHECK,
+  FabricationStatus.INSTALLATION,
   FabricationStatus.DONE,
 ];
 
