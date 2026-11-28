@@ -1274,13 +1274,17 @@ async function reassignAppointmentSalesLocked(
   const reference = await describeAppointmentForNotification(appointment);
   const when = formatNotificationDate(appointment.date, appointment.slotCode);
   const customerRef = [appointment.appointmentNumber, when].filter(Boolean).join(' on ');
+  // An ocular visit says so in its title (2026-11-28): "Ocular Visit Assigned", like Schedule Ocular.
+  const isOcular = appointment.type === AppointmentType.OCULAR;
   await createAndSendNotification(
     input.salesStaffId,
     NotificationCategory.APPOINTMENT,
-    isNewAssignment ? 'New Appointment Assigned' : 'Appointment Reassigned',
-    confirmsOnAssignment
-      ? `You have been assigned to ${reference}. It is now confirmed on your schedule.`
-      : `You were assigned to ${reference}.`,
+    isOcular ? 'Ocular Visit Assigned' : isNewAssignment ? 'New Appointment Assigned' : 'Appointment Reassigned',
+    isOcular
+      ? `You were assigned to the ocular visit ${reference}.`
+      : confirmsOnAssignment
+        ? `You have been assigned to ${reference}. It is now confirmed on your schedule.`
+        : `You were assigned to ${reference}.`,
     `/appointments/${appointment._id}`,
   );
 
@@ -2855,6 +2859,17 @@ async function requestRescheduleLocked(
       `/appointments/${appointment._id}`,
     );
   }
+  // The agent who booked it hears about a reschedule made by someone else (Admin or another agent,
+  // 2026-11-28); it shows under their Reschedule filter. Never the person who rescheduled.
+  const rescheduledBy = fullName(await User.findById(actorId).select('firstName lastName').lean()) || 'the appointment team';
+  await notifyBookingAgents(
+    appointment,
+    NotificationCategory.APPOINTMENT,
+    'Appointment Rescheduled',
+    `${appointment.appointmentNumber || 'An appointment'} was rescheduled from ${oldDate} at ${formatSlotTime(oldSlot)} to ${newSlotLabel} by ${rescheduledBy}. Reason: ${input.reason}`,
+    `/appointments/${appointment._id}`,
+    actorId,
+  );
 
   return appointment;
 }

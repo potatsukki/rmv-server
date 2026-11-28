@@ -60,7 +60,11 @@ vi.mock('../../models/index.js', () => ({
     create: mockAppointmentCreate,
     countDocuments: mockAppointmentCountDocuments,
   },
-  SlotLock: { deleteOne: vi.fn().mockResolvedValue(undefined), create: vi.fn().mockResolvedValue({}) },
+  SlotLock: {
+    deleteOne: vi.fn().mockResolvedValue(undefined),
+    create: vi.fn().mockResolvedValue({}),
+    updateOne: vi.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
+  },
   User: {
     find: mockUserFind,
     findOne: mockUserFindOne,
@@ -82,9 +86,9 @@ vi.mock('../../models/index.js', () => ({
   BlockedSlot: {
     exists: mockBlockedSlotExists,
   },
-  VisitReport: {},
+  VisitReport: { updateMany: vi.fn().mockResolvedValue({ modifiedCount: 0 }) },
   VisitReportStatus: {},
-  Project: { findOne: mockProjectFindOne },
+  Project: { findOne: mockProjectFindOne, updateMany: vi.fn().mockResolvedValue({ modifiedCount: 0 }) },
   AppointmentQueueCounter: {
     findOneAndUpdate: mockQueueCounterFindOneAndUpdate,
   },
@@ -161,7 +165,7 @@ import {
   processAutomaticConsultationNoShows,
   AUTO_NO_SHOW_NOTE,
 } from './appointments.service.js';
-import { notifyUsers } from '../notifications/socket.service.js';
+import { createAndSendNotification, notifyBookingAgents, notifyUsers } from '../notifications/socket.service.js';
 import {
   AppointmentAttendanceStatus,
   AppointmentStatus,
@@ -184,6 +188,7 @@ function createAppointment(overrides: Record<string, unknown> = {}) {
     rescheduleCount: 1,
     maxReschedules: 3,
     date: '2026-08-15',
+    slotCode: '10:00',
     rescheduleReason: 'old reason',
     save: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -327,6 +332,27 @@ describe('reassignAppointmentSales', () => {
     expect(sendAppointmentConfirmedEmail).toHaveBeenCalledExactlyOnceWith('customer@example.test', {
       date: '2026-08-15', time: '9:00 AM', type: 'Office Consultation',
     });
+    // An office consultation keeps its title.
+    expect(createAndSendNotification).toHaveBeenCalledWith(
+      'sales-1', 'appointment', 'New Appointment Assigned', expect.stringContaining('It is now confirmed on your schedule.'), '/appointments/appointment-1',
+    );
+  });
+
+  it('titles an ocular visit handed to other sales staff "Ocular Visit Assigned" (2026-11-28)', async () => {
+    const appointment = createAppointment({
+      type: AppointmentType.OCULAR,
+      status: AppointmentStatus.CONFIRMED,
+      slotCode: '09:00',
+      salesStaffId: { toString: () => 'sales-0' },
+    });
+    mockAppointmentFindById.mockResolvedValue(appointment);
+    mockSalesStaffLookup();
+
+    await reassignAppointmentSales('appointment-1', { salesStaffId: 'sales-1', reason: 'Transfer' }, 'agent-1', [Role.APPOINTMENT_AGENT]);
+
+    const notice = vi.mocked(createAndSendNotification).mock.calls.find((call) => call[0] === 'sales-1')!;
+    expect(notice.slice(1, 3)).toEqual(['appointment', 'Ocular Visit Assigned']);
+    expect(notice[3]).toMatch(/^You were assigned to the ocular visit /);
   });
 
   it('confirms an older assigned appointment when it is transferred', async () => {
@@ -1173,6 +1199,39 @@ describe('requestReschedule', () => {
     expect(result.salesStaffId).toEqual({ toString: expect.any(Function) });
     expect(mockAuditCreate).toHaveBeenCalledWith(
       expect.objectContaining({ action: AuditAction.APPOINTMENT_RESCHEDULED, actorId: 'admin-1' }),
+    );
+  });
+
+  it('tells the booking agent when someone else reschedules, never the person who rescheduled', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const appointment = createAppointment({
+      status: AppointmentStatus.CONFIRMED,
+      type: AppointmentType.OFFICE,
+      appointmentNumber: 'APT-20260815-0001',
+      salesStaffId: undefined,
+    });
+    mockAppointmentFindById.mockResolvedValueOnce(appointment);
+    mockAvailableSlot();
+    mockAuditCreate.mockResolvedValueOnce({});
+    mockUserFindById.mockReturnValueOnce({
+      select: () => ({ lean: async () => ({ firstName: 'Alice', lastName: 'Admin' }) }),
+    });
+
+    await requestReschedule(
+      'appointment-1',
+      { reason: 'Staff conflict', newDate: '2026-09-01', newSlotCode: '09:00' },
+      'admin-1',
+      [Role.ADMIN],
+    );
+
+    expect(notifyBookingAgents).toHaveBeenCalledExactlyOnceWith(
+      appointment,
+      'appointment',
+      'Appointment Rescheduled',
+      expect.stringMatching(/^APT-20260815-0001 was rescheduled from 2026-08-15 at .+ to 2026-09-01 at .+ by Alice Admin\. Reason: Staff conflict$/),
+      '/appointments/appointment-1',
+      'admin-1',
     );
   });
 

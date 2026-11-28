@@ -8,7 +8,7 @@ import { validatePaymentImage } from '../uploads/upload.service.js';
 import { assertBookingReadyForGcashApproval, completePaidOcularBooking } from '../appointments/appointments.service.js';
 import { createAndSendNotification, notifyRole, emitRoleEvent, emitUserEvent } from '../notifications/socket.service.js';
 import { issueGcashReceipt } from './payments.service.js';
-import { handleInitialFabricationPaymentVerified } from '../projects/fabrication-start.js';
+import { handleInitialFabricationPaymentVerified, notifyFabricationTeamPaymentVerified } from '../projects/fabrication-start.js';
 import { completeDesignFeeOnlinePayment, DESIGN_FEE_STAGE_PREFIX } from '../projects/design-fee.service.js';
 import type { GcashTarget, SubmitGcashInput } from './gcash.validation.js';
 import { gcashSettingsSchema } from './gcash.validation.js';
@@ -301,16 +301,24 @@ export async function reviewGcash(paymentId: string, cashierId: string, roles: R
   emitUserEvent(reviewed!.customerId!.toString(), 'payments:queue-updated', { type: 'payment_reviewed', paymentId });
   emitRoleEvent(Role.CASHIER, 'payments:queue-updated', { type: 'gcash_reviewed', paymentId });
   if (decision === 'paid') {
+    const isDesignFee = Boolean(reviewed!.stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX));
+    // Realtime (2026-11-28): a project stage starts fabrication and tells the fabrication team as
+    // soon as it is saved, before the receipt PDF is made.
+    if (!isDesignFee && reviewed!.projectId) {
+      const plan = await PaymentPlan.findOne({ 'stages.stageId': reviewed!.stageId });
+      if (plan) {
+        await handleInitialFabricationPaymentVerified(reviewed!.projectId, plan);
+        await notifyFabricationTeamPaymentVerified(reviewed!.projectId, plan, reviewed!.stageId);
+      }
+    }
     await issueGcashReceipt(reviewed!);
     if (reviewed!.bookingId && bookingConfirmedNow) {
       const booking = await Appointment.findById(reviewed!.bookingId);
       if (booking) await completePaidOcularBooking(booking);
     }
-    if (reviewed!.stageId?.startsWith(DESIGN_FEE_STAGE_PREFIX) && reviewed!.projectId) {
+    // The design fee is marked paid once the receipt number exists.
+    if (isDesignFee && reviewed!.projectId) {
       await completeDesignFeeOnlinePayment(reviewed!.projectId, reviewed!, cashierId);
-    } else if (reviewed!.projectId) {
-      const plan = await PaymentPlan.findOne({ 'stages.stageId': reviewed!.stageId });
-      if (plan) await handleInitialFabricationPaymentVerified(reviewed!.projectId, plan);
     }
   }
   await createAndSendNotification(reviewed!.customerId!, NotificationCategory.PAYMENT,

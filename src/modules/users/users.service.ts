@@ -10,6 +10,7 @@ import {
   Appointment,
 } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
+import { triggerFabricationAutoAssign } from '../projects/fabrication-auto-assign-trigger.js';
 import { AppointmentType, AuditAction, Role, StaffAvailabilityStatus, type SlotCode } from '../../utils/constants.js';
 import type {
   CreateUserInput,
@@ -290,6 +291,12 @@ export async function updateUser(userId: string, input: UpdateUserInput, adminId
       userAgent: ua,
     });
   }
+
+  // Realtime (2026-11-28): a fabricator back to Available (or reactivated) can take a waiting paid
+  // project right away instead of at the next minute sweep.
+  const fabricatorCanWork = nextRoles.includes(Role.FABRICATION_STAFF)
+    && (input.availabilityStatus === StaffAvailabilityStatus.AVAILABLE || input.isActive === true);
+  if (fabricatorCanWork) await triggerFabricationAutoAssign('fabricator_available');
 
   const [session] = await Promise.all([
     getOpenAvailabilitySession(user._id),

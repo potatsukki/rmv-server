@@ -1,7 +1,7 @@
 import type { Types } from 'mongoose';
 import { PaymentPlan } from '../../models/Payment.js';
 import { Project, ProjectItem } from '../../models/index.js';
-import { NotificationCategory, PaymentStageStatus, ProjectStatus } from '../../utils/constants.js';
+import { DeliveryType, NotificationCategory, PaymentStageStatus, ProjectStatus } from '../../utils/constants.js';
 import { logger } from '../../utils/logger.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, emitUserEvent, notifyUsers } from '../notifications/socket.service.js';
@@ -86,11 +86,22 @@ export async function handleInitialFabricationPaymentVerified(
   const link = `/projects/${project._id}`;
   if (activated) {
     await notifyUsers(
-      [project.customerId, project.fabricationLeadId, ...project.fabricationAssistantIds, ...project.engineerIds],
+      [project.customerId, ...project.engineerIds],
       NotificationCategory.FABRICATION,
       'Fabrication Updates Unlocked',
       `The required payment for "${project.title}" is verified. The assigned fabrication team can now post work updates.`,
       link,
+    );
+    // The fabrication team's own notice is a payment notice (2026-11-28): it shows under Payments.
+    const fullPayment = plan.stages.length === 1;
+    await notifyUsers(
+      fabricationTeamOf(project),
+      NotificationCategory.PAYMENT,
+      fullPayment ? 'Full Payment Verified' : '1st Payment Verified',
+      fullPayment
+        ? `The full payment for "${project.title}" is verified. You can start the fabrication updates; no stage will wait for payment.`
+        : `The required downpayment for "${project.title}" is verified. You can start the fabrication updates.`,
+      `${link}/fabrication`,
     );
   } else if (project.status === ProjectStatus.PAYMENT_PENDING && plan.stages[0]?.status === PaymentStageStatus.VERIFIED) {
     if (paymentReady && !project.fabricationLeadId) {
@@ -127,4 +138,47 @@ export async function handleInitialFabricationPaymentVerified(
   }
 
   return project;
+}
+
+function fabricationTeamOf(project: { fabricationLeadId?: unknown; fabricationAssistantIds?: unknown[] }) {
+  return [project.fabricationLeadId, ...(project.fabricationAssistantIds || [])] as Array<string | Types.ObjectId | null | undefined>;
+}
+
+/**
+ * Payments (2026-11-28): the fabrication team hears, the moment the cashier verifies it, that a later
+ * payment opened the next part of the lifecycle: the 2nd payment (Installation, or Ready for
+ * Delivery for shop work) and the last one (Done). Same counting as the fabrication payment gate.
+ * The downpayment has its own notice above. Shows under Payments.
+ */
+export async function notifyFabricationTeamPaymentVerified(
+  projectId: string | Types.ObjectId,
+  plan: {
+    projectItemId?: unknown;
+    stages: ReadonlyArray<{ stageId: string; label: string; status: PaymentStageStatus }>;
+  },
+  stageId: string | undefined,
+) {
+  const index = plan.stages.findIndex((stage) => stage.stageId === stageId);
+  const stage = plan.stages[index];
+  // Not a later payment, or only partly paid: nothing opened yet.
+  if (index < 1 || !stage || stage.status !== PaymentStageStatus.VERIFIED) return;
+  const total = plan.stages.length;
+  const paid = plan.stages.filter((entry) => entry.status === PaymentStageStatus.VERIFIED).length;
+  if (paid < Math.min(total, 2)) return;
+
+  const project = await Project.findById(projectId).select('title deliveryType fabricationLeadId fabricationAssistantIds');
+  if (!project?.fabricationLeadId) return;
+  const item = plan.projectItemId ? await ProjectItem.findById(plan.projectItemId).select('title') : null;
+  const what = `"${project.title}"${item?.title ? ` (${item.title})` : ''}`;
+  const allPaid = paid === total;
+  const nextStage = project.deliveryType === DeliveryType.ON_SITE_INSTALLATION ? 'Installation' : 'Ready for Delivery';
+  await notifyUsers(
+    fabricationTeamOf(project),
+    NotificationCategory.PAYMENT,
+    allPaid ? 'All Payments Verified' : '2nd Payment Verified',
+    allPaid
+      ? `All payments for ${what} are verified. No stage waits for payment any more, so you can continue up to Done.`
+      : `The 2nd payment (${stage.label}) for ${what} is verified. You can continue to ${nextStage}.`,
+    `/projects/${String(project._id)}/fabrication${plan.projectItemId ? `?projectItemId=${String(plan.projectItemId)}` : ''}`,
+  );
 }

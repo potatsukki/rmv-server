@@ -18,7 +18,10 @@ vi.mock('../config/config.service.js', () => ({ getConfigValue: db.config }));
 vi.mock('../uploads/upload.service.js', () => ({ validatePaymentImage: db.image }));
 vi.mock('../appointments/appointments.service.js', () => ({ assertBookingReadyForGcashApproval: db.ready, completePaidOcularBooking: vi.fn() }));
 vi.mock('./payments.service.js', () => ({ issueGcashReceipt: db.receipt }));
-vi.mock('../projects/fabrication-start.js', () => ({ handleInitialFabricationPaymentVerified: vi.fn() }));
+vi.mock('../projects/fabrication-start.js', () => ({
+  handleInitialFabricationPaymentVerified: vi.fn(),
+  notifyFabricationTeamPaymentVerified: vi.fn(),
+}));
 vi.mock('../notifications/socket.service.js', () => ({ createAndSendNotification: vi.fn(), notifyRole: vi.fn(), emitRoleEvent: vi.fn(), emitUserEvent: vi.fn(), notifyUsers: vi.fn() }));
 vi.mock('../../utils/logger.js', () => ({ logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() } }));
 
@@ -26,6 +29,7 @@ import { resolveGcashTarget, submitGcash, reviewGcash, getGcashContext, recordBo
 import { gcashTargetSchema, submitGcashSchema } from './gcash.validation.js';
 import { Role, PaymentMethod, PaymentStageStatus, AppointmentStatus } from '../../utils/constants.js';
 import { authorize } from '../../middleware/rbac.js';
+import { notifyFabricationTeamPaymentVerified } from '../projects/fabrication-start.js';
 
 const customerId = '111111111111111111111111';
 const bookingId = '222222222222222222222222';
@@ -236,6 +240,10 @@ describe('GCash cashier decisions', () => {
     await reviewGcash(paymentId, cashierId, [Role.CASHIER], 'paid');
     expect(stage).toMatchObject({ status: 'verified', amountPaid: 1250, remainingBalance: 0 });
     expect(plan.isImmutable).toBe(true); expect(plan.save).toHaveBeenCalledWith({ session: db.session });
+    // Realtime (2026-11-28): the fabrication team hears about the payment before the receipt is made.
+    expect(notifyFabricationTeamPaymentVerified).toHaveBeenCalledWith(bookingId, expect.anything(), 'stage-1');
+    expect(vi.mocked(notifyFabricationTeamPaymentVerified).mock.invocationCallOrder[0])
+      .toBeLessThan(db.receipt.mock.invocationCallOrder[0]);
   });
   it('retains rejected evidence and permits a corrected new attempt', async () => {
     const attempt = payment(); const appointment = booking({ ocularFeeStatus: 'proof_submitted' });
