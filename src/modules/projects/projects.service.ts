@@ -71,8 +71,9 @@ import { applyTargetFinishDate } from './target-finish.js';
 import { enterPaymentPending, handleInitialFabricationPaymentVerified, reconcileFabricationStart } from './fabrication-start.js';
 import {
   ACTIVE_FABRICATION_STATUSES, assertDeliveryCrewFree, assertDeliveryDateAllowed, assertFabricatorsFree,
-  deliveryDateUnlockStage, fabricationTrackProgress, isDeliveryDateUnlocked, manilaToday, readableDay,
+  deliveryDateUnlockStage, fabricationTrackProgress, isDeliveryDateUnlocked, lockFabricators, manilaToday, readableDay,
 } from './fabrication-scheduling.js';
+import { emitFabricationTeamChanged } from './fabrication-realtime.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
 const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
@@ -2247,46 +2248,109 @@ async function assignFabricationStaffLocked(
 ) {
   const project = await Project.findById(projectId);
   if (!project) throw AppError.notFound('Project not found');
+
+  const leadId = String(input.fabricationLeadId);
+  const assistantIds = [...new Set(input.fabricationAssistantIds.map(String))];
+  if (assistantIds.includes(leadId)) throw AppError.badRequest('The lead cannot also be an assistant');
+
+  // No double assign (2026-11-28). A repeated or unchanged save assigns nothing twice: no second
+  // audit or notice, and a system pick stays marked as automatic.
+  const current = fabricationTeamOf(project);
+  if (current.leadId === leadId && sameMembers(current.assistantIds, assistantIds)) return project;
+  // A form opened before the system (or someone else) set the team never replaces it unseen.
+  if (teamDiffersFromExpected(current, input)) throw await fabricationTeamChangedConflict(projectId);
+
   await assertFabricationTeamAssignable(project);
 
   // Verify lead is fabrication staff
   const lead = await User.findOne({
-    _id: input.fabricationLeadId,
+    _id: leadId,
     roles: Role.FABRICATION_STAFF,
     isActive: true,
   });
   if (!lead) throw AppError.badRequest('Invalid fabrication lead');
 
   // Verify assistants
-  if (input.fabricationAssistantIds.length > 0) {
+  if (assistantIds.length > 0) {
     const assistants = await User.find({
-      _id: { $in: input.fabricationAssistantIds },
+      _id: { $in: assistantIds },
       roles: Role.FABRICATION_STAFF,
       isActive: true,
     });
-    if (assistants.length !== input.fabricationAssistantIds.length) {
+    if (assistants.length !== assistantIds.length) {
       throw AppError.badRequest('One or more assistant IDs are invalid');
     }
   }
 
-  // One project in the workshop at a time for each lead and assistant.
-  const fabricatorIds = [input.fabricationLeadId, ...input.fabricationAssistantIds];
-  await lockFabricators(locks, fabricatorIds, actorId);
-  await assertFabricatorsFree(projectId, fabricatorIds);
+  // One project in the workshop at a time for each lead and assistant. Only the people joining
+  // need a free slot: the current team is already on this project, unless the project enters the
+  // workshop with this save (then everyone is checked).
+  const alreadyInWorkshop = ACTIVE_FABRICATION_STATUSES.includes(project.status);
+  const joining = [leadId, ...assistantIds].filter((id) => !alreadyInWorkshop || !current.members.has(id));
+  await lockFabricators(locks, joining, actorId);
+  await assertFabricatorsFree(projectId, joining);
 
-  project.fabricationLeadId = input.fabricationLeadId as unknown as Types.ObjectId;
-  project.fabricationAssistantIds = input.fabricationAssistantIds as unknown as Types.ObjectId[];
+  // Saved only if nobody changed the team since it was read (the system's auto-assign included).
   // A person chose this team, so it is no longer the system's pick.
-  project.fabricationAutoAssignedAt = null;
-
-  await project.save();
-  return finishFabricationTeamAssignment(project, {
+  const saved = await Project.findOneAndUpdate(
+    { _id: project._id, fabricationLeadId: current.leadId ?? null, ...assistantsFilter(project.fabricationAssistantIds) },
+    { $set: { fabricationLeadId: leadId, fabricationAssistantIds: assistantIds, fabricationAutoAssignedAt: null } },
+    { returnDocument: 'after' },
+  );
+  if (!saved) throw await fabricationTeamChangedConflict(projectId);
+  return finishFabricationTeamAssignment(saved, {
     actorId,
-    leadId: input.fabricationLeadId,
-    assistantIds: input.fabricationAssistantIds,
+    leadId,
+    assistantIds,
     ip,
     ua,
   });
+}
+
+/** The team as stored: lead, assistants and everyone on it. */
+function fabricationTeamOf(project: { fabricationLeadId?: unknown; fabricationAssistantIds?: unknown[] }) {
+  const leadId = project.fabricationLeadId ? String(project.fabricationLeadId) : null;
+  const assistantIds = (project.fabricationAssistantIds || []).map(String);
+  return { leadId, assistantIds, members: new Set([leadId, ...assistantIds].filter((id): id is string => Boolean(id))) };
+}
+
+/** Same people, in any order. */
+function sameMembers(a: string[], b: string[]) {
+  const left = new Set(a.map(String));
+  const right = new Set(b.map(String));
+  return left.size === right.size && [...left].every((id) => right.has(id));
+}
+
+/** The form's team (`expected*`, sent by the web) is not the stored one any more. */
+function teamDiffersFromExpected(
+  current: ReturnType<typeof fabricationTeamOf>,
+  input: { expectedLeadId?: string | null; expectedAssistantIds?: string[] },
+) {
+  const leadChanged = input.expectedLeadId !== undefined && (input.expectedLeadId ?? null) !== current.leadId;
+  const assistantsChanged = input.expectedAssistantIds !== undefined
+    && !sameMembers(input.expectedAssistantIds, current.assistantIds);
+  return leadChanged || assistantsChanged;
+}
+
+/** Matches the assistants exactly as they were read (an empty list also matches a missing field). */
+function assistantsFilter(assistantIds: unknown[] | undefined) {
+  return assistantIds?.length
+    ? { fabricationAssistantIds: assistantIds }
+    : { $or: [{ fabricationAssistantIds: { $size: 0 } }, { fabricationAssistantIds: { $exists: false } }] };
+}
+
+/** 409 when the team changed under a save. The web reloads the latest team in realtime. */
+async function fabricationTeamChangedConflict(projectId: string) {
+  const latest = await Project.findById(projectId);
+  const latestLeadId = latest?.fabricationLeadId ? String(latest.fabricationLeadId) : null;
+  const lead = latestLeadId ? await User.findOne({ _id: latestLeadId }) : null;
+  const leadName = `${lead?.firstName ?? ''} ${lead?.lastName ?? ''}`.trim() || 'another fabricator';
+  const what = !latestLeadId
+    ? 'This project\'s fabrication team was just changed.'
+    : latest?.fabricationAutoAssignedAt
+      ? `This project was just assigned automatically to ${leadName}.`
+      : `This project's fabrication team was just changed (lead: ${leadName}).`;
+  return AppError.conflict(`${what} The latest team is now shown; save again if you still want to change it.`);
 }
 
 /** Status and quotation checks shared by the engineer's assignment and the system's. */
@@ -2302,18 +2366,6 @@ async function assertFabricationTeamAssignable(project: { _id: Types.ObjectId; s
 
   if (latestBlueprint.status !== 'approved') {
     throw AppError.badRequest('Fabrication team can only be assigned after the quotation is sent to the customer');
-  }
-}
-
-/** Serializes team changes per fabricator, so two saves can't put one person on two workshop projects. */
-async function lockFabricators(locks: SalesDayLocks, staffIds: string[], lockedBy: string) {
-  for (const staffId of [...new Set(staffIds.map((id) => String(id).toLowerCase()))].sort()) {
-    await acquireStaffLock(
-      locks,
-      { staffId, date: 'all-dates', slot: 'fabricator-team' },
-      lockedBy,
-      'Another team assignment for this fabricator is being saved right now. Please try again in a moment.',
-    );
   }
 }
 
@@ -2423,6 +2475,8 @@ async function finishFabricationTeamAssignment(
     link,
   );
 
+  // Realtime: every open team card, project page and fabricator picker reloads (no browser refresh).
+  emitFabricationTeamChanged(project);
   return project;
 }
 
@@ -2497,12 +2551,22 @@ export async function updateFabricationAssistants(
     const added = assistantIds.filter((id) => !previous.includes(id));
     const removed = previous.filter((id) => !assistantIds.includes(id));
     if (!added.length && !removed.length) return project;
+    // The list the lead edited is not the stored one any more (e.g. the engineer changed the team).
+    if (input.expectedAssistantIds !== undefined && !sameMembers(input.expectedAssistantIds, previous)) {
+      throw await fabricationTeamChangedConflict(projectId);
+    }
 
     await lockFabricators(locks, added, actorId);
     await assertFabricatorsFree(projectId, added);
 
-    project.fabricationAssistantIds = assistantIds as unknown as Types.ObjectId[];
-    await project.save();
+    // Saved only if the lead and the assistants are still the ones read above (no lost update).
+    const saved = await Project.findOneAndUpdate(
+      { _id: project._id, fabricationLeadId: project.fabricationLeadId, ...assistantsFilter(project.fabricationAssistantIds) },
+      { $set: { fabricationAssistantIds: assistantIds } },
+      { returnDocument: 'after' },
+    );
+    if (!saved) throw await fabricationTeamChangedConflict(projectId);
+    project.fabricationAssistantIds = saved.fabricationAssistantIds;
 
     await AuditLog.create({
       action: AuditAction.FABRICATION_ASSIGNED,
@@ -2544,6 +2608,7 @@ export async function updateFabricationAssistants(
       { excludeUserId: actorId },
     );
 
+    emitFabricationTeamChanged(project);
     return project;
   });
 }
@@ -2856,6 +2921,10 @@ export async function transitionProject(
   await project.save();
   // A project that stops before the design fee is paid is not charged for it.
   if (input.status === ProjectStatus.CANCELLED) await markDesignFeeNotCharged(project._id);
+  // Entering or leaving the fabrication phase changes the team cards and every fabricator's load.
+  if ([oldStatus, input.status].some((status) => ACTIVE_FABRICATION_STATUSES.includes(status))) {
+    emitFabricationTeamChanged(project);
+  }
 
   const actionMap: Partial<Record<ProjectStatus, AuditAction>> = {
     [ProjectStatus.CANCELLED]: AuditAction.PROJECT_CANCELLED,
