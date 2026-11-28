@@ -17,7 +17,9 @@ import { formatCurrency } from '../../utils/helpers.js';
 import { logger } from '../../utils/logger.js';
 import { assertFabricatorProjectAccess, isAssignedFabricationMember, usesFabricationProjectScope } from '../projects/projects.list-policy.js';
 import { hasRequiredInitialFabricationPayment, reconcileFabricationStart } from '../projects/fabrication-start.js';
-import { stageIsNearCompletion } from '../projects/fabrication-scheduling.js';
+import { assertProjectStaysOutOfWorkshop, stageIsNearCompletion } from '../projects/fabrication-scheduling.js';
+import { emitFabricationTeamChanged } from '../projects/fabrication-realtime.js';
+import { withSalesDayLocks } from '../appointments/sales-day-lock.js';
 import type { CreateFabricationUpdateInput, UpdateFabricationUpdateInput } from './fabrication.validation.js';
 
 // ── Per-stage payment gating helpers ──
@@ -80,6 +82,18 @@ function itemScopedQuery(projectId: string, projectItemId?: string) {
     : { projectId, projectItemId: { $exists: false } };
 }
 
+/**
+ * The newest update of one track. An item without updates of its own continues from the
+ * project-level stage (older projects posted their stages before they had items), the same way
+ * the workshop rule reads it, so an item never starts over and sends its project back into the
+ * workshop.
+ */
+async function findLatestTrackUpdate(projectId: string, projectItemId?: string) {
+  const own = await FabricationUpdate.findOne(itemScopedQuery(projectId, projectItemId)).sort({ createdAt: -1 });
+  if (own || !projectItemId) return own;
+  return FabricationUpdate.findOne(itemScopedQuery(projectId)).sort({ createdAt: -1 });
+}
+
 // Multi-item projects pay through one combined project-level plan, so an item without its own plan uses that one.
 async function findScopedPaymentPlan(projectId: string, projectItemId?: string) {
   return await PaymentPlan.findOne(itemScopedQuery(projectId, projectItemId))
@@ -131,8 +145,7 @@ export async function createFabricationUpdate(
   }
 
   // Get current fabrication status (from latest update or queued)
-  const latestUpdate = await FabricationUpdate.findOne(itemScopedQuery(input.projectId, input.projectItemId))
-    .sort({ createdAt: -1 });
+  const latestUpdate = await findLatestTrackUpdate(input.projectId, input.projectItemId);
 
   const deliveryType = project.deliveryType;
   const currentStatus = normalizeFabricationStatus(latestUpdate?.status || FabricationStatus.QUEUED, deliveryType);
@@ -196,13 +209,24 @@ export async function createFabricationUpdate(
     }
   }
 
-  const update = await FabricationUpdate.create({
-    projectId: input.projectId,
-    projectItemId: input.projectItemId,
-    status: input.status,
-    notes: input.notes,
-    photoKeys: input.photoKeys,
-    updatedBy: actorId,
+  // Saved under the team's locks when it would send a near-complete project back into the workshop
+  // (refused if a team member already took the next project); the locks end before the notices.
+  const update = await withSalesDayLocks(async (locks) => {
+    await assertProjectStaysOutOfWorkshop(
+      project,
+      { withLatest: { projectId: project._id, projectItemId: input.projectItemId, status: input.status } },
+      locks,
+      actorId,
+      'post',
+    );
+    return FabricationUpdate.create({
+      projectId: input.projectId,
+      projectItemId: input.projectItemId,
+      status: input.status,
+      notes: input.notes,
+      photoKeys: input.photoKeys,
+      updatedBy: actorId,
+    });
   });
 
   await AuditLog.create({
@@ -447,6 +471,9 @@ export async function createFabricationUpdate(
     { excludeUserId: actorId },
   );
 
+  // Every picker shows this project's stage, and Quality Check / Done frees its team: realtime.
+  emitFabricationTeamChanged(project);
+
   // Quality Check or later can free this team for the next paid project waiting for a fabricator
   // (panel note 2026-11-27). Loaded lazily because projects.service imports this file; a failure
   // is logged and never undoes the update.
@@ -532,7 +559,18 @@ export async function deleteFabricationUpdate(
   if (usesFabricationProjectScope(actorRoles)) {
     await assertFabricationProjectAccess(projectId, actorId, actorRoles);
   }
-  await FabricationUpdate.findByIdAndDelete(id);
+  // No overlap: deleting the update that took a project to Quality Check sends it back into the
+  // workshop, which is refused while its team already took the next project (checked under the
+  // team's locks, so an auto-assign for them can't slip in between).
+  const teamProject = await Project.findById(projectId)
+    .select('projectNumber title status deliveryType customerId salesStaffId fabricationLeadId fabricationAssistantIds');
+  await withSalesDayLocks(async (locks) => {
+    if (teamProject) {
+      await assertProjectStaysOutOfWorkshop(teamProject, { excludeUpdateIds: [update._id] }, locks, actorId, 'delete');
+    }
+    await FabricationUpdate.findByIdAndDelete(id);
+  });
+  if (teamProject) emitFabricationTeamChanged(teamProject);
 
   await AuditLog.create({
     action: AuditAction.FABRICATION_UPDATED,
@@ -664,9 +702,15 @@ export async function getLatestFabricationStatus(
   projectItemId?: string,
 ) {
   const deliveryType = await assertFabricationProjectAccess(projectId, actorId, actorRoles);
-  const latest = await FabricationUpdate.findOne(itemScopedQuery(projectId, projectItemId))
+  // Same reading as a new update: an item without its own updates continues from the project level.
+  const ownLatest = await FabricationUpdate.findOne(itemScopedQuery(projectId, projectItemId))
     .sort({ createdAt: -1 })
     .populate('updatedBy', 'firstName lastName');
+  const latest = ownLatest ?? (projectItemId
+    ? await FabricationUpdate.findOne(itemScopedQuery(projectId))
+      .sort({ createdAt: -1 })
+      .populate('updatedBy', 'firstName lastName')
+    : null);
 
   // Check payment gate — per-stage info
   const plan = await findScopedPaymentPlan(projectId, projectItemId);

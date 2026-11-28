@@ -106,6 +106,13 @@ vi.mock('../projects/fabrication-auto-assign.js', () => ({
   autoAssignWaitingFabricationProjects: vi.fn().mockResolvedValue(0),
 }));
 
+// The no-overlap guard has its own real-database tests (fabrication-auto-assign.integration).
+const { mockStaysOutOfWorkshop } = vi.hoisted(() => ({ mockStaysOutOfWorkshop: vi.fn() }));
+vi.mock('../projects/fabrication-scheduling.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../projects/fabrication-scheduling.js')>()),
+  assertProjectStaysOutOfWorkshop: mockStaysOutOfWorkshop,
+}));
+
 import { createFabricationUpdate, deleteFabricationUpdate, updateFabricationUpdate, getLatestFabricationStatus, listFabricationUpdates, getFabricationUpdateById, seedFabricationItems } from './fabrication.service.js';
 import { autoAssignWaitingFabricationProjects } from '../projects/fabrication-auto-assign.js';
 import { getPaymentActivationConfig } from '../config/config.service.js';
@@ -247,6 +254,50 @@ describe('createFabricationUpdate', () => {
     // It runs after the update was saved.
     expect(vi.mocked(autoAssignWaitingFabricationProjects).mock.invocationCallOrder[0])
       .toBeGreaterThan(mockFabricationUpdateCreate.mock.invocationCallOrder[0]!);
+  });
+
+  // QA 2026-11-28 (no overlap): a post that would send a near-complete project back into the
+  // workshop goes through the guard first; a refused post saves nothing.
+  it('passes every new update through the no-overlap guard before saving it', async () => {
+    const project = shopDeliveryProject();
+    mockProjectFindById.mockResolvedValue(project);
+    mockFabricationUpdateFindOne.mockReturnValue({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.CUTTING }) });
+
+    await createFabricationUpdate({ projectId: 'project-1', status: FabricationStatus.WELDING, notes: 'Welding.' }, 'lead-1', [Role.FABRICATION_STAFF]);
+    expect(mockStaysOutOfWorkshop).toHaveBeenCalledWith(
+      project,
+      { withLatest: { projectId: 'project-1', projectItemId: undefined, status: FabricationStatus.WELDING } },
+      { held: [] },
+      'lead-1',
+      'post',
+    );
+    expect(mockStaysOutOfWorkshop.mock.invocationCallOrder[0]).toBeLessThan(mockFabricationUpdateCreate.mock.invocationCallOrder[0]!);
+
+    mockFabricationUpdateCreate.mockClear();
+    mockStaysOutOfWorkshop.mockRejectedValueOnce(new AppError('This update would move the project back before Quality Check', 400, ErrorCode.FABRICATOR_ALREADY_ASSIGNED));
+    await expect(createFabricationUpdate({ projectId: 'project-1', status: FabricationStatus.WELDING, notes: 'Again.' }, 'lead-1', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ code: ErrorCode.FABRICATOR_ALREADY_ASSIGNED });
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+  });
+
+  it('continues an item without updates of its own from the project-level stage', async () => {
+    mockProjectFindById.mockResolvedValue({ ...shopDeliveryProject(), deliverySchedule: { date: '2026-12-01' } });
+    mockProjectItemFindOne.mockResolvedValue({ _id: 'item-1', projectId: 'project-1', status: ProjectStatus.FABRICATION });
+    // The item has no update; the project-level track is at Quality Check.
+    mockFabricationUpdateFindOne
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ sort: vi.fn().mockResolvedValue({ status: FabricationStatus.QUALITY_CHECK }) });
+
+    await expect(createFabricationUpdate(
+      { projectId: 'project-1', projectItemId: 'item-1', status: FabricationStatus.MATERIAL_PREP, notes: 'Start over.' },
+      'lead-1',
+      [Role.FABRICATION_STAFF],
+    )).rejects.toThrow();
+    expect(mockFabricationUpdateCreate).not.toHaveBeenCalled();
+    expect(mockFabricationUpdateFindOne.mock.calls.map(([query]) => query)).toEqual([
+      { projectId: 'project-1', projectItemId: 'item-1' },
+      { projectId: 'project-1', projectItemId: { $exists: false } },
+    ]);
   });
 
   it('does not look for the next project before Quality Check, and a failed look-up keeps the update', async () => {
@@ -742,6 +793,25 @@ describe('existing on-site fabrication tracking', () => {
       .rejects.toMatchObject({ statusCode: 403 });
     expect(update.save).not.toHaveBeenCalled();
     expect(mockFabricationUpdateFindByIdAndDelete).not.toHaveBeenCalled();
+  });
+
+  it('checks the no-overlap guard under the locks before deleting an update, and keeps the update when it refuses', async () => {
+    const update = { _id: 'update-qc', projectId: 'project-1', updatedBy: 'lead-1', status: FabricationStatus.QUALITY_CHECK };
+    mockFabricationUpdateFindById.mockResolvedValue(update);
+    const teamProject = {
+      _id: 'project-1', status: ProjectStatus.FABRICATION, customerId: 'customer-1', fabricationLeadId: 'lead-1',
+      fabricationAssistantIds: [], deliveryCrewIds: [], engineerIds: [],
+    };
+    mockProjectFindById.mockReturnValue({ select: vi.fn().mockResolvedValue(teamProject) });
+    mockStaysOutOfWorkshop.mockRejectedValueOnce(new AppError('This update can\'t be deleted: Ana already took PRJ-2026-00002 (Lead)', 400, ErrorCode.FABRICATOR_ALREADY_ASSIGNED));
+
+    await expect(deleteFabricationUpdate('update-qc', 'lead-1', [Role.FABRICATION_STAFF]))
+      .rejects.toMatchObject({ code: ErrorCode.FABRICATOR_ALREADY_ASSIGNED });
+    expect(mockStaysOutOfWorkshop).toHaveBeenCalledWith(teamProject, { excludeUpdateIds: ['update-qc'] }, { held: [] }, 'lead-1', 'delete');
+    expect(mockFabricationUpdateFindByIdAndDelete).not.toHaveBeenCalled();
+
+    await deleteFabricationUpdate('update-qc', 'lead-1', [Role.FABRICATION_STAFF]);
+    expect(mockFabricationUpdateFindByIdAndDelete).toHaveBeenCalledWith('update-qc');
   });
 
   it('maps an edited historical update in the response while preserving its stored status', async () => {

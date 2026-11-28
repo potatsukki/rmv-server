@@ -5,6 +5,7 @@ import { NotificationCategory, PaymentStageStatus, ProjectStatus } from '../../u
 import { logger } from '../../utils/logger.js';
 import { projectStateMachine } from '../../utils/stateMachine.js';
 import { createAndSendNotification, emitUserEvent, notifyUsers } from '../notifications/socket.service.js';
+import { emitFabricationTeamChanged } from './fabrication-realtime.js';
 import { applyTargetFinishDate } from './target-finish.js';
 
 export async function hasRequiredInitialFabricationPayment(projectId: string | Types.ObjectId) {
@@ -68,6 +69,8 @@ export async function reconcileFabricationStart(projectId: string | Types.Object
       for (const userId of new Set(viewers.filter(Boolean).map(String))) {
         emitUserEvent(userId, 'fabrication:update', { projectId: String(project._id) });
       }
+      // Payment Pending → Fabrication changes the "waiting for payment" line in every picker.
+      emitFabricationTeamChanged(project);
     }
   }
   return { project, paymentReady, activated };

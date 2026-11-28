@@ -1,10 +1,11 @@
 import { format, parse } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
-import type { Types } from 'mongoose';
+import { Types } from 'mongoose';
 import { FabricationUpdate, Holiday, Project, ProjectItem, User } from '../../models/index.js';
 import { AppError, ErrorCode } from '../../utils/appError.js';
 import { FabricationStatus, ProjectStatus } from '../../utils/constants.js';
 import { fabricationProgress, fabricationStageOrder, normalizeFabricationStatus } from '../../utils/fabricationLifecycle.js';
+import { acquireStaffLock, type SalesDayLocks } from '../appointments/sales-day-lock.js';
 
 const TZ = 'Asia/Manila';
 
@@ -39,18 +40,34 @@ export interface FabricationTrackProgress {
 
 type TrackedProject = { _id: unknown; status?: string; deliveryType?: string };
 
+/** "What if" views of the tracks: before a delete or a new update is saved (no-overlap guard). */
+export interface TrackProgressOptions {
+  /** Leave these updates out, as if they were already deleted. */
+  excludeUpdateIds?: unknown[];
+  /** Read this as the newest update of one track, as if it were already posted. */
+  withLatest?: { projectId: unknown; projectItemId?: unknown; status: string };
+}
+
+// An aggregate $match is not cast by Mongoose, so an id given as a string must become an ObjectId.
+const objectIds = (ids: unknown[]) => ids.filter(Boolean)
+  .map((id) => (typeof id === 'string' && /^[a-f\d]{24}$/i.test(id) ? new Types.ObjectId(id) : id)) as Types.ObjectId[];
+
 /**
  * Fabrication progress of each project by its SLOWEST track. Each project item has its own
  * lifecycle; a project without items uses the project-level track, and an item without an update
  * of its own falls back to the project-level update. Before fabrication starts nothing counts.
  */
-export async function fabricationTrackProgress(projects: TrackedProject[]): Promise<Map<string, FabricationTrackProgress>> {
+export async function fabricationTrackProgress(
+  projects: TrackedProject[],
+  options: TrackProgressOptions = {},
+): Promise<Map<string, FabricationTrackProgress>> {
   const started = projects.filter((project) => project.status === ProjectStatus.FABRICATION);
-  const ids = started.map((project) => project._id) as Types.ObjectId[];
+  const ids = objectIds(started.map((project) => project._id));
+  const excluded = objectIds(options.excludeUpdateIds || []);
   const [latest, items] = ids.length
     ? await Promise.all([
       FabricationUpdate.aggregate<{ _id: { projectId: unknown; projectItemId: unknown }; status: string }>([
-        { $match: { projectId: { $in: ids } } },
+        { $match: { projectId: { $in: ids }, ...(excluded.length ? { _id: { $nin: excluded } } : {}) } },
         { $sort: { createdAt: -1 } },
         { $group: { _id: { projectId: '$projectId', projectItemId: { $ifNull: ['$projectItemId', null] } }, status: { $first: '$status' } } },
       ]),
@@ -60,6 +77,9 @@ export async function fabricationTrackProgress(projects: TrackedProject[]): Prom
 
   const trackKey = (projectId: unknown, itemId?: unknown) => `${String(projectId)}:${itemId ? String(itemId) : ''}`;
   const latestByTrack = new Map((latest || []).map((row) => [trackKey(row._id.projectId, row._id.projectItemId), row.status]));
+  if (options.withLatest) {
+    latestByTrack.set(trackKey(options.withLatest.projectId, options.withLatest.projectItemId), options.withLatest.status);
+  }
   const itemsByProject = new Map<string, string[]>();
   for (const item of items || []) {
     const projectId = String(item.projectId);
@@ -102,37 +122,121 @@ async function staffNames(ids: string[]) {
   return new Map(users.map((user) => [String(user._id), `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || 'A fabricator']));
 }
 
+/** A lead / assistant who is still on another project in the workshop. */
+export interface WorkshopConflict {
+  staffId: string;
+  name: string;
+  projectId: string;
+  projectNumber?: string;
+  title?: string;
+  role: 'Lead' | 'Assistant';
+}
+
 /**
- * A fabricator (lead or assistant) works on one project in the workshop at a time: another
- * project blocks them until it reaches Quality Check (see NEAR_COMPLETION_STAGE). Being on another
- * project's delivery crew does not count; neither does this project itself.
+ * Who of `staffIds` leads or assists ANOTHER project still in the workshop (payment pending, or in
+ * fabrication with a part not yet at Quality Check). Delivery crew duty does not count.
  */
-export async function assertFabricatorsFree(projectId: string, staffIds: string[]) {
+export async function findWorkshopConflicts(projectId: string, staffIds: string[]): Promise<WorkshopConflict[]> {
   const ids = [...new Set(staffIds.filter(Boolean).map(String))];
-  if (!ids.length) return;
+  if (!ids.length) return [];
 
   const others = await Project.find({
     _id: { $ne: projectId },
     status: { $in: ACTIVE_FABRICATION_STATUSES },
     $or: [{ fabricationLeadId: { $in: ids } }, { fabricationAssistantIds: { $in: ids } }],
   }).select('projectNumber title status deliveryType fabricationLeadId fabricationAssistantIds').lean();
-  if (!others.length) return;
+  if (!others.length) return [];
 
   const progress = await fabricationTrackProgress(others);
   const inWorkshop = others.filter((project) => !progress.get(String(project._id))?.nearCompletion);
-  if (!inWorkshop.length) return;
+  if (!inWorkshop.length) return [];
 
   const names = await staffNames(ids);
-  const conflicts = ids.flatMap((id) => inWorkshop.flatMap((project) => {
+  return ids.flatMap((id) => inWorkshop.flatMap((project): WorkshopConflict[] => {
     const role = String(project.fabricationLeadId) === id
       ? 'Lead'
       : (project.fabricationAssistantIds || []).some((assistant) => String(assistant) === id) ? 'Assistant' : null;
-    return role ? [`${names.get(id) ?? 'A fabricator'} is still on ${project.projectNumber || project.title} (${role})`] : [];
+    return role ? [{
+      staffId: id,
+      name: names.get(id) ?? 'A fabricator',
+      projectId: String(project._id),
+      projectNumber: project.projectNumber,
+      title: project.title,
+      role,
+    }] : [];
   }));
+}
+
+const projectLabel = (conflict: WorkshopConflict) => conflict.projectNumber || conflict.title || 'another project';
+
+/**
+ * A fabricator (lead or assistant) works on one project in the workshop at a time: another
+ * project blocks them until it reaches Quality Check (see NEAR_COMPLETION_STAGE). Being on another
+ * project's delivery crew does not count; neither does this project itself.
+ */
+export async function assertFabricatorsFree(projectId: string, staffIds: string[]) {
+  const conflicts = await findWorkshopConflicts(projectId, staffIds);
   if (!conflicts.length) return;
 
   throw AppError.badRequest(
-    `${conflicts.join('; ')}. A fabricator can take a new project once their current one reaches Quality Check.`,
+    `${conflicts.map((conflict) => `${conflict.name} is still on ${projectLabel(conflict)} (${conflict.role})`).join('; ')}. A fabricator can take a new project once their current one reaches Quality Check.`,
+    ErrorCode.FABRICATOR_ALREADY_ASSIGNED,
+  );
+}
+
+/**
+ * Serializes team changes per fabricator (lead, assistant, or the team of a project whose stage
+ * goes back), so two saves can't put one person on two workshop projects. Held until the request
+ * ends (`withSalesDayLocks`).
+ */
+export async function lockFabricators(locks: SalesDayLocks, staffIds: string[], lockedBy: string) {
+  for (const staffId of [...new Set(staffIds.filter(Boolean).map((id) => String(id).toLowerCase()))].sort()) {
+    await acquireStaffLock(
+      locks,
+      { staffId, date: 'all-dates', slot: 'fabricator-team' },
+      lockedBy,
+      'Another team assignment for this fabricator is being saved right now. Please try again in a moment.',
+    );
+  }
+}
+
+type TeamProject = TrackedProject & {
+  fabricationLeadId?: unknown;
+  fabricationAssistantIds?: unknown[];
+};
+
+/**
+ * No overlap (2026-11-28): refuses a change that sends a project back into the workshop (a part
+ * no longer at Quality Check or later) while someone on its team already took another workshop
+ * project because this one had reached Quality Check; they would be on two workshop projects.
+ * Takes the team's fabricator locks first, so an auto-assign or a team change for the same people
+ * waits for this change. The caller makes the change while the locks are held.
+ */
+export async function assertProjectStaysOutOfWorkshop(
+  project: TeamProject,
+  change: TrackProgressOptions,
+  locks: SalesDayLocks,
+  actorId: string,
+  kind: 'delete' | 'post',
+) {
+  if (project.status !== ProjectStatus.FABRICATION) return;
+  const team = [project.fabricationLeadId, ...(project.fabricationAssistantIds || [])].filter(Boolean).map(String);
+  if (!team.length) return;
+
+  const id = String(project._id);
+  if (!(await fabricationTrackProgress([project])).get(id)?.nearCompletion) return; // already in the workshop
+  if ((await fabricationTrackProgress([project], change)).get(id)?.nearCompletion) return; // stays near completion
+
+  await lockFabricators(locks, team, actorId);
+  const conflicts = await findWorkshopConflicts(id, team);
+  if (!conflicts.length) return;
+
+  const taken = conflicts.map((conflict) => `${conflict.name} already took ${projectLabel(conflict)} (${conflict.role})`).join('; ');
+  const others = [...new Set(conflicts.map(projectLabel))].join(', ');
+  throw AppError.badRequest(
+    kind === 'delete'
+      ? `This update can't be deleted: ${taken} after this project reached Quality Check. Ask the engineer or admin to change the team of ${others} first.`
+      : `This update would move the project back before Quality Check, but ${taken}. Ask the engineer or admin to change the team of ${others} first.`,
     ErrorCode.FABRICATOR_ALREADY_ASSIGNED,
   );
 }

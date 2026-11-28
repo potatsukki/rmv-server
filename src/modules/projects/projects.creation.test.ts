@@ -972,16 +972,16 @@ describe('assignFabricationStaff', () => {
   });
 
   it('assigns the fabrication team before payment while keeping updates locked', async () => {
-    const save = vi.fn().mockResolvedValue(undefined);
     const project = {
       _id: { toString: () => 'project-1' },
       customerId: { toString: () => 'customer-1' },
       title: 'Kitchen Counter',
       status: ProjectStatus.PAYMENT_PENDING,
       fabricationAssistantIds: [],
-      save,
     };
+    const saved = { ...project, fabricationLeadId: leadId, fabricationAssistantIds: assistantIds, fabricationAutoAssignedAt: null };
     mocks.projectFindById.mockResolvedValue(project);
+    mocks.projectFindOneAndUpdate.mockResolvedValue(saved);
     mocks.userFindOne.mockResolvedValue({ _id: leadId });
     mocks.userFind.mockResolvedValue(assistantIds.map((_id) => ({ _id })));
 
@@ -991,17 +991,18 @@ describe('assignFabricationStaff', () => {
       actorId,
     );
 
-    expect(result).toBe(project);
-    expect(project).toMatchObject({
-      status: ProjectStatus.PAYMENT_PENDING,
-      fabricationLeadId: leadId,
-      fabricationAssistantIds: assistantIds,
-      // A person chose this team, so it no longer shows as the system's pick.
-      fabricationAutoAssignedAt: null,
+    expect(result).toBe(saved);
+    expect(result).toMatchObject({ status: ProjectStatus.PAYMENT_PENDING, fabricationLeadId: leadId, fabricationAssistantIds: assistantIds });
+    // Saved only if nobody set a team meanwhile; a person chose it, so it is not the system's pick.
+    const [filter, update] = mocks.projectFindOneAndUpdate.mock.calls[0]!;
+    expect(filter).toEqual({
+      _id: project._id,
+      fabricationLeadId: null,
+      $or: [{ fabricationAssistantIds: { $size: 0 } }, { fabricationAssistantIds: { $exists: false } }],
     });
+    expect(update.$set).toEqual({ fabricationLeadId: leadId, fabricationAssistantIds: assistantIds, fabricationAutoAssignedAt: null });
     expect(mocks.auditCreate.mock.calls[0]![0]).toMatchObject({ actorId, details: { fabricationLeadId: leadId } });
     expect(mocks.auditCreate.mock.calls[0]![0].details).not.toHaveProperty('automatic');
-    expect(save).toHaveBeenCalledOnce();
     expect(mocks.projectItemUpdateMany).not.toHaveBeenCalled();
     const busyMessage = 'Another team assignment for this fabricator is being saved right now. Please try again in a moment.';
     expect(scheduling.acquireStaffLock.mock.calls).toEqual([assistantIds[1], leadId, assistantIds[0]].map((staffId) => [
@@ -1012,13 +1013,58 @@ describe('assignFabricationStaff', () => {
   });
 
   it('does not save a team whose fabricator is on another active project', async () => {
-    const save = vi.fn();
-    mocks.projectFindById.mockResolvedValue({ _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING, fabricationAssistantIds: [], save });
+    mocks.projectFindById.mockResolvedValue({ _id: 'project-1', status: ProjectStatus.PAYMENT_PENDING, fabricationAssistantIds: [] });
     scheduling.assertFabricatorsFree.mockRejectedValueOnce(new Error('Lance Zelot is already on PRJ-2026-00051 (Lead)'));
 
     await expect(assignFabricationStaff('project-1', { fabricationLeadId: 'fabricator-1', fabricationAssistantIds: [] }, actorId))
       .rejects.toThrow('already on PRJ-2026-00051');
-    expect(save).not.toHaveBeenCalled();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  // QA 2026-11-28: no overlap, no double assign.
+  it('checks only the people joining when the team of a project already in the workshop changes', async () => {
+    const newcomer = 'cccccccccccccccccccccccc';
+    const project = {
+      _id: 'project-1', customerId: 'customer-1', title: 'Railings', status: ProjectStatus.FABRICATION,
+      fabricationLeadId: leadId, fabricationAssistantIds: [assistantIds[0]],
+    };
+    mocks.projectFindById.mockResolvedValue(project);
+    mocks.projectFindOneAndUpdate.mockResolvedValue({ ...project, fabricationAssistantIds: [assistantIds[0], newcomer] });
+    mocks.userFind.mockResolvedValue([{ _id: assistantIds[0] }, { _id: newcomer }]);
+
+    await assignFabricationStaff('project-1', {
+      fabricationLeadId: leadId, fabricationAssistantIds: [assistantIds[0], newcomer], expectedLeadId: leadId, expectedAssistantIds: [assistantIds[0]],
+    }, actorId);
+
+    // The lead and the kept assistant are already on this project; they may also have the next one.
+    expect(scheduling.assertFabricatorsFree).toHaveBeenCalledWith('project-1', [newcomer]);
+    expect(scheduling.acquireStaffLock).toHaveBeenCalledTimes(1);
+    expect(mocks.projectFindOneAndUpdate.mock.calls[0]![0]).toEqual({
+      _id: 'project-1', fabricationLeadId: leadId, fabricationAssistantIds: [assistantIds[0]],
+    });
+  });
+
+  it('assigns nothing twice: the same team again is a no-op, a stale form or a team changed meanwhile is a 409', async () => {
+    const project = { _id: 'project-1', status: ProjectStatus.FABRICATION, fabricationLeadId: leadId, fabricationAssistantIds: [], fabricationAutoAssignedAt: new Date() };
+    mocks.projectFindById.mockResolvedValue(project);
+
+    // Unchanged / repeated save.
+    await expect(assignFabricationStaff('project-1', { fabricationLeadId: leadId, fabricationAssistantIds: [], expectedLeadId: null }, actorId))
+      .resolves.toBe(project);
+    // A form opened before the system assigned the lead.
+    await expect(assignFabricationStaff('project-1', { fabricationLeadId: assistantIds[0], fabricationAssistantIds: [], expectedLeadId: null }, actorId))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('just assigned automatically') });
+    // Changed between the read and the save (e.g. the auto-assign ran at the same moment).
+    mocks.userFind.mockResolvedValue([]);
+    mocks.projectFindOneAndUpdate.mockResolvedValue(null);
+    await expect(assignFabricationStaff('project-1', { fabricationLeadId: assistantIds[0], fabricationAssistantIds: [], expectedLeadId: leadId }, actorId))
+      .rejects.toMatchObject({ statusCode: 409 });
+    // The lead can't also be an assistant.
+    await expect(assignFabricationStaff('project-1', { fabricationLeadId: leadId, fabricationAssistantIds: [leadId] }, actorId))
+      .rejects.toThrow('cannot also be an assistant');
+
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+    expect(createAndSendNotification).not.toHaveBeenCalled();
   });
 });
 
@@ -1118,9 +1164,9 @@ describe('updateFabricationAssistants (the lead picks assistants)', () => {
       fabricationLeadId: { toString: () => leadId },
       fabricationAssistantIds: [ben],
       engineerIds: ['engineer-1'],
-      save: vi.fn().mockResolvedValue(undefined),
     };
     mocks.projectFindById.mockResolvedValue(project);
+    mocks.projectFindOneAndUpdate.mockImplementation(async (_filter, update) => ({ ...project, ...update.$set }));
     mocks.userFind.mockReturnValue({ select: vi.fn().mockResolvedValue([{ _id: ana }]) });
     mocks.userFindOne.mockReturnValue({ select: vi.fn().mockResolvedValue({ firstName: 'Lance', lastName: 'Zelot' }) });
     mocks.auditCreate.mockResolvedValue({});
@@ -1130,7 +1176,11 @@ describe('updateFabricationAssistants (the lead picks assistants)', () => {
     await updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, leadId);
 
     expect(project.fabricationAssistantIds).toEqual([ana]);
-    expect(project.save).toHaveBeenCalledOnce();
+    // Saved only if the lead and the assistants are still the ones read (no lost update).
+    expect(mocks.projectFindOneAndUpdate).toHaveBeenCalledOnce();
+    expect(mocks.projectFindOneAndUpdate.mock.calls[0]![0]).toEqual({
+      _id: 'project-1', fabricationLeadId: project.fabricationLeadId, fabricationAssistantIds: [ben],
+    });
     expect(scheduling.acquireStaffLock).toHaveBeenCalledTimes(1);
     expect(scheduling.assertFabricatorsFree).toHaveBeenCalledWith('project-1', [ana]);
     expect(mocks.auditCreate.mock.calls[0]![0]).toMatchObject({ actorId: leadId, details: { change: 'assistants', added: [ana], removed: [ben] } });
@@ -1149,7 +1199,17 @@ describe('updateFabricationAssistants (the lead picks assistants)', () => {
     project.status = ProjectStatus.COMPLETED;
     await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana] }, leadId))
       .rejects.toThrow('waiting for payment or in fabrication');
-    expect(project.save).not.toHaveBeenCalled();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stale assistants list or a team changed at the same time with 409, saving nothing", async () => {
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana], expectedAssistantIds: [] }, leadId))
+      .rejects.toMatchObject({ statusCode: 409 });
+    mocks.projectFindOneAndUpdate.mockResolvedValue(null);
+    await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ana], expectedAssistantIds: [ben] }, leadId))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(project.fabricationAssistantIds).toEqual([ben]);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
   });
 
   it('rejects the lead as an assistant, unknown staff, and anyone still on another workshop project', async () => {
@@ -1162,7 +1222,7 @@ describe('updateFabricationAssistants (the lead picks assistants)', () => {
     scheduling.assertFabricatorsFree.mockRejectedValueOnce(new Error('Ana Reyes is still on PRJ-2026-00051 (Lead)'));
     await expect(updateFabricationAssistants('project-1', { fabricationAssistantIds: [ben, ana] }, leadId))
       .rejects.toThrow('still on PRJ-2026-00051');
-    expect(project.save).not.toHaveBeenCalled();
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
   });
 });
 

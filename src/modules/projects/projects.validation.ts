@@ -124,14 +124,25 @@ export const reassignProjectSalesSchema = z.object({
   reason: z.string().max(500).trim().optional(),
 });
 
+const staffId = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID');
+
 export const assignFabricationSchema = z.object({
   fabricationLeadId: z.string().min(1),
   fabricationAssistantIds: z.array(z.string().min(1)).default([]),
+  /**
+   * The team the form showed (lead null = none yet). A save over a team that changed meanwhile,
+   * e.g. the system's auto-assign, is refused with 409 instead of replacing it (no double assign).
+   * Left out by older web builds.
+   */
+  expectedLeadId: staffId.nullable().optional(),
+  expectedAssistantIds: z.array(staffId).max(20).optional(),
 });
 
 /** The lead fabricator's own assistants (the full list: checking adds, unchecking removes). */
 export const updateFabricationAssistantsSchema = z.object({
-  fabricationAssistantIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, 'Invalid staff ID')).max(10, 'Choose up to 10 assistants').default([]),
+  fabricationAssistantIds: z.array(staffId).max(10, 'Choose up to 10 assistants').default([]),
+  /** The assistants the lead's form showed; a change made meanwhile is never overwritten. */
+  expectedAssistantIds: z.array(staffId).max(20).optional(),
 });
 
 export const assignDeliveryCrewSchema = z.object({
