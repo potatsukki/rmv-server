@@ -90,6 +90,8 @@ vi.mock('./fabrication-scheduling.js', async (importActual) => ({
   isDeliveryDateUnlocked: scheduling.isDeliveryDateUnlocked,
 }));
 vi.mock('../maps/maps.service.js', () => ({ computeRoute: scheduling.computeRoute }));
+const autoAssignTrigger = vi.hoisted(() => vi.fn());
+vi.mock('./fabrication-auto-assign-trigger.js', () => ({ triggerFabricationAutoAssign: autoAssignTrigger }));
 
 import { assignDeliveryCrew, assignEngineers, assignFabricationStaff, autoAssignFabricationLead, autoSendOcularProjectForReview, confirmInstallation, createProject, finalizeOcularProject, listFabricationStaffWorkload, markOcularDone, scheduleProjectOcular, selectPaymentPlan, transitionProject, updateFabricationAssistants, uploadSignedContract, updateProject } from './projects.service.js';
 import { verifyFileExists } from '../uploads/upload.service.js';
@@ -1044,6 +1046,75 @@ describe('assignFabricationStaff', () => {
     });
   });
 
+  // Notifications per role 2026-11-28: a person's Save Team tells everyone whose place changed.
+  describe('Save Team notices', () => {
+    const kept = assistantIds[0]!;
+    const joining = '999999999999999999999999';
+    const names: Record<string, { firstName: string; lastName: string }> = {
+      [actorId]: { firstName: 'Elon', lastName: 'Must' },
+      [leadId]: { firstName: 'Lance', lastName: 'Zelot' },
+      [kept]: { firstName: 'Ana', lastName: 'Cruz' },
+      [joining]: { firstName: 'Ben', lastName: 'Reyes' },
+    };
+    const noticesTitled = (title: string) => vi.mocked(notifyUsers).mock.calls.filter((call) => call[2] === title);
+    const inWorkshop = (assistants: string[]) => ({
+      _id: 'project-1', customerId: 'customer-1', title: 'Railings', status: ProjectStatus.FABRICATION,
+      fabricationLeadId: leadId, fabricationAssistantIds: assistants,
+    });
+
+    beforeEach(() => {
+      mocks.userFindOne.mockImplementation(async (filter: { _id: string }) => ({ _id: filter._id, ...names[filter._id] }));
+    });
+
+    it('same lead: the new assistant, the removed one and the lead (Team Updated) hear it, after which the auto-assign runs', async () => {
+      const project = inWorkshop([kept]);
+      mocks.projectFindById.mockResolvedValue(project);
+      mocks.projectFindOneAndUpdate.mockResolvedValue({ ...project, fabricationAssistantIds: [joining] });
+      mocks.userFind.mockResolvedValue([{ _id: joining }]);
+
+      await assignFabricationStaff('project-1', {
+        fabricationLeadId: leadId, fabricationAssistantIds: [joining], expectedLeadId: leadId, expectedAssistantIds: [kept],
+      }, actorId);
+
+      const excludeActor = { excludeUserId: actorId };
+      expect(noticesTitled('Fabrication Assignment')).toEqual([[
+        [joining], 'fabrication', 'Fabrication Assignment',
+        expect.stringMatching(/^Elon Must added you as an assistant for project "Railings" \(lead: Lance Zelot\)\./),
+        '/projects/project-1', excludeActor,
+      ]]);
+      expect(noticesTitled('Fabrication Assignment Changed')).toEqual([[
+        [kept], 'fabrication', 'Fabrication Assignment Changed',
+        'Elon Must removed you from the fabrication team of project "Railings".', '/projects/project-1', excludeActor,
+      ]]);
+      expect(noticesTitled('Fabrication Team Updated')).toEqual([[
+        [leadId], 'fabrication', 'Fabrication Team Updated',
+        'Elon Must updated the assistants of "Railings" (1 assistant).', '/projects/project-1', excludeActor,
+      ]]);
+      // The lead who stays is not told "You have been assigned as lead" again.
+      expect(createAndSendNotification).not.toHaveBeenCalledWith(leadId, expect.anything(), 'Fabrication Assignment', expect.anything(), expect.anything());
+      // Realtime: Kept may take a waiting project now; run after the locks.
+      expect(autoAssignTrigger).toHaveBeenCalledExactlyOnceWith('team_saved');
+      expect(autoAssignTrigger.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.projectFindOneAndUpdate.mock.invocationCallOrder[0]!);
+    });
+
+    it('new lead: the new lead is assigned, the old lead is told he was removed, nobody gets Team Updated', async () => {
+      const project = inWorkshop([]);
+      mocks.projectFindById.mockResolvedValue(project);
+      mocks.projectFindOneAndUpdate.mockResolvedValue({ ...project, fabricationLeadId: joining });
+      mocks.userFind.mockResolvedValue([]);
+
+      await assignFabricationStaff('project-1', {
+        fabricationLeadId: joining, fabricationAssistantIds: [], expectedLeadId: leadId, expectedAssistantIds: [],
+      }, actorId);
+
+      expect(createAndSendNotification).toHaveBeenCalledWith(
+        joining, 'fabrication', 'Fabrication Assignment', expect.stringContaining('You have been assigned as lead for project "Railings".'), '/projects/project-1',
+      );
+      expect(noticesTitled('Fabrication Assignment Changed').map((call) => call[0])).toEqual([[leadId]]);
+      expect(noticesTitled('Fabrication Team Updated')).toEqual([]);
+    });
+  });
+
   it('assigns nothing twice: the same team again is a no-op, a stale form or a team changed meanwhile is a 409', async () => {
     const project = { _id: 'project-1', status: ProjectStatus.FABRICATION, fabricationLeadId: leadId, fabricationAssistantIds: [], fabricationAutoAssignedAt: new Date() };
     mocks.projectFindById.mockResolvedValue(project);
@@ -1358,12 +1429,15 @@ describe('scheduleProjectOcular', () => {
       .rejects.toThrow('already scheduled');
   });
 
-  it('does not notify the sales staff member who schedules their own visit', async () => {
+  // 2026-11-28: the user chose to notify the sales staff member even for their own visit, so it
+  // shows under their Assigned filter (an exception to "never notify the actor").
+  it('notifies the sales staff member who schedules their own visit, once', async () => {
     await scheduleProjectOcular('project-1', visit, actorId, [Role.SALES_STAFF]);
     expect(mocks.prepareOcularSchedule).toHaveBeenCalledWith(expect.objectContaining({ salesStaffId: actorId }));
-    expect(createAndSendNotification).not.toHaveBeenCalledWith(
-      actorId, expect.anything(), 'Ocular Visit Assigned', expect.anything(), expect.anything(),
-    );
+    const ocularNotices = vi.mocked(createAndSendNotification).mock.calls.filter((call) => call[2] === 'Ocular Visit Assigned');
+    expect(ocularNotices).toEqual([
+      [actorId, 'appointment', 'Ocular Visit Assigned', expect.stringContaining('Gate project'), '/appointments/ocular-appointment-1'],
+    ]);
   });
 
   it('hands only the ocular visit to another sales staff member; the project keeps its own staff', async () => {
@@ -1390,9 +1464,43 @@ describe('scheduleProjectOcular', () => {
       action: AuditAction.PROJECT_UPDATED,
       details: expect.objectContaining({ action: 'ocular_scheduled', ocularStaffId: otherStaffId, ocularDelegated: true }),
     }));
-    expect(createAndSendNotification).toHaveBeenCalledWith(
-      otherStaffId, expect.anything(), 'Ocular Visit Assigned', expect.stringContaining('Gate project'), '/appointments/ocular-appointment-1',
-    );
+    const ocularNotices = vi.mocked(createAndSendNotification).mock.calls.filter((call) => call[2] === 'Ocular Visit Assigned');
+    expect(ocularNotices).toEqual([
+      [otherStaffId, expect.anything(), 'Ocular Visit Assigned', expect.stringContaining('Gate project'), '/appointments/ocular-appointment-1'],
+    ]);
+  });
+});
+
+// Notifications per role 2026-11-28: engineers hear only their own change (Assigned).
+describe('assignEngineers notices', () => {
+  const kept = 'eeeeeeeeeeeeeeeeeeeeeeee';
+  const joining = 'ffffffffffffffffffffffff';
+  const removed = 'dddddddddddddddddddddddd';
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.projectFindById.mockResolvedValue({
+      _id: 'project-1', title: 'Railings', status: ProjectStatus.BLUEPRINT, contractStatus: ContractStatus.UPLOADED,
+      engineerIds: [kept, removed, actorId], save: vi.fn(),
+    });
+    mocks.userFind.mockResolvedValue([{ _id: kept }, { _id: joining }]);
+    // The project's items as returned (none here).
+    mocks.reportFind.mockReturnValue({ sort: vi.fn().mockResolvedValue([]) });
+    const items: any = { populate: () => items, sort: () => items, lean: async () => [] };
+    items.then = (resolve: (value: unknown[]) => unknown) => Promise.resolve([]).then(resolve);
+    mocks.projectItemFind.mockReturnValue(items);
+    mocks.auditCreate.mockResolvedValue({});
+  });
+
+  it('assigns only the new engineer; the removed one is told, the actor never', async () => {
+    await assignEngineers('project-1', { engineerIds: [kept, joining] }, actorId);
+
+    const assigned = vi.mocked(createAndSendNotification).mock.calls.filter((call) => call[2] === 'Project Assigned');
+    expect(assigned.map((call) => call[0])).toEqual([joining]);
+    expect(vi.mocked(notifyUsers).mock.calls.filter((call) => call[2] === 'Project Assignment Changed')).toEqual([[
+      [removed, actorId], 'system', 'Project Assignment Changed',
+      'You are no longer assigned to project "Railings".', '/projects/project-1', { excludeUserId: actorId },
+    ]]);
   });
 });
 
@@ -1453,6 +1561,19 @@ describe('assignDeliveryCrew', () => {
     expect(notified).toEqual([crewIds[1], 'lead-1']);
     // An unchanged (possibly past) date is not re-checked.
     expect(scheduling.assertDeliveryDateAllowed).not.toHaveBeenCalled();
+  });
+
+  it('tells a person taken off the crew (Assigned), never the actor', async () => {
+    const removed = 'dddddddddddddddddddddddd';
+    project.deliveryCrewIds = [{ toString: () => crewIds[0] }, { toString: () => removed }];
+    project.deliverySchedule = { date: '2026-11-25' };
+    usersFound(1);
+    await assignDeliveryCrew('project-1', { deliveryCrewIds: [crewIds[0]!], deliveryDate: '2026-11-25' }, actorId, [Role.ENGINEER]);
+
+    expect(vi.mocked(notifyUsers).mock.calls.filter((call) => call[2] === 'Installation Assignment Changed')).toEqual([[
+      [removed], 'fabrication', 'Installation Assignment Changed',
+      'You were removed from the installation crew for project "Gate project".', '/projects/project-1', { excludeUserId: actorId },
+    ]]);
   });
 
   it('asks the customer to confirm again when the date changes', async () => {

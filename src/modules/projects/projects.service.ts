@@ -74,6 +74,7 @@ import {
   deliveryDateUnlockStage, fabricationTrackProgress, isDeliveryDateUnlocked, lockFabricators, manilaToday, readableDay,
 } from './fabrication-scheduling.js';
 import { emitFabricationTeamChanged } from './fabrication-realtime.js';
+import { triggerFabricationAutoAssign } from './fabrication-auto-assign-trigger.js';
 
 // Stages the Payments page lists even when nothing is due right now (billing history included).
 const PAYMENT_VIEW_STAGES = new Set<ProjectWorkflowStage>(['billing', 'fabrication', 'completed']);
@@ -736,6 +737,16 @@ async function attachOcularAppointmentToProject({
     `/appointments/${ocularAppointment._id}`,
   );
 
+  // The sales staff taking the visit always hears it, even when they scheduled it themselves
+  // (2026-11-28): it shows under Assigned in their notifications.
+  await createAndSendNotification(
+    salesStaffId,
+    NotificationCategory.APPOINTMENT,
+    'Ocular Visit Assigned',
+    `You will take the ocular visit for "${project.title}" (${project.projectNumber}) on ${formatNotificationDate(ocularVisit.date, ocularVisit.slotCode)}.`,
+    `/appointments/${ocularAppointment._id}`,
+  );
+
   return ocularAppointment;
 }
 
@@ -1203,16 +1214,7 @@ async function scheduleProjectOcularLocked(
   // ocular fee when one is due. The customer is told by attachOcularAppointmentToProject.
   const when = formatNotificationDate(input.date, input.slotCode);
   const link = `/appointments/${project.ocularAppointmentId}`;
-  // Whoever takes the visit is told, unless they scheduled it themselves.
-  if (salesStaffId !== actorId) {
-    await createAndSendNotification(
-      salesStaffId,
-      NotificationCategory.APPOINTMENT,
-      'Ocular Visit Assigned',
-      `You will take the ocular visit for "${project.title}" (${project.projectNumber}) on ${when}.`,
-      link,
-    );
-  }
+  // Whoever takes the visit was told by attachOcularAppointmentToProject ("Ocular Visit Assigned").
   if (sourceAppointment) {
     await notifyBookingAgents(
       sourceAppointment,
@@ -1453,6 +1455,7 @@ export async function assignEngineers(
     throw AppError.badRequest('One or more engineer IDs are invalid');
   }
 
+  const previousEngineerIds = (project.engineerIds || []).map(String);
   project.engineerIds = input.engineerIds as unknown as Types.ObjectId[];
 
   // Auto-transition to BLUEPRINT if project is in SUBMITTED status
@@ -1480,16 +1483,28 @@ export async function assignEngineers(
     userAgent: ua,
   });
 
-  // Notify engineers
+  // Notify engineers (2026-11-28): only the ones newly on the project, and anyone taken off it
+  // (never the person who made the change). These show under Assigned.
+  const link = `/projects/${project._id}`;
   for (const eng of engineers) {
+    if (previousEngineerIds.includes(String(eng._id))) continue;
     await createAndSendNotification(
       eng._id,
       NotificationCategory.SYSTEM,
       'Project Assigned',
       `You have been assigned to project "${project.title}".`,
-      `/projects/${project._id}`,
+      link,
     );
   }
+  const nextEngineerIds = input.engineerIds.map(String);
+  await notifyUsers(
+    previousEngineerIds.filter((id) => !nextEngineerIds.includes(id)),
+    NotificationCategory.SYSTEM,
+    'Project Assignment Changed',
+    `You are no longer assigned to project "${project.title}".`,
+    link,
+    { excludeUserId: actorId },
+  );
 
   return attachProjectItems(project);
 }
@@ -2235,7 +2250,10 @@ export async function assignFabricationStaff(
   ip?: string,
   ua?: string,
 ) {
-  return withSalesDayLocks((locks) => assignFabricationStaffLocked(projectId, input, actorId, locks, ip, ua));
+  const project = await withSalesDayLocks((locks) => assignFabricationStaffLocked(projectId, input, actorId, locks, ip, ua));
+  // Realtime: anyone taken off the team may take a waiting paid project right away (after the locks).
+  await triggerFabricationAutoAssign('team_saved');
+  return project;
 }
 
 async function assignFabricationStaffLocked(
@@ -2302,9 +2320,18 @@ async function assignFabricationStaffLocked(
     actorId,
     leadId,
     assistantIds,
+    previousLeadId: current.leadId,
+    previousAssistantIds: current.assistantIds,
     ip,
     ua,
   });
+}
+
+/** "First Last" of a user, or the fallback when there is no such account. */
+async function userDisplayName(userId: string | undefined, fallback: string) {
+  if (!userId) return fallback;
+  const user = await User.findOne({ _id: userId }, 'firstName lastName');
+  return `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || fallback;
 }
 
 /** The team as stored: lead, assistants and everyone on it. */
@@ -2392,6 +2419,9 @@ async function finishFabricationTeamAssignment(
     actorId?: string;
     leadId: string;
     assistantIds: string[];
+    /** The team before this save (a person's Save Team); none for a waiting project. */
+    previousLeadId?: string | null;
+    previousAssistantIds?: string[];
     automatic?: FabricationAutoAssignReason & { leadName: string };
     ip?: string;
     ua?: string;
@@ -2442,18 +2472,64 @@ async function finishFabricationTeamAssignment(
     ? 'Fabrication updates are now available.'
     : 'Fabrication updates will unlock after the required customer downpayment or full payment is verified.';
 
-  // Notify fabrication staff
-  await createAndSendNotification(
-    options.leadId,
-    NotificationCategory.FABRICATION,
-    automatic ? 'Auto-assigned as Lead' : 'Fabrication Assignment',
-    automatic
-      ? automatic.kind === 'nearest_completion'
-        ? `You were assigned automatically as lead for ${projectLabel}, because ${autoAssignReasonText(automatic)}. Finish that project as usual, then start this one. Add your assistants in the project. ${updatesText}`
-        : `You were assigned automatically as lead for ${projectLabel}. Add your assistants in the project. ${updatesText}`
-      : `You have been assigned as lead for project "${project.title}". ${updatesText}`,
-    link,
-  );
+  // Notify fabrication staff. A lead who stays on the team is not "assigned" again.
+  const previousLeadId = options.previousLeadId ?? null;
+  const previousAssistantIds = options.previousAssistantIds ?? [];
+  const leadChanged = previousLeadId !== options.leadId;
+  if (leadChanged) {
+    await createAndSendNotification(
+      options.leadId,
+      NotificationCategory.FABRICATION,
+      automatic ? 'Auto-assigned as Lead' : 'Fabrication Assignment',
+      automatic
+        ? automatic.kind === 'nearest_completion'
+          ? `You were assigned automatically as lead for ${projectLabel}, because ${autoAssignReasonText(automatic)}. Finish that project as usual, then start this one. Add your assistants in the project. ${updatesText}`
+          : `You were assigned automatically as lead for ${projectLabel}. Add your assistants in the project. ${updatesText}`
+        : `You have been assigned as lead for project "${project.title}". ${updatesText}`,
+      link,
+    );
+  }
+
+  // A person's Save Team (2026-11-28): new assistants and everyone taken off the team hear it too
+  // (Assigned), and a lead who stays is told about the assistants instead. Never the actor.
+  if (!automatic) {
+    const addedAssistantIds = options.assistantIds.filter((id) => !previousAssistantIds.includes(id));
+    const team = new Set([options.leadId, ...options.assistantIds]);
+    const removedIds = [previousLeadId, ...previousAssistantIds]
+      .filter((id): id is string => Boolean(id) && !team.has(id as string));
+    if (addedAssistantIds.length || removedIds.length || !leadChanged) {
+      const actorName = await userDisplayName(options.actorId, 'The engineer');
+      const leadName = await userDisplayName(options.leadId, 'the lead fabricator');
+      const notifyOptions = { excludeUserId: options.actorId };
+      await notifyUsers(
+        addedAssistantIds,
+        NotificationCategory.FABRICATION,
+        'Fabrication Assignment',
+        `${actorName} added you as an assistant for project "${project.title}" (lead: ${leadName}). ${updatesText}`,
+        link,
+        notifyOptions,
+      );
+      await notifyUsers(
+        removedIds,
+        NotificationCategory.FABRICATION,
+        'Fabrication Assignment Changed',
+        `${actorName} removed you from the fabrication team of project "${project.title}".`,
+        link,
+        notifyOptions,
+      );
+      if (!leadChanged) {
+        const count = options.assistantIds.length;
+        await notifyUsers(
+          [options.leadId],
+          NotificationCategory.FABRICATION,
+          'Fabrication Team Updated',
+          `${actorName} updated the assistants of "${project.title}" (${count} assistant${count === 1 ? '' : 's'}).`,
+          link,
+          notifyOptions,
+        );
+      }
+    }
+  }
 
   if (automatic) {
     await notifyUsers(
@@ -2530,7 +2606,21 @@ export async function updateFabricationAssistants(
   ip?: string,
   ua?: string,
 ) {
-  return withSalesDayLocks(async (locks) => {
+  const project = await withSalesDayLocks((locks) => updateFabricationAssistantsLocked(projectId, input, actorId, locks, ip, ua));
+  // Realtime: an assistant taken off may take a waiting paid project right away (after the locks).
+  await triggerFabricationAutoAssign('assistants_saved');
+  return project;
+}
+
+async function updateFabricationAssistantsLocked(
+  projectId: string,
+  input: UpdateFabricationAssistantsInput,
+  actorId: string,
+  locks: SalesDayLocks,
+  ip?: string,
+  ua?: string,
+) {
+  {
     const project = await Project.findById(projectId);
     if (!project) throw AppError.notFound('Project not found');
     if (!project.fabricationLeadId || String(project.fabricationLeadId) !== actorId) {
@@ -2610,7 +2700,7 @@ export async function updateFabricationAssistants(
 
     emitFabricationTeamChanged(project);
     return project;
-  });
+  }
 }
 
 // ── Fabrication staff workload (shown while the engineer picks a team or a delivery crew) ──
@@ -2869,6 +2959,15 @@ async function assignDeliveryCrewLocked(
       link,
     );
   }
+  // Taken off the crew (2026-11-28): they hear it too (Assigned).
+  await notifyUsers(
+    previousCrewIds.filter((id) => !crewIds.includes(id)),
+    NotificationCategory.FABRICATION,
+    'Installation Assignment Changed',
+    `You were removed from the installation crew for project "${project.title}".`,
+    link,
+    { excludeUserId: actorId },
+  );
   const leadId = project.fabricationLeadId.toString();
   if (leadId !== actorId && !addedCrewIds.includes(leadId)) {
     await createAndSendNotification(
@@ -2960,6 +3059,11 @@ export async function transitionProject(
       `Your project "${project.title}" ${statusMessages[input.status]}`,
       `/projects/${project._id}`,
     );
+  }
+
+  // Realtime: a project leaving the workshop (e.g. Cancelled) frees its team for a waiting project.
+  if (ACTIVE_FABRICATION_STATUSES.includes(oldStatus) && !ACTIVE_FABRICATION_STATUSES.includes(input.status)) {
+    await triggerFabricationAutoAssign('project_left_workshop');
   }
 
   return project;

@@ -17,7 +17,11 @@ import { r2Client } from '../../config/r2.js';
 import { generateDownloadUrl } from '../uploads/upload.service.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
-import { enterPaymentPending, handleInitialFabricationPaymentVerified } from '../projects/fabrication-start.js';
+import {
+  enterPaymentPending,
+  handleInitialFabricationPaymentVerified,
+  notifyFabricationTeamPaymentVerified,
+} from '../projects/fabrication-start.js';
 import { recordCashPaymentSchema } from './payments.validation.js';
 import type {
   CreatePaymentPlanInput,
@@ -380,6 +384,8 @@ export async function verifyPayment(
   });
 
   await handleInitialFabricationPaymentVerified(project._id, plan);
+  // Realtime: the fabrication team hears before any email is sent.
+  await notifyFabricationTeamPaymentVerified(project._id, plan, stage.stageId);
 
   // Notify customer
   if (customer) {
@@ -1298,6 +1304,8 @@ export async function recordCashPayment(
   });
 
   await handleInitialFabricationPaymentVerified(project._id, plan);
+  // Realtime: the fabrication team hears before any email is sent.
+  await notifyFabricationTeamPaymentVerified(project._id, plan, stage.stageId);
 
   // Notify customer
   await createAndSendNotification(
